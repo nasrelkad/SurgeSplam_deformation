@@ -4,7 +4,7 @@ experiments/
 __pycache__/
 wandb/
 vis_tmp/
-
+models/
 *.png
 *.zip
 *.avi

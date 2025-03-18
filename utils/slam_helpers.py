@@ -127,9 +127,14 @@ def transformed_params2rendervar(params, transformed_pts):
     if params['log_scales'].shape[1] == 1:
         rendervar['colors_precomp'] = params['rgb_colors']
         rendervar['scales'] = torch.exp(torch.tile(params['log_scales'], (1, 3)))
+        print('using uniform scales')
     else:
-        rendervar['shs'] = torch.cat((params['rgb_colors'].reshape(params['rgb_colors'].shape[0], 3, -1).transpose(1, 2), params['feature_rest'].reshape(params['rgb_colors'].shape[0], 3, -1).transpose(1, 2)), dim=1)
-        rendervar['scales'] = torch.exp(params['log_scales'])
+        try: 
+            rendervar['shs'] = torch.cat((params['rgb_colors'].reshape(params['rgb_colors'].shape[0], 3, -1).transpose(1, 2), params['feature_rest'].reshape(params['rgb_colors'].shape[0], 3, -1).transpose(1, 2)), dim=1)
+            rendervar['scales'] = torch.exp(params['log_scales'])
+        except: 
+            rendervar['colors_precomp'] = params['rgb_colors']
+            rendervar['scales'] = torch.exp(params['log_scales'])
     return rendervar
 
 
