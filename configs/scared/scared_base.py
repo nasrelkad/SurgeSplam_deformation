@@ -55,7 +55,7 @@ config = dict(
         forward_prop=True, # Forward Propagate Poses
         num_iters=tracking_iters,
         use_sil_for_loss=True,
-        sil_thres=0.99,
+        sil_thres=0.5,
         use_l1=True,
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
@@ -128,4 +128,11 @@ config = dict(
         enter_interactive_post_online=True, # Enter Interactive Mode after Online Recon Viz
         gaussian_simplification=False,
     ),
+    depth = dict(
+        use_gt_depth = False,
+        model_path = '/media/thesis_ssd/code/EndoGSLAM/EndoGSLAM/models/SurgeDepth/SurgeDepthStudent_V5.pth',
+        model_size = 'vitb',
+        normalization_means = [0.46888983, 0.29536288, 0.28712815], 
+        normalization_stds = [0.24689102 ,0.21034359, 0.21188641]
+    )
 )

@@ -38,8 +38,11 @@ from utils.vis_utils import plot_video
 from utils.time_helper import Timer
 
 from models.SurgeDepth.dpt import SurgeDepth
+import torchvision
 
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
+
+import matplotlib.pyplot as plt
 
 
 
@@ -156,7 +159,7 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification
     cam_rots = np.tile(cam_rots[:, :, None], (1, 1, num_frames))
     params['cam_unnorm_rots'] = cam_rots
     params['cam_trans'] = np.zeros((1, 3, num_frames))
-    params = initialize_deformations(params,10) ## TODO: add nr_basis to config
+    # params = initialize_deformations(params,10) ## TODO: add nr_basis to config
     for k, v in params.items():
         # Check if value is already a torch tensor
         if not isinstance(v, torch.Tensor):
@@ -224,11 +227,31 @@ def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio, mea
         return params, variables, intrinsics, w2c, cam, densify_intrinsics, densify_cam
     else:
         return params, variables, intrinsics, w2c, cam
+    
+def align_shift_and_scale(gt_disp, pred_disp,mask):
+    ssum = torch.sum(mask, (1, 2))
+    valid = ssum > 0
 
+    
+    t_gt = torch.median((gt_disp[valid]*mask[valid]).view(valid.sum(),-1),dim = 1).values
+    # print(t_gt)
+    # print(gt_disp[valid].view(valid.sum(),-1).shape,t_gt.shape)
+
+    s_gt = torch.mean(torch.abs(gt_disp[valid].view(valid.sum(),-1)- t_gt[:,None]),1)
+    t_pred = torch.median((pred_disp[valid]*mask[valid]).view(valid.sum(),-1),dim = 1).values
+    s_pred = torch.mean(torch.abs(pred_disp[valid].view(valid.sum(),-1)- t_pred[:,None]),1)
+    # print(pred_disp.view(gt_disp.shape[0],-1).shape,t_pred.shape,s_pred.shape)
+    pred_disp_aligned = (pred_disp.view(pred_disp.shape[0],-1)- t_pred[:,None])/s_pred[:,None]
+    pred_disp_aligned = pred_disp_aligned.view(pred_disp.shape[0],pred_disp.shape[1],pred_disp.shape[2])
+
+
+    gt_disp_aligned = (gt_disp.view(gt_disp.shape[0],-1)- t_gt[:,None])/s_gt[:,None]
+    gt_disp_aligned = gt_disp_aligned.view(gt_disp.shape[0],gt_disp.shape[1],gt_disp.shape[2])
+    return  gt_disp_aligned, pred_disp_aligned,t_gt, s_gt, t_pred, s_pred
 
 def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_for_loss, 
              sil_thres, use_l1,ignore_outlier_depth_loss, tracking=False, 
-             mapping=False, do_ba=False, plot_dir=None, visualize_tracking_loss=False, tracking_iteration=None):
+             mapping=False, do_ba=False, plot_dir=None, visualize_tracking_loss=False, tracking_iteration=None,use_gt_depth = True):
     global w2cs, w2ci
     # Initialize Loss Dictionary
     losses = {}
@@ -288,15 +311,20 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     else:
         mask = (curr_data['depth'] > 0)
     mask = mask & nan_mask & bg_mask
+
     # Mask with presence silhouette mask (accounts for empty space)
     if tracking and use_sil_for_loss:
         mask = mask & presence_sil_mask
-
+    if not use_gt_depth:
+        rendered_depth_aligned,predicted_depth_aligned,_,_,_,_ = align_shift_and_scale(depth,curr_data['depth'],mask)
     # Depth loss
     if use_l1:
         mask = mask.detach()
-        if tracking:
+        if tracking and use_gt_depth:
             losses['depth'] = torch.abs(curr_data['depth'] - depth)[mask].sum()
+        elif tracking and not use_gt_depth:
+            losses['depth']= torch.abs(rendered_depth_aligned - predicted_depth_aligned)[mask].sum()
+            # print(f'using aligned losses, rendered range [{rendered_depth_aligned.min()}-{rendered_depth_aligned.max()}], predicted [{predicted_depth_aligned.min()}-{predicted_depth_aligned.max()}]')
         else:
             losses['depth'] = torch.abs(curr_data['depth'] - depth)[mask].mean()
     # RGB Loss
@@ -333,7 +361,7 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification):
         'log_scales': torch.tile(torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 1 if use_simplification else 3)),
     }
     # print(f'num pts {num_pts}')
-    params = initialize_deformations(params,10)
+    # params = initialize_deformations(params,10)
     if not use_simplification:
         params['feature_rest'] = torch.zeros(num_pts, 45) # set SH degree 3 fixed
     for k, v in params.items():
@@ -638,9 +666,20 @@ def rgbd_slam(config: dict):
         checkpoint_time_idx = 0
     
     # timer.lap("all the config")
-    
+    if not config['depth']['use_gt_depth']:
+        model_configs = {
+            'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
+            'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
+            'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
+            'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
+        }
+        model = SurgeDepth(**model_configs[config['depth']['model_size']]).cuda()
+        model.load_state_dict(torch.load(config['depth']['model_path']))
+        for param in model.parameters():
+            param.requires_grad = False
+        # model = SurgeDepth()
     # Iterate over Scan
-    for time_idx in tqdm(range(checkpoint_time_idx, num_frames)):
+    for time_idx in tqdm(range(checkpoint_time_idx, 20)): ################## DONT BE AN IDIOT AN LEAVE THE 20 IN, SHOULD GO TO num_frames ######
         
         # timer.lap("iterating over frame "+str(time_idx), 0)
         
@@ -649,10 +688,12 @@ def rgbd_slam(config: dict):
         color, gt_depth, _, gt_pose = dataset[time_idx]
 
         # Predict depth using SurgeDepth
-        if not use_gt_depth:
-            pred_disp = model(depth)
-            pred_disp_aligned = align_shift_and_scale()
-            depth = 1/pred_disp_aligned
+        if not config['depth']['use_gt_depth']:
+            color_input = color.permute(2,0,1).unsqueeze(0).cuda() # Change from WxHxC to BxCxWxH for inference
+            color_input = torchvision.transforms.functional.normalize(color_input,config['depth']['normalization_means'],config['depth']['normalization_stds']) # Applying normalization
+            pred_disp = model(color_input)
+            depth = 1/pred_disp # Convert disp to depth
+            depth = depth.permute(1,2,0) # CxWxH --> WxHxC to align with rest of the pipeline
         else:
             depth = gt_depth
 
@@ -709,7 +750,7 @@ def rgbd_slam(config: dict):
                                                    config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
                                                    plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
-                                                   tracking_iteration=iter)
+                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'])
                 # Backprop
                 loss.backward()
                 # Optimizer Update
@@ -762,7 +803,17 @@ def rgbd_slam(config: dict):
         tracking_frame_time_sum += tracking_end_time - tracking_start_time
         tracking_frame_time_count += 1
 
-        # timer.lap("tracking done", 2)
+        if not config['depth']['use_gt_depth']: # If we don't use gt depths, we still have to align predicted and rendered depth in scale
+            invariant_depth = curr_data['depth']
+            transformed_pts = transform_to_frame(params, time_idx, gaussians_grad=False, camera_grad=False)
+            rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
+                                                                 transformed_pts)
+            rendered_depth,_,_ = Renderer(raster_settings=curr_data['cam'])(**rendervar)
+            mask = rendered_depth[1,:,:] > config['tracking']['sil_thres']
+            # plt.imshow(mask.cpu().detach())
+            # plt.show()
+            _,_,t_render, s_render, t_invar, s_invar = align_shift_and_scale(rendered_depth[0,:,:].unsqueeze(0),invariant_depth,mask.unsqueeze(0))
+            curr_data['depth'] = ((invariant_depth-t_invar)/s_invar)*s_render + t_render
 
         # Densification & KeyFrame-based Mapping
         if time_idx == 0 or (time_idx+1) % config['map_every'] == 0:
@@ -963,10 +1014,10 @@ def rgbd_slam(config: dict):
         f.write(f"Frame Time: {tracking_frame_time_avg + mapping_frame_time_avg} s\n")
     
     # Evaluate Final Parameters
-    dataset = [dataset, eval_dataset, 'C3VD'] if dataset_config["train_or_test"] == 'train' else dataset
-    with torch.no_grad():
-        eval_save(dataset, params, eval_dir, sil_thres=config['mapping']['sil_thres'],
-                mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'])
+    # dataset = [dataset, eval_dataset, 'C3VD'] if dataset_config["train_or_test"] == 'train' else dataset
+    # with torch.no_grad():
+    #     eval_save(dataset, params, eval_dir, sil_thres=config['mapping']['sil_thres'],
+    #             mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'])
 
     # Add Camera Parameters to Save them
     params['timestep'] = variables['timestep']
