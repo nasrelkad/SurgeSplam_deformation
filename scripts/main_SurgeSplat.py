@@ -183,9 +183,9 @@ def initialize_optimizer(params, lrs_dict):
     return torch.optim.Adam(param_groups, lr=0.0, eps=1e-15)
 
 
-def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio, mean_sq_dist_method, densify_dataset=None, use_simplification=True):
+def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_radius_depth_ratio, mean_sq_dist_method, densify_dataset=None, use_simplification=True,use_gt_depth = True):
     # Get RGB-D Data & Camera Parameters
-    color, depth, intrinsics, pose = dataset[0]
+    # color, depth, intrinsics, pose = dataset[0]
 
     # Process RGB-D Data
     color = color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
@@ -290,7 +290,8 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     rendervar['means2D'].retain_grad()
     im, radius, _ = Renderer(raster_settings=curr_data['cam'])(**rendervar)
     variables['means2D'] = rendervar['means2D'] # Gradient only accum from colour render for densification
-
+    # plt.imshow(im.permute(1,2,0).cpu().detach())
+    # plt.show()
 
     # Depth & Silhouette Rendering
     depth_sil, _, _ = Renderer(raster_settings=curr_data['cam'])(**depth_sil_rendervar)
@@ -518,6 +519,20 @@ def rgbd_slam(config: dict):
             seperate_tracking_res = True
         else:
             seperate_tracking_res = False
+
+
+    if not config['depth']['use_gt_depth']:
+        model_configs = {
+            'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
+            'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
+            'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
+            'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
+        }
+        model = SurgeDepth(**model_configs[config['depth']['model_size']]).cuda()
+        model.load_state_dict(torch.load(config['depth']['model_path']))
+        for param in model.parameters():
+            param.requires_grad = False
+        # model = SurgeDepth()
     # Poses are relative to the first frame
     print(gradslam_data_cfg)
     dataset = get_dataset(
@@ -581,11 +596,39 @@ def rgbd_slam(config: dict):
                                                                         densify_dataset=densify_dataset, 
                                                                         use_simplification=config['gaussian_simplification'])                                                                                                                  
     else:
+        color, depth, intrinsics, pose = dataset[0]
         # Initialize Parameters & Canoncial Camera parameters
-        params, variables, intrinsics, first_frame_w2c, cam = initialize_first_timestep(dataset, num_frames, 
-                                                                                        config['scene_radius_depth_ratio'],
-                                                                                        config['mean_sq_dist_method'], 
-                                                                                        use_simplification=config['gaussian_simplification'])
+        plt.imshow(depth.squeeze().cpu().detach())
+        plt.title('gt depth')
+        plt.colorbar()
+        plt.show()
+        if not config['depth']['use_gt_depth']:
+            color_input = color.permute(2,0,1).unsqueeze(0).cuda()/255 # Change from WxHxC to BxCxWxH for inference
+            color_input = torchvision.transforms.functional.normalize(color_input,config['depth']['normalization_means'],config['depth']['normalization_stds']) # Applying normalization
+            t_pred = config['depth']['shift_pred']
+            s_pred = config['depth']['scale_pred']
+            t_gt =   config['depth']['shift_gt']
+            s_gt =   config['depth']['scale_gt']
+            pred_disp = ((model(color_input)-t_pred)/s_pred)*s_gt + t_gt
+            plt.imshow(pred_disp.squeeze().cpu().detach())
+            plt.title('predicted depth')
+            plt.colorbar()
+            plt.show()
+            print(pred_disp.min())
+            depth = 1/pred_disp # Convert disp to depth
+            depth = depth.permute(1,2,0) # CxWxH --> WxHxC to align with rest of the pipeline    
+            print(depth.min())
+
+        plt.imshow(depth.squeeze().cpu().detach())
+        plt.title('predicted depth')
+        plt.colorbar()
+        plt.show()
+        params, variables, intrinsics, first_frame_w2c, cam = initialize_first_timestep(color, depth, intrinsics, pose, 
+                                                                            num_frames, 
+                                                                            config['scene_radius_depth_ratio'],
+                                                                            config['mean_sq_dist_method'], 
+                                                                            use_simplification=config['gaussian_simplification'],
+                                                                            use_gt_depth = config['depth']['use_gt_depth'])        
     
     # Init seperate dataloader for tracking if required
     if seperate_tracking_res:
@@ -666,20 +709,9 @@ def rgbd_slam(config: dict):
         checkpoint_time_idx = 0
     
     # timer.lap("all the config")
-    if not config['depth']['use_gt_depth']:
-        model_configs = {
-            'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
-            'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
-            'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
-            'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
-        }
-        model = SurgeDepth(**model_configs[config['depth']['model_size']]).cuda()
-        model.load_state_dict(torch.load(config['depth']['model_path']))
-        for param in model.parameters():
-            param.requires_grad = False
-        # model = SurgeDepth()
+    added_new_gaussians = []
     # Iterate over Scan
-    for time_idx in tqdm(range(checkpoint_time_idx, 20)): ################## DONT BE AN IDIOT AN LEAVE THE 20 IN, SHOULD GO TO num_frames ######
+    for time_idx in tqdm(range(checkpoint_time_idx, num_frames)): 
         
         # timer.lap("iterating over frame "+str(time_idx), 0)
         
@@ -689,7 +721,7 @@ def rgbd_slam(config: dict):
 
         # Predict depth using SurgeDepth
         if not config['depth']['use_gt_depth']:
-            color_input = color.permute(2,0,1).unsqueeze(0).cuda() # Change from WxHxC to BxCxWxH for inference
+            color_input = color.permute(2,0,1).unsqueeze(0).cuda()/255 # Change from WxHxC to BxCxWxH for inference
             color_input = torchvision.transforms.functional.normalize(color_input,config['depth']['normalization_means'],config['depth']['normalization_stds']) # Applying normalization
             pred_disp = model(color_input)
             depth = 1/pred_disp # Convert disp to depth
@@ -709,6 +741,7 @@ def rgbd_slam(config: dict):
         # Initialize Mapping Data for selected frame
         curr_data = {'cam': cam, 'im': color, 'depth': depth, 'id': iter_time_idx, 'intrinsics': intrinsics, 
                      'w2c': first_frame_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
+
         
         # Initialize Data for Tracking
         if seperate_tracking_res:
@@ -802,6 +835,11 @@ def rgbd_slam(config: dict):
         tracking_end_time = time.time()
         tracking_frame_time_sum += tracking_end_time - tracking_start_time
         tracking_frame_time_count += 1
+        # plt.imshow(curr_data['depth'].permute(1,2,0).cpu().detach())
+        # plt.colorbar()
+        # plt.show()
+
+
 
         if not config['depth']['use_gt_depth']: # If we don't use gt depths, we still have to align predicted and rendered depth in scale
             invariant_depth = curr_data['depth']
@@ -810,10 +848,10 @@ def rgbd_slam(config: dict):
                                                                  transformed_pts)
             rendered_depth,_,_ = Renderer(raster_settings=curr_data['cam'])(**rendervar)
             mask = rendered_depth[1,:,:] > config['tracking']['sil_thres']
-            # plt.imshow(mask.cpu().detach())
-            # plt.show()
             _,_,t_render, s_render, t_invar, s_invar = align_shift_and_scale(rendered_depth[0,:,:].unsqueeze(0),invariant_depth,mask.unsqueeze(0))
             curr_data['depth'] = ((invariant_depth-t_invar)/s_invar)*s_render + t_render
+
+    
 
         # Densification & KeyFrame-based Mapping
         if time_idx == 0 or (time_idx+1) % config['map_every'] == 0:
@@ -839,7 +877,7 @@ def rgbd_slam(config: dict):
                                                       config['mean_sq_dist_method'], 
                                                       config['gaussian_simplification'])
                 post_num_pts = params['means3D'].shape[0]
-            
+                added_new_gaussians.append(post_num_pts)
             if not config['distance_keyframe_selection']:
                 with torch.no_grad():
                     # Get the current estimated rotation & translation
@@ -990,7 +1028,8 @@ def rgbd_slam(config: dict):
         torch.cuda.empty_cache()
 
     # timer.end()
-
+    plt.plot(added_new_gaussians)
+    plt.show()
     # Compute Average Runtimes
     if tracking_iter_time_count == 0:
         tracking_iter_time_count = 1
@@ -1014,10 +1053,10 @@ def rgbd_slam(config: dict):
         f.write(f"Frame Time: {tracking_frame_time_avg + mapping_frame_time_avg} s\n")
     
     # Evaluate Final Parameters
-    # dataset = [dataset, eval_dataset, 'C3VD'] if dataset_config["train_or_test"] == 'train' else dataset
-    # with torch.no_grad():
-    #     eval_save(dataset, params, eval_dir, sil_thres=config['mapping']['sil_thres'],
-    #             mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'])
+    dataset = [dataset, eval_dataset, 'C3VD'] if dataset_config["train_or_test"] == 'train' else dataset
+    with torch.no_grad():
+        eval_save(dataset, params, eval_dir, sil_thres=config['mapping']['sil_thres'],
+                mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'])
 
     # Add Camera Parameters to Save them
     params['timestep'] = variables['timestep']

@@ -105,10 +105,10 @@ config = dict(
         ),
         use_gaussian_splatting_densification=False, # Use Gaussian Splatting-based Densification during Mapping
         densify_dict=dict( # Needs to be updated based on the number of mapping iterations
-            start_after=500,
+            start_after=1,
             remove_big_after=3000,
             stop_after=5000,
-            densify_every=100,
+            densify_every=1,
             grad_thresh=0.0002,
             num_to_split_into=2,
             removal_opacity_threshold=0.005,
@@ -129,10 +129,14 @@ config = dict(
         gaussian_simplification=False,
     ),
     depth = dict(
-        use_gt_depth = False,
+        use_gt_depth = True,
         model_path = '/media/thesis_ssd/code/EndoGSLAM/EndoGSLAM/models/SurgeDepth/SurgeDepthStudent_V5.pth',
         model_size = 'vitb',
         normalization_means = [0.46888983, 0.29536288, 0.28712815], 
-        normalization_stds = [0.24689102 ,0.21034359, 0.21188641]
-    )
+        normalization_stds = [0.24689102 ,0.21034359, 0.21188641],
+        shift_pred = 0.9459649324417114   ,
+        scale_pred = 3.434535264968872 ,
+        shift_gt =   0.0021386505104601383   ,
+        scale_gt =   0.01995653659105301    ,
+    )   
 )
