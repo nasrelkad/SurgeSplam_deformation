@@ -5,6 +5,7 @@ __pycache__/
 wandb/
 vis_tmp/
 models/
+logs/
 *.png
 *.zip
 *.avi
