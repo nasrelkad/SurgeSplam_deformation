@@ -44,6 +44,8 @@ from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 
 import matplotlib.pyplot as plt
 
+from PIL import Image
+
 
 
 def get_dataset(config_dict, basedir, sequence, **kwargs):
@@ -251,7 +253,7 @@ def align_shift_and_scale(gt_disp, pred_disp,mask):
 
 def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_for_loss, 
              sil_thres, use_l1,ignore_outlier_depth_loss, tracking=False, 
-             mapping=False, do_ba=False, plot_dir=None, visualize_tracking_loss=False, tracking_iteration=None,use_gt_depth = True):
+             mapping=False, do_ba=False, plot_dir=None, visualize_tracking_loss=False, tracking_iteration=None,use_gt_depth = True,save_idx = None):
     global w2cs, w2ci
     # Initialize Loss Dictionary
     losses = {}
@@ -329,6 +331,11 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
         ax[1,2].imshow(mask.squeeze().cpu().detach())
         ax[1,2].set_title('Mask')
         plt.show()
+    if not save_idx == None:
+        ii = curr_data['id']
+        img = Image.fromarray((im.permute(1,2,0).cpu().detach().numpy()*255).astype(np.uint8))
+        os.makedirs(f'./scripts/plots/{ii}',exist_ok=True)
+        img.save(f'./scripts/plots/{ii}/{save_idx}.png')
 
     # Mask with presence silhouette mask (accounts for empty space)
     if tracking and use_sil_for_loss:
@@ -732,7 +739,7 @@ def rgbd_slam(config: dict):
     # timer.lap("all the config")
     added_new_gaussians = []
     # Iterate over Scan
-    for time_idx in tqdm(range(checkpoint_time_idx, 300)): 
+    for time_idx in tqdm(range(checkpoint_time_idx, num_frames)): 
         
         # timer.lap("iterating over frame "+str(time_idx), 0)
         
@@ -792,6 +799,7 @@ def rgbd_slam(config: dict):
 
         # Tracking
         tracking_start_time = time.time()
+        save_idx = 0
         if time_idx > 0 and not config['tracking']['use_gt_poses']:
             # Reset Optimizer & Learning Rates for tracking
             optimizer = initialize_optimizer(params, config['tracking']['lrs'])
@@ -811,7 +819,8 @@ def rgbd_slam(config: dict):
                                                    config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
                                                    plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
-                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'])
+                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx = save_idx)
+                save_idx+=1
                 # Backprop
                 loss.backward()
                 # Optimizer Update
