@@ -312,6 +312,23 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     else:
         mask = (curr_data['depth'] > 0)
     mask = mask & nan_mask & bg_mask
+    if torch.sum(mask)==0:
+        fig,ax = plt.subplots(2,4)
+        ax[0,0].imshow(im.permute(1,2,0).cpu().detach())
+        ax[0,0].set_title('Rendered im')
+        ax[0,1].imshow(curr_data['im'].permute(1,2,0).cpu().detach())
+        ax[0,1].set_title('Input img')
+        ax[1,0].imshow(depth.squeeze().cpu().detach())
+        ax[1,0].set_title('Rendered depth')
+        ax[1,1].imshow(curr_data['depth'].squeeze().cpu().detach())
+        ax[1,1].set_title('Input depth')
+        ax[0,2].imshow(nan_mask.squeeze().cpu().detach())
+        ax[0,2].set_title('Nan mask')
+        ax[0,3].imshow(bg_mask.squeeze().cpu().detach())
+        ax[0,3].set_title('BG mask')
+        ax[1,2].imshow(mask.squeeze().cpu().detach())
+        ax[1,2].set_title('Mask')
+        plt.show()
 
     # Mask with presence silhouette mask (accounts for empty space)
     if tracking and use_sil_for_loss:
@@ -598,9 +615,9 @@ def rgbd_slam(config: dict):
     else:
         color, depth, intrinsics, pose = dataset[0]
         # Initialize Parameters & Canoncial Camera parameters
-        plt.imshow(depth.squeeze().cpu().detach())
-        plt.title('gt depth')
-        plt.colorbar()
+        # plt.imshow(depth.squeeze().cpu().detach())
+        # plt.title('gt depth')
+        # plt.colorbar()
         plt.show()
         if not config['depth']['use_gt_depth']:
             color_input = color.permute(2,0,1).unsqueeze(0).cuda()/255 # Change from WxHxC to BxCxWxH for inference
@@ -609,8 +626,12 @@ def rgbd_slam(config: dict):
             s_pred = config['depth']['scale_pred']
             t_gt =   config['depth']['shift_gt']
             s_gt =   config['depth']['scale_gt']
-            pred_disp = ((model(color_input)-t_pred)/s_pred)*s_gt + t_gt
-            plt.imshow(pred_disp.squeeze().cpu().detach())
+            output = model(color_input)
+            # t_pred = torch.median(output)
+            # s_pred = torch.mean(torch.abs(output-t_pred))
+            output_norm = (output-output.min())/(output.max()-output.min())
+            pred_disp = (output_norm)*s_gt + t_gt +1 # TODO fix this scaling offset
+            plt.imshow(output.squeeze().cpu().detach())
             plt.title('predicted depth')
             plt.colorbar()
             plt.show()
@@ -711,7 +732,7 @@ def rgbd_slam(config: dict):
     # timer.lap("all the config")
     added_new_gaussians = []
     # Iterate over Scan
-    for time_idx in tqdm(range(checkpoint_time_idx, num_frames)): 
+    for time_idx in tqdm(range(checkpoint_time_idx, 300)): 
         
         # timer.lap("iterating over frame "+str(time_idx), 0)
         
@@ -724,6 +745,11 @@ def rgbd_slam(config: dict):
             color_input = color.permute(2,0,1).unsqueeze(0).cuda()/255 # Change from WxHxC to BxCxWxH for inference
             color_input = torchvision.transforms.functional.normalize(color_input,config['depth']['normalization_means'],config['depth']['normalization_stds']) # Applying normalization
             pred_disp = model(color_input)
+            t_pred = config['depth']['shift_pred']
+            s_pred = config['depth']['scale_pred']
+            t_gt =   config['depth']['shift_gt']
+            s_gt =   config['depth']['scale_gt']
+            pred_disp = ((model(color_input)-t_pred)/s_pred)*s_gt + t_gt+1 # TODO: Fix this scaling offset
             depth = 1/pred_disp # Convert disp to depth
             depth = depth.permute(1,2,0) # CxWxH --> WxHxC to align with rest of the pipeline
         else:
@@ -739,6 +765,8 @@ def rgbd_slam(config: dict):
         # Optimize only current time step for tracking
         iter_time_idx = time_idx
         # Initialize Mapping Data for selected frame
+        # plt.imshow(depth.squeeze().cpu().detach())
+        # plt.show()
         curr_data = {'cam': cam, 'im': color, 'depth': depth, 'id': iter_time_idx, 'intrinsics': intrinsics, 
                      'w2c': first_frame_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
 
@@ -843,6 +871,7 @@ def rgbd_slam(config: dict):
 
         if not config['depth']['use_gt_depth']: # If we don't use gt depths, we still have to align predicted and rendered depth in scale
             invariant_depth = curr_data['depth']
+            # plt.imshow(invariant_depth.squeeze().cpu().detach())
             transformed_pts = transform_to_frame(params, time_idx, gaussians_grad=False, camera_grad=False)
             rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
                                                                  transformed_pts)

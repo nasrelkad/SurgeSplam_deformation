@@ -17,7 +17,7 @@ keyframe_every = 8
 tracking_iters = 15
 mapping_iters = 25
 
-group_name = "SCARED"
+group_name = "SCARED_LONG"
 run_name = scene_name
 
 config = dict(
@@ -39,7 +39,7 @@ config = dict(
     save_checkpoints=False, # Save Checkpoints
     checkpoint_interval=int(1e10), # Checkpoint Interval
     data=dict(
-        basedir=f"./data/SCARED/{scene_name}",
+        basedir=f"./data/SCARED_LONG/{scene_name}",
         gradslam_data_cfg="./configs/data/scared.yaml",
         sequence=scene_name,
         desired_image_height=336,
@@ -75,7 +75,7 @@ config = dict(
     mapping=dict(
         num_iters=mapping_iters,
         add_new_gaussians=True,
-        sil_thres=0.5, # For Addition of new Gaussians
+        sil_thres=0.000001, # For Addition of new Gaussians
         use_l1=True,
         use_sil_for_loss=False,
         ignore_outlier_depth_loss=False,
@@ -92,14 +92,14 @@ config = dict(
             cam_unnorm_rots=0.000,
             cam_trans=0.000,
         ),
-        prune_gaussians=False, # Prune Gaussians during Mapping
+        prune_gaussians=True, # Prune Gaussians during Mapping
         pruning_dict=dict( # Needs to be updated based on the number of mapping iterations
             start_after=0,
             remove_big_after=0,
             stop_after=20,
             prune_every=20,
-            removal_opacity_threshold=0.0005,
-            final_removal_opacity_threshold=0.0005,
+            removal_opacity_threshold=0.05,
+            final_removal_opacity_threshold=0.05,
             reset_opacities=False,
             reset_opacities_every=int(1e10), # Doesn't consider iter 0
         ),
