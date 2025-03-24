@@ -14,7 +14,7 @@ except KeyError:
 map_every = 1
 keyframe_every = 8
 # mapping_window_size = 24
-tracking_iters = 15
+tracking_iters = 25
 mapping_iters = 25
 
 group_name = "SCARED"
@@ -70,11 +70,14 @@ config = dict(
             log_scales=0.0,
             cam_unnorm_rots=0.002,
             cam_trans=0.005,
+            deform_weights = 0.001,
+            deform_stds = 0.001,
+            deform_biases = 0.001,
         ),
     ),
     mapping=dict(
         num_iters=mapping_iters,
-        add_new_gaussians=True,
+        add_new_gaussians=False,
         sil_thres=0.5, # For Addition of new Gaussians
         use_l1=True,
         use_sil_for_loss=False,
@@ -91,6 +94,9 @@ config = dict(
             log_scales=0.001,
             cam_unnorm_rots=0.000,
             cam_trans=0.000,
+            deform_weights = 0.00,
+            deform_stds = 0.00,
+            deform_biases = 0.00,
         ),
         prune_gaussians=False, # Prune Gaussians during Mapping
         pruning_dict=dict( # Needs to be updated based on the number of mapping iterations

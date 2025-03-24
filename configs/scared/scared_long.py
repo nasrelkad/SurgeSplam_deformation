@@ -70,6 +70,9 @@ config = dict(
             log_scales=0.0,
             cam_unnorm_rots=0.002,
             cam_trans=0.005,
+            deform_weights = 0.001,
+            deform_stds = 0.001,
+            deform_biases = 0.001,
         ),
     ),
     mapping=dict(
@@ -91,6 +94,9 @@ config = dict(
             log_scales=0.001,
             cam_unnorm_rots=0.000,
             cam_trans=0.000,
+            deform_weights = 0.00,
+            deform_stds = 0.00,
+            deform_biases = 0.00,
         ),
         prune_gaussians=True, # Prune Gaussians during Mapping
         pruning_dict=dict( # Needs to be updated based on the number of mapping iterations
