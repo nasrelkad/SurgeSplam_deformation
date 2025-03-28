@@ -1,7 +1,7 @@
 import os
 
 scenes = [
-    "dataset_5/keyframe_4"
+    'cutting'
 ]
 
 primary_device="cuda:0"
@@ -9,15 +9,15 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "dataset_5/keyframe_4"
+    scene_name = "cutting_deform"
 
 map_every = 1
 keyframe_every = 8
 # mapping_window_size = 24
-tracking_iters = 15
+tracking_iters = 50
 mapping_iters = 25
 
-group_name = "SCARED_LONG"
+group_name = f"EndoNerf {scene_name}"
 run_name = scene_name
 
 config = dict(
@@ -39,8 +39,8 @@ config = dict(
     save_checkpoints=False, # Save Checkpoints
     checkpoint_interval=int(1e10), # Checkpoint Interval
     data=dict(
-        basedir=f"./data/SCARED_LONG/{scene_name}",
-        gradslam_data_cfg="./configs/data/scared.yaml",
+        basedir=f"./data/endonerf_cutting",
+        gradslam_data_cfg="./configs/data/endonerf.yaml",
         sequence=scene_name,
         desired_image_height=336,
         desired_image_width=336,
@@ -59,17 +59,17 @@ config = dict(
         use_l1=True,
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
-            im=0.5,
-            depth=1.0,
+            im=1.5,
+            depth=0.0,
         ),
         lrs=dict(
             means3D=0.0,
-            rgb_colors=0.0,
+            rgb_colors=0.00,
             unnorm_rotations=0.0,
             logit_opacities=0.0,
             log_scales=0.0,
-            cam_unnorm_rots=0.002,
-            cam_trans=0.005,
+            cam_unnorm_rots=0.001,
+            cam_trans=0.001,
             deform_weights = 0.01,
             deform_stds = 0.01,
             deform_biases = 0.01,
@@ -77,7 +77,7 @@ config = dict(
     ),
     mapping=dict(
         num_iters=mapping_iters,
-        add_new_gaussians=True,
+        add_new_gaussians=False,
         sil_thres=0.5, # For Addition of new Gaussians
         use_l1=True,
         use_sil_for_loss=False,
@@ -87,18 +87,18 @@ config = dict(
             depth=1.0,
         ),
         lrs=dict(
-            means3D=0.0001,
-            rgb_colors=0.0025,
-            unnorm_rotations=0.001,
-            logit_opacities=0.05,
-            log_scales=0.001,
+            means3D=0.000,
+            rgb_colors=0.00,
+            unnorm_rotations=0.00,
+            logit_opacities=0.0,
+            log_scales=0.00,
             cam_unnorm_rots=0.000,
             cam_trans=0.000,
             deform_weights = 0.00,
             deform_stds = 0.00,
             deform_biases = 0.00,
         ),
-        prune_gaussians=True, # Prune Gaussians during Mapping
+        prune_gaussians=False, # Prune Gaussians during Mapping
         pruning_dict=dict( # Needs to be updated based on the number of mapping iterations
             start_after=0,
             remove_big_after=0,
