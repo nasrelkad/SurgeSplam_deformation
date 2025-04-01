@@ -116,25 +116,25 @@ def matrix_to_quaternion(matrix: torch.Tensor) -> torch.Tensor:
 #     return rendervar
 
 
-def transformed_params2rendervar(params, transformed_pts):
+def transformed_params2rendervar(params, transformed_pts,local_rots,local_scales):
     rendervar = {
         'means3D': transformed_pts,
-        'rotations': F.normalize(params['unnorm_rotations']),
+        'rotations': F.normalize(local_rots),
         'opacities': torch.sigmoid(params['logit_opacities']),
         # 'scales': torch.exp(torch.tile(params['log_scales'], (1, 3))),
         'means2D': torch.zeros_like(params['means3D'], requires_grad=True, device="cuda") + 0
     }
-    if params['log_scales'].shape[1] == 1:
+    if local_scales.shape[1] == 1:
         rendervar['colors_precomp'] = params['rgb_colors']
-        rendervar['scales'] = torch.exp(torch.tile(params['log_scales'], (1, 3)))
+        rendervar['scales'] = torch.exp(torch.tile(local_scales, (1, 3)))
         # print('using uniform scales')
     else:
         try: 
             rendervar['shs'] = torch.cat((params['rgb_colors'].reshape(params['rgb_colors'].shape[0], 3, -1).transpose(1, 2), params['feature_rest'].reshape(params['rgb_colors'].shape[0], 3, -1).transpose(1, 2)), dim=1)
-            rendervar['scales'] = torch.exp(params['log_scales'])
+            rendervar['scales'] = torch.exp(local_scales)
         except: 
             rendervar['colors_precomp'] = params['rgb_colors']
-            rendervar['scales'] = torch.exp(params['log_scales'])
+            rendervar['scales'] = torch.exp(local_scales)
     return rendervar
 
 
@@ -212,23 +212,23 @@ def get_depth_and_silhouette(pts_3D, w2c):
 #     return rendervar
 
 
-def transformed_params2depthplussilhouette(params, w2c, transformed_pts):
+def transformed_params2depthplussilhouette(params, w2c, transformed_pts,local_rots,local_scales):
     rendervar = {
         'means3D': transformed_pts,
         'colors_precomp': get_depth_and_silhouette(transformed_pts, w2c),
-        'rotations': F.normalize(params['unnorm_rotations']),
+        'rotations': F.normalize(local_rots),
         'opacities': torch.sigmoid(params['logit_opacities']),
         # 'scales': torch.exp(torch.tile(params['log_scales'], (1, 3))),
         'means2D': torch.zeros_like(params['means3D'], requires_grad=True, device="cuda") + 0
     }
-    if params['log_scales'].shape[1] == 1:
-        rendervar['scales'] = torch.exp(torch.tile(params['log_scales'], (1, 3)))
+    if local_scales.shape[1] == 1:
+        rendervar['scales'] = torch.exp(torch.tile(local_scales, (1, 3)))
     else:
-        rendervar['scales'] = torch.exp(params['log_scales'])
+        rendervar['scales'] = torch.exp(local_scales)
     return rendervar
 
 
-def transform_to_frame(params, time_idx, gaussians_grad, camera_grad):
+def transform_to_frame(local_means,params, time_idx, gaussians_grad, camera_grad):
     """
     Function to transform Isotropic Gaussians from world frame to camera frame.
     
@@ -254,9 +254,9 @@ def transform_to_frame(params, time_idx, gaussians_grad, camera_grad):
 
     # Get Centers and norm Rots of Gaussians in World Frame
     if gaussians_grad:
-        pts = params['means3D']
+        pts = local_means
     else:
-        pts = params['means3D'].detach()
+        pts = local_means.detach()
     
     # Transform Centers and Unnorm Rots of Gaussians to Camera Frame
     pts_ones = torch.ones(pts.shape[0], 1).cuda().float()
@@ -266,7 +266,7 @@ def transform_to_frame(params, time_idx, gaussians_grad, camera_grad):
     return transformed_pts
 
 
-def transform_to_frame_eval(params, camrt=None, rel_w2c=None):
+def transform_to_frame_eval(params, local_means,camrt=None, rel_w2c=None):
     """
     Function to transform Isotropic Gaussians from world frame to camera frame.
     
@@ -287,7 +287,7 @@ def transform_to_frame_eval(params, camrt=None, rel_w2c=None):
         rel_w2c[:3, 3] = cam_tran
 
     # Get Centers and norm Rots of Gaussians in World Frame
-    pts = params['means3D'].detach()
+    pts = local_means.detach()
     
     # Transform Centers and Unnorm Rots of Gaussians to Camera Frame
     pts_ones = torch.ones(pts.shape[0], 1).cuda().float()
