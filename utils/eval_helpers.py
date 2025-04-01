@@ -11,6 +11,7 @@ from utils.recon_helpers import setup_camera, energy_mask
 from utils.slam_external import build_rotation,calc_psnr
 from utils.slam_helpers import transform_to_frame, transform_to_frame_eval, transformed_params2rendervar, transformed_params2depthplussilhouette
 
+
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 
 from pytorch_msssim import ms_ssim
@@ -213,6 +214,28 @@ def report_progress(params, data, i, progress_bar, iter_time_idx, sil_thres, eve
             progress_bar.update(every_i)
         
 
+def deform_gaussians(params,time,deform_grad):
+
+    if deform_grad:
+        weights = params['deform_weights']
+        stds = params['deform_stds']
+        biases = params['deform_biases']
+    else:
+        weights = params['deform_weights'].detach()
+        stds = params['deform_stds'].detach()
+        biases = params['deform_biases'].detach()
+
+    deform = torch.sum(weights*torch.exp(-1/(2*stds**2)*(time-biases)**2),1) # Nx10 gaussians deformations
+    deform_xyz = deform[:,:3]
+    deform_rots = deform[:,3:7]
+    deform_scales = deform[:,7:10]
+
+    xyz = params['means3D']+deform_xyz
+    rots = params['unnorm_rotations']+deform_rots
+    scales = params['log_scales']+deform_scales
+
+    return xyz,rots,scales
+
 def eval_save(dataset, final_params, eval_dir, sil_thres, 
          mapping_iters, add_new_gaussians, save_renders=True):
     # timer = Timer()
@@ -300,15 +323,16 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
             cam = setup_camera(color.shape[2], color.shape[1], intrinsics.cpu().numpy(), first_frame_w2c.detach().cpu().numpy())
 
         # Get current frame Gaussians
+        local_means,local_rots,local_scales = deform_gaussians(final_params,total_time_idx,False)
         if dataset_type == 'train':
             cam_rot = F.normalize(final_params['cam_unnorm_rots'][..., time_idx].detach())
             cam_tran = final_params['cam_trans'][..., time_idx].detach()
-            transformed_pts = transform_to_frame_eval(final_params, (cam_rot, cam_tran))
+            transformed_pts = transform_to_frame_eval(final_params,local_means, (cam_rot, cam_tran))
         else:
             w2c = gt_w2c_list[total_time_idx]
             # w2c[:3, :3] = torch.Tensor(rot) @ w2c[:3, :3]
             w2c[:3, 3] = torch.Tensor(horn_gt_position[total_time_idx])
-            transformed_pts = transform_to_frame_eval(final_params, rel_w2c=w2c.cuda()) # use gt pose to render
+            transformed_pts = transform_to_frame_eval(final_params,local_means, rel_w2c=w2c.cuda()) # use gt pose to render
             
         # Define current frame data
         curr_data = {'cam': cam, 'im': color, 'depth': depth, 'id': time_idx, 'intrinsics': intrinsics, 'w2c': first_frame_w2c}
@@ -318,9 +342,9 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
             continue
         
         # Initialize Render Variables
-        rendervar = transformed_params2rendervar(final_params, transformed_pts)
+        rendervar = transformed_params2rendervar(final_params, transformed_pts,local_rots,local_scales)
         depth_sil_rendervar = transformed_params2depthplussilhouette(final_params, curr_data['w2c'],
-                                                                     transformed_pts)
+                                                                     transformed_pts,local_rots,local_scales)
 
         # Render Depth & Silhouette
         depth_sil, _, _ = Renderer(raster_settings=curr_data['cam'])(**depth_sil_rendervar)

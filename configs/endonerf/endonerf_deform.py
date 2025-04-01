@@ -1,7 +1,7 @@
 import os
 
 scenes = [
-    "dataset_5/keyframe_4"
+    'cutting'
 ]
 
 primary_device="cuda:0"
@@ -9,15 +9,15 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "dataset_5/keyframe_4"
+    scene_name = "cutting_deform"
 
 map_every = 1
 keyframe_every = 8
 # mapping_window_size = 24
-tracking_iters = 15
+tracking_iters = 50
 mapping_iters = 25
 
-group_name = "SCARED_LONG"
+group_name = f"EndoNerf {scene_name}"
 run_name = scene_name
 
 config = dict(
@@ -39,8 +39,8 @@ config = dict(
     save_checkpoints=False, # Save Checkpoints
     checkpoint_interval=int(1e10), # Checkpoint Interval
     data=dict(
-        basedir=f"./data/SCARED_LONG/{scene_name}",
-        gradslam_data_cfg="./configs/data/scared.yaml",
+        basedir=f"./data/endonerf_cutting",
+        gradslam_data_cfg="./configs/data/endonerf.yaml",
         sequence=scene_name,
         desired_image_height=336,
         desired_image_width=336,
@@ -55,7 +55,7 @@ config = dict(
         forward_prop=True, # Forward Propagate Poses
         num_iters=tracking_iters,
         use_sil_for_loss=True,
-        sil_thres=0.99,
+        sil_thres=0.9,
         use_l1=True,
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
@@ -68,8 +68,8 @@ config = dict(
             unnorm_rotations=0.0,
             logit_opacities=0.0,
             log_scales=0.0,
-            cam_unnorm_rots=0.002,
-            cam_trans=0.005,
+            cam_unnorm_rots=0.001,
+            cam_trans=0.001,
             deform_weights = 0.01,
             deform_stds = 0.01,
             deform_biases = 0.01,
@@ -145,5 +145,5 @@ config = dict(
         shift_gt =   0.0021386505104601383   ,
         scale_gt =   0.01995653659105301    ,
     ), 
-    deforms = True     
+    deforms = False     
 )

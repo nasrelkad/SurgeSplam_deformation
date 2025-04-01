@@ -118,9 +118,9 @@ def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True,
 def initialize_deformations(params,nr_basis):
     # Means3D, unnorm rotations and log_scales should receive deformation params
     N = params['means3D'].shape[0]
-    weights = torch.randn([N,nr_basis,10],requires_grad = True,device = 'cuda') # We have N x nr_basis x 10 (xyz,scales,rots) weights
-    stds = torch.randn([N,nr_basis,10],requires_grad = True,device = 'cuda') # We have N x nr_basis x 10 (xyz,scales,rots) weights
-    biases = torch.randn([N,nr_basis,10],requires_grad = True,device = 'cuda') # We have N x nr_basis x 10 (xyz,scales,rots) weights
+    weights = torch.randn([N,nr_basis,10],requires_grad = True,device = 'cuda')*0.0 # We have N x nr_basis x 10 (xyz,scales,rots) weights
+    stds = torch.ones([N,nr_basis,10],requires_grad = True,device = 'cuda') # We have N x nr_basis x 10 (xyz,scales,rots) weights
+    biases = torch.randn([N,nr_basis,10],requires_grad = True,device = 'cuda')*0.0 # We have N x nr_basis x 10 (xyz,scales,rots) weights
 
     params['deform_weights'] = weights
     params['deform_stds'] = stds
@@ -129,19 +129,30 @@ def initialize_deformations(params,nr_basis):
 
     return params
 
-def deform_gaussians(params,time):
-    deform = torch.sum(params['deform_weights']*torch.exp(-1/(2*params['deform_stds']**2)*(time-params['deform_biases'])**2),1) # Nx10 gaussians deformations
+def deform_gaussians(params,time,deform_grad):
+
+    if deform_grad:
+        weights = params['deform_weights']
+        stds = params['deform_stds']
+        biases = params['deform_biases']
+    else:
+        weights = params['deform_weights'].detach()
+        stds = params['deform_stds'].detach()
+        biases = params['deform_biases'].detach()
+
+    deform = torch.sum(weights*torch.exp(-1/(2*stds**2)*(time-biases)**2),1) # Nx10 gaussians deformations
     deform_xyz = deform[:,:3]
     deform_rots = deform[:,3:7]
     deform_scales = deform[:,7:10]
 
+
     xyz = params['means3D']+deform_xyz
     rots = params['unnorm_rotations']+deform_rots
-    scales = params['log_scales']+scales
+    scales = params['log_scales']+deform_scales
 
     return xyz,rots,scales
 
-def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification=True):
+def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification=True,nr_basis = 10):
     num_pts = init_pt_cld.shape[0]
     means3D = init_pt_cld[:, :3] # [num_gaussians, 3]
     unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1)) # [num_gaussians, 3]
@@ -155,7 +166,7 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification
     }
     if not use_simplification:
         params['feature_rest'] = torch.zeros(num_pts, 45) # set SH degree 3 fixed
-
+    params = initialize_deformations(params,nr_basis)
     # Initialize a single gaussian trajectory to model the camera poses relative to the first frame
     cam_rots = np.tile([1, 0, 0, 0], (1, 1))
     cam_rots = np.tile(cam_rots[:, :, None], (1, 1, num_frames))
@@ -190,8 +201,8 @@ def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_rad
     # color, depth, intrinsics, pose = dataset[0]
 
     # Process RGB-D Data
-    color = color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
-    depth = depth.permute(2, 0, 1) # (H, W, C) -> (C, H, W)
+    # color = color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
+    # depth = depth.permute(2, 0, 1) # (H, W, C) -> (C, H, W)
     
     # Process Camera Parameters
     intrinsics = intrinsics[:3, :3]
@@ -253,37 +264,50 @@ def align_shift_and_scale(gt_disp, pred_disp,mask):
 
 def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_for_loss, 
              sil_thres, use_l1,ignore_outlier_depth_loss, tracking=False, 
-             mapping=False, do_ba=False, plot_dir=None, visualize_tracking_loss=False, tracking_iteration=None,use_gt_depth = True,save_idx = None):
+             mapping=False, do_ba=False, plot_dir=None, visualize_tracking_loss=False, tracking_iteration=None,use_gt_depth = True,gaussian_deformations = True,save_idx=0):
+
     global w2cs, w2ci
     # Initialize Loss Dictionary
     losses = {}
+    if gaussian_deformations: # If we train for deformations, the location of the means depends on the timestep
+        if tracking:
+            local_means,local_rots,local_scales = deform_gaussians(params,iter_time_idx,deform_grad = True)
+            # raise ValueError('This shouldnt really happen tbh')
 
+        else:
+            local_means,local_rots,local_scales= deform_gaussians(params,iter_time_idx,deform_grad = False)
+    else:
+        local_means = params['means3D']
+        local_rots = params['unnorm_rotations']
+        local_scales = params['log_scales']
     if tracking:
         # Get current frame Gaussians, where only the camera pose gets gradient
-        transformed_pts = transform_to_frame(params, iter_time_idx, 
+        
+        transformed_pts = transform_to_frame(local_means,params, iter_time_idx, 
                                              gaussians_grad=False,
                                              camera_grad=True)
     elif mapping:
         if do_ba: # Bundle Adjustment
             # Get current frame Gaussians, where both camera pose and Gaussians get gradient
-            transformed_pts = transform_to_frame(params, iter_time_idx,
+            transformed_pts = transform_to_frame(local_means,params, iter_time_idx,
                                                  gaussians_grad=True,
                                                  camera_grad=True)
         else:
             # Get current frame Gaussians, where only the Gaussians get gradient
-            transformed_pts = transform_to_frame(params, iter_time_idx,
+            transformed_pts = transform_to_frame(local_means,params, iter_time_idx,
                                                  gaussians_grad=True,
                                                  camera_grad=False)
     else:
         # Get current frame Gaussians, where only the Gaussians get gradient
-        transformed_pts = transform_to_frame(params, iter_time_idx,
+        transformed_pts = transform_to_frame(local_means,params, iter_time_idx,
                                              gaussians_grad=True,
                                              camera_grad=False)
 
     # Initialize Render Variables
-    rendervar = transformed_params2rendervar(params, transformed_pts)
+    rendervar = transformed_params2rendervar(params, transformed_pts,local_rots,local_scales)
+    rendervar['means3D'].retain_grad()
     depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
-                                                                 transformed_pts)
+                                                                 transformed_pts,local_rots,local_scales)
     
     # Visualize the Rendered Images
     # online_render(curr_data, iter_time_idx, rendervar, dev_use_controller=False)
@@ -314,15 +338,22 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     else:
         mask = (curr_data['depth'] > 0)
     mask = mask & nan_mask & bg_mask
-    if torch.sum(mask)==0:
+    
+    # Mask with presence silhouette mask (accounts for empty space)
+    if tracking and use_sil_for_loss:
+        mask = mask & presence_sil_mask
+    if not use_gt_depth:
+        rendered_depth_aligned,predicted_depth_aligned,_,_,_,_ = align_shift_and_scale(depth,curr_data['depth'],mask)
+    
+    if False:
         fig,ax = plt.subplots(2,4)
         ax[0,0].imshow(im.permute(1,2,0).cpu().detach())
         ax[0,0].set_title('Rendered im')
         ax[0,1].imshow(curr_data['im'].permute(1,2,0).cpu().detach())
         ax[0,1].set_title('Input img')
-        ax[1,0].imshow(depth.squeeze().cpu().detach())
+        ax[1,0].imshow(rendered_depth_aligned.squeeze().cpu().detach())
         ax[1,0].set_title('Rendered depth')
-        ax[1,1].imshow(curr_data['depth'].squeeze().cpu().detach())
+        ax[1,1].imshow(predicted_depth_aligned.squeeze().cpu().detach())
         ax[1,1].set_title('Input depth')
         ax[0,2].imshow(nan_mask.squeeze().cpu().detach())
         ax[0,2].set_title('Nan mask')
@@ -330,6 +361,9 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
         ax[0,3].set_title('BG mask')
         ax[1,2].imshow(mask.squeeze().cpu().detach())
         ax[1,2].set_title('Mask')
+        im1 = ax[1,3].imshow(rendered_depth_aligned.squeeze().cpu().detach()-predicted_depth_aligned.squeeze().cpu().detach())
+        ax[1,3].set_title('Depth diff aligned')
+        plt.colorbar(im1,ax = ax[1,3])
         plt.show()
     if not save_idx == None:
         ii = curr_data['id']
@@ -337,11 +371,40 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
         os.makedirs(f'./scripts/plots/{ii}',exist_ok=True)
         img.save(f'./scripts/plots/{ii}/{save_idx}.png')
 
-    # Mask with presence silhouette mask (accounts for empty space)
-    if tracking and use_sil_for_loss:
-        mask = mask & presence_sil_mask
-    if not use_gt_depth:
-        rendered_depth_aligned,predicted_depth_aligned,_,_,_,_ = align_shift_and_scale(depth,curr_data['depth'],mask)
+
+
+    if not save_idx == None:
+        ii = curr_data['id']
+        diff = torch.abs(im-curr_data['im'])
+
+
+        # c_d_norm = (curr_data['depth']-curr_data['depth'].min())/(curr_data['depth'].max()-curr_data['depth'].min())
+        # d_norm = (depth-depth.min())/(depth.max()-depth.min())
+        diff_depth = torch.abs(predicted_depth_aligned.squeeze()-rendered_depth_aligned.squeeze())
+        img = torch.cat([im.permute(1,2,0),curr_data['im'].permute(1,2,0),diff.permute(1,2,0)],dim = 1).cpu().detach().numpy()
+        img = Image.fromarray((img*255).astype(np.uint8))
+
+
+
+        rendered_depth_norm = (rendered_depth_aligned-rendered_depth_aligned.min())/(rendered_depth_aligned.max()-rendered_depth_aligned.min())
+        predicted_depth_norm = (predicted_depth_aligned-predicted_depth_aligned.min())/(predicted_depth_aligned.max()-predicted_depth_aligned.min())
+        diff_depth_norm = (diff_depth-diff_depth.min())/(diff_depth.max()-diff_depth.min())
+        depth_img = torch.cat([rendered_depth_norm.squeeze(),predicted_depth_norm.squeeze(),diff_depth_norm.squeeze()],dim = 1).cpu().detach().numpy()
+        
+        depth_img = Image.fromarray((depth_img*255).astype(np.uint8))
+        
+        if tracking:
+            os.makedirs(f'./scripts/plots/tracking/rgb/{ii}',exist_ok=True)
+            img.save(f'./scripts/plots/tracking/rgb/{ii}/{save_idx}.png')
+            os.makedirs(f'./scripts/plots/tracking/depth/{ii}',exist_ok=True)
+            depth_img.save(f'./scripts/plots/tracking/depth/{ii}/{save_idx}.png')
+        elif mapping:
+            os.makedirs(f'./scripts/plots/mapping/{ii}',exist_ok=True)
+            img.save(f'./scripts/plots/mapping/{ii}/{save_idx}.png')
+            os.makedirs(f'./scripts/plots/mapping/depth/{ii}',exist_ok=True)
+            depth_img.save(f'./scripts/plots/mapping/depth/{ii}/{save_idx}.png')
+    
+
     # Depth loss
     if use_l1:
         mask = mask.detach()
@@ -373,7 +436,7 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     return loss, variables, weighted_losses
 
 
-def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification):
+def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis = 10):
     num_pts = new_pt_cld.shape[0]
     means3D = new_pt_cld[:, :3] # [num_gaussians, 3]
     unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1)) # [num_gaussians, 3]
@@ -386,7 +449,7 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification):
         'log_scales': torch.tile(torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 1 if use_simplification else 3)),
     }
     # print(f'num pts {num_pts}')
-    # params = initialize_deformations(params,10)
+    params = initialize_deformations(params,10)
     if not use_simplification:
         params['feature_rest'] = torch.zeros(num_pts, 45) # set SH degree 3 fixed
     for k, v in params.items():
@@ -401,9 +464,10 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification):
 
 def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq_dist_method, use_simplification=True):
     # Silhouette Rendering
-    transformed_pts = transform_to_frame(params, time_idx, gaussians_grad=False, camera_grad=False)
+    local_means,local_rots,local_scales = deform_gaussians(params,time_idx,True)
+    transformed_pts = transform_to_frame(local_means,params, time_idx, gaussians_grad=False, camera_grad=False)
     depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
-                                                                 transformed_pts)
+                                                                 transformed_pts,local_rots,local_scales)
     depth_sil, _, _ = Renderer(raster_settings=curr_data['cam'])(**depth_sil_rendervar)
     silhouette = depth_sil[1, :, :]
     non_presence_sil_mask = (silhouette < sil_thres)
@@ -638,19 +702,23 @@ def rgbd_slam(config: dict):
             # s_pred = torch.mean(torch.abs(output-t_pred))
             output_norm = (output-output.min())/(output.max()-output.min())
             pred_disp = (output_norm)*s_gt + t_gt +1 # TODO fix this scaling offset
-            plt.imshow(output.squeeze().cpu().detach())
-            plt.title('predicted depth')
-            plt.colorbar()
-            plt.show()
+            # plt.imshow(output.squeeze().cpu().detach())
+            # plt.title('predicted depth')
+            # plt.colorbar()
+            # plt.show()
             print(pred_disp.min())
             depth = 1/pred_disp # Convert disp to depth
             depth = depth.permute(1,2,0) # CxWxH --> WxHxC to align with rest of the pipeline    
             print(depth.min())
 
-        plt.imshow(depth.squeeze().cpu().detach())
-        plt.title('predicted depth')
-        plt.colorbar()
-        plt.show()
+        # plt.imshow(depth.squeeze().cpu().detach())
+        # plt.title('predicted depth')
+        # plt.colorbar()
+        # plt.show()
+        color = color.permute(2, 0, 1) / 255
+        depth = depth.permute(2, 0, 1)
+
+
         params, variables, intrinsics, first_frame_w2c, cam = initialize_first_timestep(color, depth, intrinsics, pose, 
                                                                             num_frames, 
                                                                             config['scene_radius_depth_ratio'],
@@ -759,6 +827,8 @@ def rgbd_slam(config: dict):
             pred_disp = ((model(color_input)-t_pred)/s_pred)*s_gt + t_gt+1 # TODO: Fix this scaling offset
             depth = 1/pred_disp # Convert disp to depth
             depth = depth.permute(1,2,0) # CxWxH --> WxHxC to align with rest of the pipeline
+            # plt.imshow(depth.squeeze().cpu().detach())
+            # plt.show()
         else:
             depth = gt_depth
 
@@ -812,6 +882,7 @@ def rgbd_slam(config: dict):
             do_continue_slam = False
             num_iters_tracking = config['tracking']['num_iters']
             progress_bar = tqdm(range(num_iters_tracking), desc=f"Tracking Time Step: {time_idx}")
+            save_idx = 0
             while True:
                 iter_start_time = time.time()
                 # Loss for current frame
@@ -819,12 +890,21 @@ def rgbd_slam(config: dict):
                                                    config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
                                                    plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
-                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx = save_idx)
-                save_idx+=1
+                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=save_idx,gaussian_deformations=config['deforms'])
+                save_idx = save_idx+1
+
                 # Backprop
+                
                 loss.backward()
                 # Optimizer Update
+
+                # weight_grad = params['deform_weights'].grad.mean()
+                # bias_grad = params['deform_biases'].grad.mean()
+                # stds_grad = params['deform_stds'].grad.mean()
+                cam_pos_grad = params['cam_trans'].grad.mean()
+                cam_rot_grad = params['cam_unnorm_rots'].grad.mean()
                 optimizer.step()
+
                 optimizer.zero_grad(set_to_none=True)
                 with torch.no_grad():
                     # Save the best candidate rotation & translation
@@ -881,11 +961,36 @@ def rgbd_slam(config: dict):
         if not config['depth']['use_gt_depth']: # If we don't use gt depths, we still have to align predicted and rendered depth in scale
             invariant_depth = curr_data['depth']
             # plt.imshow(invariant_depth.squeeze().cpu().detach())
-            transformed_pts = transform_to_frame(params, time_idx, gaussians_grad=False, camera_grad=False)
+            local_means,local_rots,local_scales = deform_gaussians(params,time_idx,True)
+
+
+            # local_means = params['means3D']
+            # local_rots = params['unnorm_rotations']
+            # local_scales = params['log_scales']
+            transformed_pts = transform_to_frame(local_means,params, time_idx, gaussians_grad=False, camera_grad=False)
+            # img_rendervar = transformed_params2rendervar(params,transformed_pts,local_rots,local_scales)
             rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
-                                                                 transformed_pts)
+                                                                 transformed_pts,local_rots,local_scales)
             rendered_depth,_,_ = Renderer(raster_settings=curr_data['cam'])(**rendervar)
+            # im,_,_ = Renderer(raster_settings = curr_data['cam'])(**img_rendervar)
             mask = rendered_depth[1,:,:] > config['tracking']['sil_thres']
+
+            # fig,ax = plt.subplots(2,4)
+            # ax[0,0].imshow(im.permute(1,2,0).cpu().detach())
+            # ax[0,0].set_title('Rendered im')
+            # ax[0,1].imshow(curr_data['im'].permute(1,2,0).cpu().detach())
+            # ax[0,1].set_title('Input img')
+            # ax[1,0].imshow(rendered_depth[0,:,:].squeeze().cpu().detach())
+            # ax[1,0].set_title('Rendered depth')
+            # ax[1,1].imshow(curr_data['depth'].squeeze().cpu().detach())
+            # ax[1,1].set_title('Input depth')
+            # # ax[0,2].imshow(nan_mask.squeeze().cpu().detach())
+            # # ax[0,2].set_title('Nan mask')
+            # # ax[0,3].imshow(bg_mask.squeeze().cpu().detach())
+            # # ax[0,3].set_title('BG mask')
+            # ax[1,2].imshow(mask.squeeze().cpu().detach())
+            # ax[1,2].set_title('Mask')
+            # plt.show()
             _,_,t_render, s_render, t_invar, s_invar = align_shift_and_scale(rendered_depth[0,:,:].unsqueeze(0),invariant_depth,mask.unsqueeze(0))
             curr_data['depth'] = ((invariant_depth-t_invar)/s_invar)*s_render + t_render
 
@@ -995,7 +1100,7 @@ def rgbd_slam(config: dict):
                 # Loss for current frame
                 loss, variables, losses = get_loss(params, iter_data, variables, iter_time_idx, config['mapping']['loss_weights'],
                                                 config['mapping']['use_sil_for_loss'], config['mapping']['sil_thres'],
-                                                config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'], mapping=True)
+                                                config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'],use_gt_depth = config['depth']['use_gt_depth'], mapping=True,save_idx = iter,gaussian_deformations=config['deforms'])
                 # Backprop
                 loss.backward()
                 with torch.no_grad():
