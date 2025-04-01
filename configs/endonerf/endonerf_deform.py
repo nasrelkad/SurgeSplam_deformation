@@ -55,16 +55,16 @@ config = dict(
         forward_prop=True, # Forward Propagate Poses
         num_iters=tracking_iters,
         use_sil_for_loss=True,
-        sil_thres=0.99,
+        sil_thres=0.9,
         use_l1=True,
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
-            im=1.5,
-            depth=0.0,
+            im=0.5,
+            depth=1.0,
         ),
         lrs=dict(
             means3D=0.0,
-            rgb_colors=0.00,
+            rgb_colors=0.0,
             unnorm_rotations=0.0,
             logit_opacities=0.0,
             log_scales=0.0,
@@ -77,7 +77,7 @@ config = dict(
     ),
     mapping=dict(
         num_iters=mapping_iters,
-        add_new_gaussians=False,
+        add_new_gaussians=True,
         sil_thres=0.5, # For Addition of new Gaussians
         use_l1=True,
         use_sil_for_loss=False,
@@ -87,18 +87,18 @@ config = dict(
             depth=1.0,
         ),
         lrs=dict(
-            means3D=0.000,
-            rgb_colors=0.00,
-            unnorm_rotations=0.00,
-            logit_opacities=0.0,
-            log_scales=0.00,
+            means3D=0.0001,
+            rgb_colors=0.0025,
+            unnorm_rotations=0.001,
+            logit_opacities=0.05,
+            log_scales=0.001,
             cam_unnorm_rots=0.000,
             cam_trans=0.000,
             deform_weights = 0.00,
             deform_stds = 0.00,
             deform_biases = 0.00,
         ),
-        prune_gaussians=False, # Prune Gaussians during Mapping
+        prune_gaussians=True, # Prune Gaussians during Mapping
         pruning_dict=dict( # Needs to be updated based on the number of mapping iterations
             start_after=0,
             remove_big_after=0,
@@ -145,5 +145,5 @@ config = dict(
         shift_gt =   0.0021386505104601383   ,
         scale_gt =   0.01995653659105301    ,
     ), 
-    deforms = True     
+    deforms = False     
 )
