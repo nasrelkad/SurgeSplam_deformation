@@ -1,0 +1,101 @@
+/var/spool/slurm/slurmd/job10944949/slurm_script: line 20: wandb: command not found
+| distributed init (rank 0): env://
+git:
+  sha: a82811527f54b793d0affa54dd47eed2356c58f6, status: has uncommited changes, branch: SurgeSplat
+
+batch_size_per_gpu: 48
+data_path: /gpfs/work5/0/tesr0602/Datasets/SurgeNet
+depth_loss_weight: 0.002
+depth_path: /scratch-local/71045
+dist_url: env://
+epochs: 4
+gpu: 0
+img_height: 336
+img_width: 336
+learning_rate: 1e-05
+logging_interval: 10
+num_workers: 9
+output_dir: /gpfs/home6/hhuitema/github_repos/SurgeSplam/logs/GRN_1
+rank: 0
+save_freq: 5
+seed: 0
+wandb_logging: True
+world_size: 1
+wandb: Using wandb-core as the SDK backend.  Please refer to https://wandb.me/wandb-core for more information.
+wandb: Currently logged in as: h-r-huitema to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: Tracking run with wandb version 0.19.8
+wandb: Run data is saved locally in /gpfs/home6/hhuitema/github_repos/SurgeSplam/wandb/wandb/run-20250403_105701-lrvtm3bz
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run lunar-water-2
+wandb: ⭐️ View project at https://wandb.ai/h-r-huitema/GRN%20Training
+wandb: 🚀 View run at https://wandb.ai/h-r-huitema/GRN%20Training/runs/lrvtm3bz
+Traceback (most recent call last):
+  File "/gpfs/home6/hhuitema/github_repos/SurgeSplam/train_GRN.py", line 375, in <module>
+    train_surgedepth(args)
+  File "/gpfs/home6/hhuitema/github_repos/SurgeSplam/train_GRN.py", line 105, in train_surgedepth
+    dataset = concat_zip_datasets(args.data_path,args.depth_path,datasets=datasets,transform=transforms_train,depth_transform=transform_depth,train_student=False)
+  File "/gpfs/home6/hhuitema/github_repos/SurgeSplam/GRN/datasets/SurgeNetStudent.py", line 175, in concat_zip_datasets
+    zip_folders_depth = list(Path(depth_path).iterdir())
+  File "/usr/lib/python3.10/pathlib.py", line 1017, in iterdir
+    for name in self._accessor.listdir(self):
+FileNotFoundError: [Errno 2] No such file or directory: '/scratch-local/71045'
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/gpfs/home6/hhuitema/github_repos/SurgeSplam/train_GRN.py", line 375, in <module>
+[rank0]:     train_surgedepth(args)
+[rank0]:   File "/gpfs/home6/hhuitema/github_repos/SurgeSplam/train_GRN.py", line 105, in train_surgedepth
+[rank0]:     dataset = concat_zip_datasets(args.data_path,args.depth_path,datasets=datasets,transform=transforms_train,depth_transform=transform_depth,train_student=False)
+[rank0]:   File "/gpfs/home6/hhuitema/github_repos/SurgeSplam/GRN/datasets/SurgeNetStudent.py", line 175, in concat_zip_datasets
+[rank0]:     zip_folders_depth = list(Path(depth_path).iterdir())
+[rank0]:   File "/usr/lib/python3.10/pathlib.py", line 1017, in iterdir
+[rank0]:     for name in self._accessor.listdir(self):
+[rank0]: FileNotFoundError: [Errno 2] No such file or directory: '/scratch-local/71045'
+[1;34mwandb[0m: 
+[1;34mwandb[0m: 🚀 View run [33mlunar-water-2[0m at: [34mhttps://wandb.ai/h-r-huitema/GRN%20Training/runs/lrvtm3bz[0m
+[1;34mwandb[0m: Find logs at: [1;35mwandb/wandb/run-20250403_105701-lrvtm3bz/logs[0m
+[rank0]:[W403 10:57:03.976881085 ProcessGroupNCCL.cpp:1496] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+E0403 10:57:04.618000 1989123 torch/distributed/elastic/multiprocessing/api.py:869] failed (exitcode: 1) local_rank: 0 (pid: 1990040) of binary: /usr/bin/python3
+Traceback (most recent call last):
+  File "/usr/local/bin/torchrun", line 8, in <module>
+    sys.exit(main())
+  File "/usr/local/lib/python3.10/dist-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 355, in wrapper
+    return f(*args, **kwargs)
+  File "/usr/local/lib/python3.10/dist-packages/torch/distributed/run.py", line 918, in main
+    run(args)
+  File "/usr/local/lib/python3.10/dist-packages/torch/distributed/run.py", line 909, in run
+    elastic_launch(
+  File "/usr/local/lib/python3.10/dist-packages/torch/distributed/launcher/api.py", line 138, in __call__
+    return launch_agent(self._config, self._entrypoint, list(args))
+  File "/usr/local/lib/python3.10/dist-packages/torch/distributed/launcher/api.py", line 269, in launch_agent
+    raise ChildFailedError(
+torch.distributed.elastic.multiprocessing.errors.ChildFailedError: 
+============================================================
+train_GRN.py FAILED
+------------------------------------------------------------
+Failures:
+  <NO_OTHER_FAILURES>
+------------------------------------------------------------
+Root Cause (first observed failure):
+[0]:
+  time      : 2025-04-03_10:57:04
+  host      : gcn5.local.snellius.surf.nl
+  rank      : 0 (local_rank: 0)
+  exitcode  : 1 (pid: 1990040)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+============================================================
+srun: error: gcn5: task 0: Exited with exit code 1
+srun: Terminating StepId=10944949.0
+
+JOB STATISTICS
+==============
+Job ID: 10944949
+Cluster: snellius
+User/Group: hhuitema/hhuitema
+State: FAILED (exit code 1)
+Nodes: 1
+Cores per node: 9
+CPU Utilized: 00:00:14
+CPU Efficiency: 5.76% of 00:04:03 core-walltime
+Job Wall-clock time: 00:00:27
+Memory Utilized: 1.51 MB
+Memory Efficiency: 0.00% of 60.00 GB (60.00 GB/node)
