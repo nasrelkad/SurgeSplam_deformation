@@ -1,0 +1,51 @@
+/var/spool/slurm/slurmd/job10944939/slurm_script: line 20: wandb: command not found
+Traceback (most recent call last):
+  File "/gpfs/home6/hhuitema/github_repos/SurgeSplam/train_GRN.py", line 13, in <module>
+    from diff_gaussian_rasterization import GaussianRasterizer as Renderer
+ModuleNotFoundError: No module named 'diff_gaussian_rasterization'
+E0403 10:55:53.517000 1966914 torch/distributed/elastic/multiprocessing/api.py:869] failed (exitcode: 1) local_rank: 0 (pid: 1967953) of binary: /usr/bin/python3
+Traceback (most recent call last):
+  File "/usr/local/bin/torchrun", line 8, in <module>
+    sys.exit(main())
+  File "/usr/local/lib/python3.10/dist-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 355, in wrapper
+    return f(*args, **kwargs)
+  File "/usr/local/lib/python3.10/dist-packages/torch/distributed/run.py", line 919, in main
+    run(args)
+  File "/usr/local/lib/python3.10/dist-packages/torch/distributed/run.py", line 910, in run
+    elastic_launch(
+  File "/usr/local/lib/python3.10/dist-packages/torch/distributed/launcher/api.py", line 138, in __call__
+    return launch_agent(self._config, self._entrypoint, list(args))
+  File "/usr/local/lib/python3.10/dist-packages/torch/distributed/launcher/api.py", line 269, in launch_agent
+    raise ChildFailedError(
+torch.distributed.elastic.multiprocessing.errors.ChildFailedError: 
+============================================================
+train_GRN.py FAILED
+------------------------------------------------------------
+Failures:
+  <NO_OTHER_FAILURES>
+------------------------------------------------------------
+Root Cause (first observed failure):
+[0]:
+  time      : 2025-04-03_10:55:53
+  host      : gcn5.local.snellius.surf.nl
+  rank      : 0 (local_rank: 0)
+  exitcode  : 1 (pid: 1967953)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+============================================================
+srun: error: gcn5: task 0: Exited with exit code 1
+srun: Terminating StepId=10944939.0
+
+JOB STATISTICS
+==============
+Job ID: 10944939
+Cluster: snellius
+User/Group: hhuitema/hhuitema
+State: FAILED (exit code 1)
+Nodes: 1
+Cores per node: 9
+CPU Utilized: 00:00:09
+CPU Efficiency: 5.26% of 00:02:51 core-walltime
+Job Wall-clock time: 00:00:19
+Memory Utilized: 1.52 MB
+Memory Efficiency: 0.00% of 60.00 GB (60.00 GB/node)
