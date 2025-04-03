@@ -890,7 +890,7 @@ def rgbd_slam(config: dict):
                                                    config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
                                                    plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
-                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=save_idx,gaussian_deformations=config['deforms'])
+                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=None,gaussian_deformations=config['deforms'])
                 save_idx = save_idx+1
 
                 # Backprop
@@ -1100,7 +1100,7 @@ def rgbd_slam(config: dict):
                 # Loss for current frame
                 loss, variables, losses = get_loss(params, iter_data, variables, iter_time_idx, config['mapping']['loss_weights'],
                                                 config['mapping']['use_sil_for_loss'], config['mapping']['sil_thres'],
-                                                config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'],use_gt_depth = config['depth']['use_gt_depth'], mapping=True,save_idx = iter,gaussian_deformations=config['deforms'])
+                                                config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'],use_gt_depth = config['depth']['use_gt_depth'], mapping=True,save_idx = None,gaussian_deformations=config['deforms'])
                 # Backprop
                 loss.backward()
                 with torch.no_grad():

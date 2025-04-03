@@ -63,7 +63,7 @@ def get_args_parser():
     parser.add_argument('--wandb_logging', default = True, type=bool, help = 'If true, enable weights and biases logging')
     parser.add_argument('--logging_interval',default = 10,type = int, help = 'Interval for wandb and terminal logging')
     parser.add_argument('--teacher_path',default='/media/thesis_ssd/code/SurgeDepth/models/checkpoints/SurgeDepth_V6.pth', type = str,help = 'Path to the teacher model')
-
+    parser.add_argument('--depth_loss_weight',default=0.002,type=float,help = 'Weighting factor for depth in loss function')
     parser.add_argument("--dist_url", default="env://", type=str, help="""url used to set up
         distributed training; see https://pytorch.org/docs/stable/distributed.html""")
     return parser
@@ -230,7 +230,7 @@ def train_one_epoch(args,model,data_loader,optimizer,criterion,epoch,render_para
 
 
         # ~~~~~~~~~~~~~~~~~~~~~~~~~~~ Loss+ Backwards pass ~~~~~~~~~~~~~~~~~~~~~~~~~~~
-        loss = criterion(im_pred, image.squeeze(0))+criterion(depth_pred[0,:,:],depth.squeeze())
+        loss = criterion(im_pred, image.squeeze(0))+args.depth_loss_weight*criterion(depth_pred[0,:,:],depth.squeeze())
 
     
         optimizer.zero_grad()
