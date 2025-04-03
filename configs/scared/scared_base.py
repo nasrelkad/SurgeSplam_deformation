@@ -70,9 +70,9 @@ config = dict(
             log_scales=0.0,
             cam_unnorm_rots=0.002,
             cam_trans=0.005,
-            deform_weights = 0.00,
-            deform_stds = 0.00,
-            deform_biases = 0.00,
+            deform_weights = 0.001,
+            deform_stds = 0.001,
+            deform_biases = 0.001,
         ),
     ),
     mapping=dict(
