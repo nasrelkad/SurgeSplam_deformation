@@ -115,7 +115,7 @@ def render(w2c, k, timestep_data, timestep_depth_data, cfg):
             image_width=cam.image_width,
             tanfovx=cam.tanfovx,
             tanfovy=cam.tanfovy,
-            bg=torch.tensor([1, 1, 1], dtype=torch.float32, device="cuda"),
+            bg=torch.tensor([0, 0, 0], dtype=torch.float32, device="cuda"),
             scale_modifier=cam.scale_modifier,
             viewmatrix=cam.viewmatrix,
             projmatrix=cam.projmatrix,
