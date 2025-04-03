@@ -1,0 +1,23 @@
+cp: cannot stat '/scratch-local/71045/Unfrozen_SurgeNet_Encoder': No such file or directory
+/var/spool/slurm/slurmd/job10945290/slurm_script: line 22: wandb: command not found
+WARNING: skipping mount of /scratch-local/71045: stat /scratch-local/71045: no such file or directory
+INFO:    Terminating squashfuse_ll after timeout
+INFO:    Timeouts can be caused by a running background process
+FATAL:   container creation failed: mount hook function failure: mount /scratch-local/71045->/scratch-local/71045 error: while mounting /scratch-local/71045: mount source /scratch-local/71045 doesn't exist
+srun: error: gcn5: task 0: Exited with exit code 255
+srun: Terminating StepId=10945290.0
+
+JOB STATISTICS
+==============
+Job ID: 10945290
+Cluster: snellius
+User/Group: hhuitema/hhuitema
+State: RUNNING
+Nodes: 1
+Cores per node: 9
+CPU Utilized: 00:00:00
+CPU Efficiency: 0.00% of 00:02:06 core-walltime
+Job Wall-clock time: 00:00:14
+Memory Utilized: 0.00 MB
+Memory Efficiency: 0.00% of 60.00 GB (60.00 GB/node)
+WARNING: Efficiency statistics can only be obtained after the job has ended as seff tool is based on the accounting database data.

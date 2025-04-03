@@ -45,8 +45,8 @@ def get_args_parser():
 
 
     parser.add_argument('--output_dir', default="logs/GRN_1", type=str, help='Path to save logs and checkpoints.')
-    parser.add_argument('--encoder', default = 'vitb', type = str, help = 'Encoder size of the modele')
-    parser.add_argument('--encoder_path',default='models/checkpoints/dynov2/modified_vitb14_dinov2_size336.pth',type = str, help ='path to the pretrained encoder weights')
+    # parser.add_argument('--encoder', default = 'vitb', type = str, help = 'Encoder size of the modele')
+    # parser.add_argument('--encoder_path',default='models/checkpoints/dynov2/modified_vitb14_dinov2_size336.pth',type = str, help ='path to the pretrained encoder weights')
     parser.add_argument('--batch_size_per_gpu', default = 1,type = int, help = 'batch size for each GPU')
     parser.add_argument('--num_workers', default = 2, type = int, help = 'number of data loading workers per GPU')
     parser.add_argument('--img_width', default = 336,type=int, help='input image width')
@@ -55,14 +55,14 @@ def get_args_parser():
     parser.add_argument('--depth_path', default = '/media/thesis_ssd/data/SurgeNet_sample/Depths/SurgeNet_depths/',type = str, help = 'path to gt depth maps')
     parser.add_argument('--seed', default=0, type=int, help='Random seed.')
     # parser.add_argument('--lr', default = 0.001, type = float, help = 'Learning rate')
-    parser.add_argument('--freeze_encoder', default = True, type = bool, help='If true, the DinoV2 encoder weights are frozen and dont receive updates')
+    # parser.add_argument('--freeze_encoder', default = True, type = bool, help='If true, the DinoV2 encoder weights are frozen and dont receive updates')
     parser.add_argument('--save_freq', default = 5, type = int, help = 'Frequency to save model at')
-    parser.add_argument('--data_split', default = 'test', type=str, help = 'Which data split to use for running the code, val contains only 100 samples, train contains all 100 000 images', choices = ['train','test','val'])
+    # parser.add_argument('--data_split', default = 'test', type=str, help = 'Which data split to use for running the code, val contains only 100 samples, train contains all 100 000 images', choices = ['train','test','val'])
     parser.add_argument('--learning_rate',default = 5e-5,type = float, help = 'learning rate for optimizer')
-    parser.add_argument('--pretrained_learning_rate',default = 5e-6,type=float,help='learning rate for the pretrained encoder')
+    # parser.add_argument('--pretrained_learning_rate',default = 5e-6,type=float,help='learning rate for the pretrained encoder')
     parser.add_argument('--wandb_logging', default = True, type=bool, help = 'If true, enable weights and biases logging')
     parser.add_argument('--logging_interval',default = 10,type = int, help = 'Interval for wandb and terminal logging')
-    parser.add_argument('--teacher_path',default='/media/thesis_ssd/code/SurgeDepth/models/checkpoints/SurgeDepth_V6.pth', type = str,help = 'Path to the teacher model')
+    # parser.add_argument('--teacher_path',default='/media/thesis_ssd/code/SurgeDepth/models/checkpoints/SurgeDepth_V6.pth', type = str,help = 'Path to the teacher model')
     parser.add_argument('--depth_loss_weight',default=0.002,type=float,help = 'Weighting factor for depth in loss function')
     parser.add_argument("--dist_url", default="env://", type=str, help="""url used to set up
         distributed training; see https://pytorch.org/docs/stable/distributed.html""")
@@ -100,7 +100,7 @@ def train_surgedepth(args):
     ])
     transform_depth = transforms.Compose([transforms.Resize((args.img_height,args.img_width),antialias = False)])
 
-    datasets = ['Cholec80_video03_s0002.zip']
+    datasets = ['Cholec80_video01_s0001.zip']
 
     dataset = concat_zip_datasets(args.data_path,args.depth_path,datasets=datasets,transform=transforms_train,depth_transform=transform_depth,train_student=False)
     sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
