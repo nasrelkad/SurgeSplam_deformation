@@ -84,6 +84,8 @@ class ZipDataset(torch.utils.data.Dataset):
         for depth_name, m in self.depth_folder_members.items():
             if depth_name.endswith('.npy'):
                 self.depths.append(depth_name)
+        # print(len(self.depths))
+    
 
     @staticmethod
     def _valid_member(
@@ -102,6 +104,7 @@ class ZipDataset(torch.utils.data.Dataset):
     def get_sample(self, index: int) -> Tuple[torch.Tensor, torch.Tensor,str]:
         """Returns the items for a dataloader object"""
         do_flip = np.random.rand()<0.5 and self.train_student
+        # print(index)
         # Open the zip file
         with zipfile.ZipFile(self.zip_path) as image_zip:
             fn = self.image_folder_members[self.images[index]].filename
