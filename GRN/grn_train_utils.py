@@ -114,6 +114,18 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification
     return params, variables
 
 
+# def transformed_GRNparams2rendervar(params, transformed_pts):
+#     rendervar = {
+#         'means3D': transformed_pts,
+#         'rotations': params['unnorm_rotations'],
+#         'opacities': params['logit_opacities'],
+#         # 'scales': torch.exp(torch.tile(params['log_scales'], (1, 3))),
+#         'means2D': torch.zeros_like(params['means3D'], requires_grad=True, device="cuda") + 0,
+#         'colors_precomp' : params['rgb_colors'],
+#         'scales' : params['log_scales']
+#     }
+    return rendervar
+
 def transformed_GRNparams2rendervar(params, transformed_pts):
     rendervar = {
         'means3D': transformed_pts,
@@ -135,6 +147,20 @@ def transformed_GRNparams2rendervar(params, transformed_pts):
             rendervar['scales'] = params['log_scales']
     return rendervar
 
+# def transformed_GRNparams2depthplussilhouette(params, w2c, transformed_pts):
+#     rendervar = {
+#         'means3D': transformed_pts,
+#         'colors_precomp': get_depth_and_silhouette(transformed_pts, w2c),
+#         'rotations': params['unnorm_rotations'],
+#         'opacities': params['logit_opacities'],
+#         # 'scales': torch.exp(torch.tile(params['log_scales'], (1, 3))),
+#         'means2D': torch.zeros_like(params['means3D'], requires_grad=True, device="cuda") + 0
+#     }
+#     if params['log_scales'].shape[1] == 1:
+#         rendervar['scales'] = torch.tile(params['log_scales'], (1, 3))
+#     else:
+#         rendervar['scales'] = params['log_scales']
+#     return rendervar
 
 def transformed_GRNparams2depthplussilhouette(params, w2c, transformed_pts):
     rendervar = {
@@ -150,3 +176,7 @@ def transformed_GRNparams2depthplussilhouette(params, w2c, transformed_pts):
     else:
         rendervar['scales'] = params['log_scales']
     return rendervar
+
+
+
+
