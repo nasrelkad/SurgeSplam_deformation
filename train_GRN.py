@@ -50,7 +50,7 @@ def get_args_parser():
     parser.add_argument('--epochs', default=5, type=int, help='Number of epochs of training.')
 
 
-    parser.add_argument('--output_dir', default="logs/GRN_5", type=str, help='Path to save logs and checkpoints.')
+    parser.add_argument('--output_dir', default="logs/GRN_6", type=str, help='Path to save logs and checkpoints.')
     # parser.add_argument('--encoder', default = 'vitb', type = str, help = 'Encoder size of the modele')
     # parser.add_argument('--encoder_path',default='models/checkpoints/dynov2/modified_vitb14_dinov2_size336.pth',type = str, help ='path to the pretrained encoder weights')
     parser.add_argument('--batch_size_per_gpu', default = 1,type = int, help = 'batch size for each GPU')
@@ -215,11 +215,13 @@ def train_surgedepth(args):
 
             )
 
-
+    normalize = transforms.Normalize([0.46888983, 0.29536288, 0.28712815],[0.24689102 ,0.21034359, 0.21188641])
+    inv_normalize = transforms.Normalize([-0.46888983/0.24689102,-0.29536288/0.21034359,-0.28712815/0.21188641],[1/0.24689102,1/0.21034359,1/0.21188641]) #Take the inverse of the normalization
 
     ## Loading/preparing data
     transforms_train = transforms.Compose([transforms.ToTensor(),
-                                           transforms.Resize((args.img_height,args.img_width),antialias = False)
+                                           transforms.Resize((args.img_height,args.img_width),antialias = False),
+                                           normalize
     ])
     transform_depth = transforms.Compose([transforms.Resize((args.img_height,args.img_width),antialias = False)])
 
@@ -271,7 +273,8 @@ def train_surgedepth(args):
     model = nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
 
 
-    intrinsics =  torch.tensor([[300., 0., 16.], [0., 300., 16.], [0., 0., 1.]]).cuda()
+    # intrinsics =  torch.tensor([[300., 0., 16.], [0., 300., 16.], [0., 0., 1.]]).cuda()
+    intrinsics = torch.tensor([[1.03530811e+03, 0., 5.96955017e+02], [0., 1.03508765e+03,5.20410034e+02], [0., 0., 1.]]).cuda() # SCARED (Da vinci Xi) intrinsics
     w2c = torch.eye(4).cuda()
     cam = setup_camera(336, 336, intrinsics.cpu().numpy(), w2c.detach().cpu().numpy(), use_simplification=False)
     render_params = {'intrinsics': intrinsics,
@@ -281,7 +284,7 @@ def train_surgedepth(args):
     ## Train loop
     for epoch in range(start_epoch,args.epochs):
         data_loader.sampler.set_epoch(epoch)
-        train_stats = train_one_epoch(args,model,data_loader=data_loader, optimizer=optimizer,criterion=criterion,epoch= epoch,render_params=render_params)
+        train_stats = train_one_epoch(args,model,data_loader=data_loader, optimizer=optimizer,criterion=criterion,epoch= epoch,render_params=render_params,inv_normalize = inv_normalize)
 
         save_dict = {'model': model.module.state_dict(),
                      'optimizer':optimizer.state_dict(),
@@ -305,7 +308,7 @@ def train_surgedepth(args):
     return None
 
 
-def train_one_epoch(args,model,data_loader,optimizer,criterion,epoch,render_params):
+def train_one_epoch(args,model,data_loader,optimizer,criterion,epoch,render_params,inv_normalize):
     model.train()
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
     metric_logger = distributed_utils.MetricLogger(delimiter="  ")
@@ -374,7 +377,8 @@ def train_one_epoch(args,model,data_loader,optimizer,criterion,epoch,render_para
         mask = depth > 0
         mask = mask.tile(1,3,1,1)
         mask = mask[0,0,:,:].reshape(-1)
-        pt_cloud,mean3_sq_dist= get_pointcloud(color,depth*scale,render_params['intrinsics'],render_params['w2c'],compute_mean_sq_dist=True,mask = mask)
+
+        pt_cloud,mean3_sq_dist= get_pointcloud(inv_normalize(color),depth*scale,render_params['intrinsics'],render_params['w2c'],compute_mean_sq_dist=True,mask = mask)
         params,variables = initialize_params(pt_cloud,1,mean3_sq_dist)
 
 
@@ -392,7 +396,7 @@ def train_one_epoch(args,model,data_loader,optimizer,criterion,epoch,render_para
 
  
 
-        curr_data = {'cam': render_params['cam'], 'im': color, 'depth': depth, 'id': 0, 'intrinsics': render_params['intrinsics'], 
+        curr_data = {'cam': render_params['cam'], 'im': inv_normalize(color), 'depth': depth*scale, 'id': 0, 'intrinsics': render_params['intrinsics'], 
                         'w2c': render_params['w2c'], 'iter_gt_w2c_list': render_params['w2c']}
 
         # rendervar = transformed_GRNparams2rendervar(params,params['means3D'])
@@ -437,7 +441,7 @@ def train_one_epoch(args,model,data_loader,optimizer,criterion,epoch,render_para
         #     stats_log = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
         #     wandb.log(stats_log)
 
-        # ~~~~~~~~~~~~~~~~~~~~~~~~~~~ SOME WANDB LOGGING ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        # # ~~~~~~~~~~~~~~~~~~~~~~~~~~~ SOME WANDB LOGGING ~~~~~~~~~~~~~~~~~~~~~~~~~~~
         with torch.no_grad():
             if it % args.logging_interval ==0: # Log every 10th batch
                 if args.rank ==0:
@@ -451,7 +455,7 @@ def train_one_epoch(args,model,data_loader,optimizer,criterion,epoch,render_para
                     fig,ax = plt.subplots(1,4)
                     ax[0].imshow(im_pred.permute(1,2,0).cpu().detach())
                     ax[0].set_title('Rendered Image')
-                    ax[1].imshow(color.squeeze(0).permute(1,2,0).cpu().detach())
+                    ax[1].imshow(curr_data['im'].squeeze(0).permute(1,2,0).cpu().detach())
                     ax[1].set_title('Input Image')
                     ax[2].imshow(depth_pred[0,:,:].cpu().detach())
                     ax[2].set_title('Rendered Depth')
