@@ -115,12 +115,29 @@ def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True,
         return point_cld
 
 
-def initialize_deformations(params,nr_basis):
+def initialize_deformations(params,nr_basis,use_distributed_biases,total_timescale= None):
+    """Function to initialize deformation parameters
+
+    Args:
+        params (dict): dict containing all the gaussian parameters
+        nr_basis (int): nr of basis functions to generate for each gaussian attribute
+        total_timescale (int): the total timescale of the deformation model, used to evenly distribute biases across timespan
+
+    Returns:
+        params (dict): Updated params dict with the gaussian deformation parameters
+    """
     # Means3D, unnorm rotations and log_scales should receive deformation params
     N = params['means3D'].shape[0]
     weights = torch.randn([N,nr_basis,10],requires_grad = True,device = 'cuda')*0.0 # We have N x nr_basis x 10 (xyz,scales,rots) weights
     stds = torch.ones([N,nr_basis,10],requires_grad = True,device = 'cuda') # We have N x nr_basis x 10 (xyz,scales,rots) weights
-    biases = torch.randn([N,nr_basis,10],requires_grad = True,device = 'cuda')*0.0 # We have N x nr_basis x 10 (xyz,scales,rots) weights
+    if not use_distributed_biases:
+        biases = torch.randn([N,nr_basis,10],requires_grad = True,device = 'cuda')*0.0 # We have N x nr_basis x 10 (xyz,scales,rots) weights
+    
+    
+    else:
+        interval = torch.ceil(torch.tensor(total_timescale/nr_basis)) # For biases, we want to evenly distribute them across the timespan, so we have nr_basis biases at an interval of total_timescale/nr_basis
+        arange = torch.arange(0,total_timescale,interval).unsqueeze(0).unsqueeze(-1)
+        biases = torch.tile(arange,(N,1,10)) # Repeat the distributed biases to generate basis functions for each parameter
 
     params['deform_weights'] = weights
     params['deform_stds'] = stds
@@ -152,7 +169,7 @@ def deform_gaussians(params,time,deform_grad):
 
     return xyz,rots,scales
 
-def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification=True,nr_basis = 10):
+def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification=True,nr_basis = 10,use_distributed_biases = False,total_timescale = None):
     num_pts = init_pt_cld.shape[0]
     means3D = init_pt_cld[:, :3] # [num_gaussians, 3]
     unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1)) # [num_gaussians, 3]
@@ -166,7 +183,7 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification
     }
     if not use_simplification:
         params['feature_rest'] = torch.zeros(num_pts, 45) # set SH degree 3 fixed
-    params = initialize_deformations(params,nr_basis)
+    params = initialize_deformations(params,nr_basis,use_distributed_biases=use_distributed_biases,total_timescale = total_timescale)
     # Initialize a single gaussian trajectory to model the camera poses relative to the first frame
     cam_rots = np.tile([1, 0, 0, 0], (1, 1))
     cam_rots = np.tile(cam_rots[:, :, None], (1, 1, num_frames))
@@ -196,7 +213,7 @@ def initialize_optimizer(params, lrs_dict):
     return torch.optim.Adam(param_groups, lr=0.0, eps=1e-15)
 
 
-def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_radius_depth_ratio, mean_sq_dist_method, densify_dataset=None, use_simplification=True,use_gt_depth = True):
+def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_radius_depth_ratio, mean_sq_dist_method, densify_dataset=None, use_simplification=True,use_gt_depth = True,nr_basis = 10,use_distributed_biases = False,total_timescale=None):
     # Get RGB-D Data & Camera Parameters
     # color, depth, intrinsics, pose = dataset[0]
 
@@ -231,7 +248,7 @@ def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_rad
                                                 mean_sq_dist_method=mean_sq_dist_method)
 
     # Initialize Parameters
-    params, variables = initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification)
+    params, variables = initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification,nr_basis = nr_basis,use_distributed_biases=use_distributed_biases,total_timescale=total_timescale)
 
     # Initialize an estimate of scene radius for Gaussian-Splatting Densification
     variables['scene_radius'] = torch.max(depth)/scene_radius_depth_ratio # NOTE: change_here
@@ -436,7 +453,7 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     return loss, variables, weighted_losses
 
 
-def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis = 10):
+def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis = 10,use_distributed_biases = False, total_timescale = None):
     num_pts = new_pt_cld.shape[0]
     means3D = new_pt_cld[:, :3] # [num_gaussians, 3]
     unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1)) # [num_gaussians, 3]
@@ -449,7 +466,7 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis
         'log_scales': torch.tile(torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 1 if use_simplification else 3)),
     }
     # print(f'num pts {num_pts}')
-    params = initialize_deformations(params,10)
+    params = initialize_deformations(params,nr_basis = nr_basis,use_distributed_biases=use_distributed_biases,total_timescale = total_timescale)
     if not use_simplification:
         params['feature_rest'] = torch.zeros(num_pts, 45) # set SH degree 3 fixed
     for k, v in params.items():
@@ -462,7 +479,7 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis
     return params
 
 
-def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq_dist_method, use_simplification=True):
+def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq_dist_method, use_simplification=True,nr_basis = 10,use_distributed_biases = False,total_timescale = None):
     # Silhouette Rendering
     local_means,local_rots,local_scales = deform_gaussians(params,time_idx,True)
     transformed_pts = transform_to_frame(local_means,params, time_idx, gaussians_grad=False, camera_grad=False)
@@ -496,7 +513,7 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
         new_pt_cld, mean3_sq_dist = get_pointcloud(curr_data['im'], curr_data['depth'], curr_data['intrinsics'], 
                                     curr_w2c, mask=non_presence_mask, compute_mean_sq_dist=True,
                                     mean_sq_dist_method=mean_sq_dist_method)
-        new_params = initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification)
+        new_params = initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis = nr_basis,use_distributed_biases=use_distributed_biases,total_timescale = total_timescale)
         for k, v in new_params.items():
             params[k] = torch.nn.Parameter(torch.cat((params[k], v), dim=0).requires_grad_(True))
         num_pts = params['means3D'].shape[0]
@@ -682,7 +699,10 @@ def rgbd_slam(config: dict):
                                                                         config['scene_radius_depth_ratio'],
                                                                         config['mean_sq_dist_method'],
                                                                         densify_dataset=densify_dataset, 
-                                                                        use_simplification=config['gaussian_simplification'])                                                                                                                  
+                                                                        use_simplification=config['gaussian_simplification'],
+                                                                        nr_basis=config['deforms']['nr_basis'],
+                                                                        use_distributed_biases=config['deforms']['use_distributed_biases'],
+                                                                        total_timescale=config['deforms']['total_timescale'])                                                                                                                  
     else:
         color, depth, intrinsics, pose = dataset[0]
         # Initialize Parameters & Canoncial Camera parameters
@@ -724,7 +744,12 @@ def rgbd_slam(config: dict):
                                                                             config['scene_radius_depth_ratio'],
                                                                             config['mean_sq_dist_method'], 
                                                                             use_simplification=config['gaussian_simplification'],
-                                                                            use_gt_depth = config['depth']['use_gt_depth'])        
+                                                                            use_gt_depth = config['depth']['use_gt_depth'],
+                                                                            nr_basis=config['deforms']['nr_basis'],
+                                                                            use_distributed_biases=config['deforms']['use_distributed_biases'],
+                                                                            total_timescale=config['deforms']['total_timescale'])        
+        
+        
     
     # Init seperate dataloader for tracking if required
     if seperate_tracking_res:
@@ -890,7 +915,7 @@ def rgbd_slam(config: dict):
                                                    config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
                                                    plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
-                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=None,gaussian_deformations=config['deforms'])
+                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=None,gaussian_deformations=config['deforms']['use_deformations'])
                 save_idx = save_idx+1
 
                 # Backprop
@@ -1018,7 +1043,10 @@ def rgbd_slam(config: dict):
                 params, variables = add_new_gaussians(params, variables, densify_curr_data, 
                                                       config['mapping']['sil_thres'], time_idx,
                                                       config['mean_sq_dist_method'], 
-                                                      config['gaussian_simplification'])
+                                                      config['gaussian_simplification'],
+                                                      nr_basis = config['deforms']['nr_basis'],
+                                                      use_distributed_biases = config['deforms']['use_distributed_biases'],
+                                                      total_timescale = config['deforms']['total_timescale'])
                 post_num_pts = params['means3D'].shape[0]
                 added_new_gaussians.append(post_num_pts)
             if not config['distance_keyframe_selection']:
@@ -1100,7 +1128,7 @@ def rgbd_slam(config: dict):
                 # Loss for current frame
                 loss, variables, losses = get_loss(params, iter_data, variables, iter_time_idx, config['mapping']['loss_weights'],
                                                 config['mapping']['use_sil_for_loss'], config['mapping']['sil_thres'],
-                                                config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'],use_gt_depth = config['depth']['use_gt_depth'], mapping=True,save_idx = None,gaussian_deformations=config['deforms'])
+                                                config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'],use_gt_depth = config['depth']['use_gt_depth'], mapping=True,save_idx = None,gaussian_deformations=config['deforms']['use_deformations'])
                 # Backprop
                 loss.backward()
                 with torch.no_grad():
