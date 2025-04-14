@@ -72,6 +72,7 @@ def get_args_parser():
     parser.add_argument('--depth_loss_weight',default=0.002,type=float,help = 'Weighting factor for depth in loss function')
     parser.add_argument("--dist_url", default="env://", type=str, help="""url used to set up
         distributed training; see https://pytorch.org/docs/stable/distributed.html""")
+    parser.add_argument('--num_accumulation_steps', default = 50, type = int, help = 'nr of batches to use for gradient accumultation')
     return parser
 
 
@@ -235,7 +236,7 @@ def train_surgedepth(args):
         sampler = sampler,
         batch_size = args.batch_size_per_gpu,
         num_workers = args.num_workers,
-        pin_memory = True,
+        pin_memory = False,
         drop_last = True
     )
 
@@ -424,10 +425,14 @@ def train_one_epoch(args,model,data_loader,optimizer,criterion,epoch,render_para
                             plot_dir=None, visualize_tracking_loss=False,
                             tracking_iteration=0,GRN_input=True,plotting = False)
 
-
-        optimizer.zero_grad()
+        loss = loss/args.num_accumulation_steps
         loss.backward()
-        optimizer.step()
+
+        if ((it+1)%args.num_accumulation_steps == 0) or (it+1 ==x len(data_loader)):
+            optimizer.step()
+            optimizer.zero_grad()
+
+
 
         # if not torch.isnan(loss):
         #     optimizer.step()
