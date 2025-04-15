@@ -161,8 +161,9 @@ def deform_gaussians(params,time,deform_grad):
     deform_xyz = deform[:,:3]
     deform_rots = deform[:,3:7]
     deform_scales = deform[:,7:10]
-
-
+    # print(f'xyz: {torch.sum(deform_xyz)}')
+    # print(torch.sum(deform_rots).item())
+    # print(torch.sum(deform_scales).item())
     xyz = params['means3D']+deform_xyz
     rots = params['unnorm_rotations']+deform_rots
     scales = params['log_scales']+deform_scales
@@ -189,7 +190,6 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification
     cam_rots = np.tile(cam_rots[:, :, None], (1, 1, num_frames))
     params['cam_unnorm_rots'] = cam_rots
     params['cam_trans'] = np.zeros((1, 3, num_frames))
-    # params = initialize_deformations(params,10) ## TODO: add nr_basis to config
     for k, v in params.items():
         # Check if value is already a torch tensor
         if not isinstance(v, torch.Tensor):
@@ -290,7 +290,7 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
         if tracking:
             local_means,local_rots,local_scales = deform_gaussians(params,iter_time_idx,deform_grad = True)
             # raise ValueError('This shouldnt really happen tbh')
-
+            # print(torch.sum(local_means-params['means3D']))
         else:
             local_means,local_rots,local_scales= deform_gaussians(params,iter_time_idx,deform_grad = False)
     else:
@@ -301,7 +301,7 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
         # Get current frame Gaussians, where only the camera pose gets gradient
         
         transformed_pts = transform_to_frame(local_means,params, iter_time_idx, 
-                                             gaussians_grad=False,
+                                             gaussians_grad=True,
                                              camera_grad=True)
     elif mapping:
         if do_ba: # Bundle Adjustment
@@ -441,6 +441,11 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
         losses['im'] = torch.abs(curr_data['im'] - im).sum()
     else:
         losses['im'] = 0.8 * l1_loss_v1(im, curr_data['im']) + 0.2 * (1.0 - calc_ssim(im, curr_data['im']))
+    
+    # Deformation regularization
+    if tracking and gaussian_deformations:
+        losses['deform'] = torch.sum(torch.square(params['means3D']-local_means))/params['means3D'].shape[0]
+
 
     weighted_losses = {k: v * loss_weights[k] for k, v in losses.items()}
     loss = sum(weighted_losses.values())
@@ -449,7 +454,7 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     variables['max_2D_radius'][seen] = torch.max(radius[seen], variables['max_2D_radius'][seen])
     variables['seen'] = seen
     weighted_losses['loss'] = loss
-
+    # print(weighted_losses)
     return loss, variables, weighted_losses
 
 
@@ -1223,11 +1228,7 @@ def rgbd_slam(config: dict):
         f.write(f"Average Mapping/Frame Time: {mapping_frame_time_avg} s\n")
         f.write(f"Frame Time: {tracking_frame_time_avg + mapping_frame_time_avg} s\n")
     
-    # Evaluate Final Parameters
-    dataset = [dataset, eval_dataset, 'C3VD'] if dataset_config["train_or_test"] == 'train' else dataset
-    with torch.no_grad():
-        eval_save(dataset, params, eval_dir, sil_thres=config['mapping']['sil_thres'],
-                mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'])
+
 
     # Add Camera Parameters to Save them
     params['timestep'] = variables['timestep']
@@ -1244,6 +1245,12 @@ def rgbd_slam(config: dict):
     # Save Parameters
     save_params(params, output_dir)
     save_means3D(params['means3D'], output_dir)
+
+        # Evaluate Final Parameters
+    dataset = [dataset, eval_dataset, 'C3VD'] if dataset_config["train_or_test"] == 'train' else dataset
+    with torch.no_grad():
+        eval_save(dataset, params, eval_dir, sil_thres=config['mapping']['sil_thres'],
+                mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'])
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
