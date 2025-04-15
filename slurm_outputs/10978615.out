@@ -1,0 +1,48 @@
+/var/spool/slurm/slurmd/job10978615/slurm_script: line 21: wandb: command not found
+Traceback (most recent call last):
+  File "/usr/local/bin/torchrun", line 8, in <module>
+    sys.exit(main())
+  File "/usr/local/lib/python3.10/dist-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 355, in wrapper
+    return f(*args, **kwargs)
+  File "/usr/local/lib/python3.10/dist-packages/torch/distributed/run.py", line 918, in main
+    run(args)
+  File "/usr/local/lib/python3.10/dist-packages/torch/distributed/run.py", line 909, in run
+    elastic_launch(
+  File "/usr/local/lib/python3.10/dist-packages/torch/distributed/launcher/api.py", line 138, in __call__
+    return launch_agent(self._config, self._entrypoint, list(args))
+  File "/usr/local/lib/python3.10/dist-packages/torch/distributed/launcher/api.py", line 260, in launch_agent
+    result = agent.run()
+  File "/usr/local/lib/python3.10/dist-packages/torch/distributed/elastic/metrics/api.py", line 137, in wrapper
+    result = f(*args, **kwargs)
+  File "/usr/local/lib/python3.10/dist-packages/torch/distributed/elastic/agent/server/api.py", line 711, in run
+    result = self._invoke_run(role)
+  File "/usr/local/lib/python3.10/dist-packages/torch/distributed/elastic/agent/server/api.py", line 864, in _invoke_run
+    self._initialize_workers(self._worker_group)
+  File "/usr/local/lib/python3.10/dist-packages/torch/distributed/elastic/metrics/api.py", line 137, in wrapper
+    result = f(*args, **kwargs)
+  File "/usr/local/lib/python3.10/dist-packages/torch/distributed/elastic/agent/server/api.py", line 683, in _initialize_workers
+    self._rendezvous(worker_group)
+  File "/usr/local/lib/python3.10/dist-packages/torch/distributed/elastic/metrics/api.py", line 137, in wrapper
+    result = f(*args, **kwargs)
+  File "/usr/local/lib/python3.10/dist-packages/torch/distributed/elastic/agent/server/api.py", line 500, in _rendezvous
+    rdzv_info = spec.rdzv_handler.next_rendezvous()
+  File "/usr/local/lib/python3.10/dist-packages/torch/distributed/elastic/rendezvous/static_tcp_rendezvous.py", line 67, in next_rendezvous
+    self._store = TCPStore(  # type: ignore[call-arg]
+RuntimeError: The server socket has failed to listen on any local network address. port: 29500, useIpv6: 0, code: -98, name: EADDRINUSE, message: address already in use
+srun: error: gcn5: task 0: Exited with exit code 1
+srun: Terminating StepId=10978615.0
+
+JOB STATISTICS
+==============
+Job ID: 10978615
+Cluster: snellius
+User/Group: hhuitema/hhuitema
+State: RUNNING
+Nodes: 1
+Cores per node: 9
+CPU Utilized: 00:00:00
+CPU Efficiency: 0.00% of 00:02:42 core-walltime
+Job Wall-clock time: 00:00:18
+Memory Utilized: 0.00 MB
+Memory Efficiency: 0.00% of 60.00 GB (60.00 GB/node)
+WARNING: Efficiency statistics can only be obtained after the job has ended as seff tool is based on the accounting database data.
