@@ -129,7 +129,7 @@ def initialize_deformations(params,nr_basis,use_distributed_biases,total_timesca
     # Means3D, unnorm rotations and log_scales should receive deformation params
     N = params['means3D'].shape[0]
     weights = torch.randn([N,nr_basis,10],requires_grad = True,device = 'cuda')*0.0 # We have N x nr_basis x 10 (xyz,scales,rots) weights
-    stds = torch.ones([N,nr_basis,10],requires_grad = True,device = 'cuda') # We have N x nr_basis x 10 (xyz,scales,rots) weights
+    stds = torch.ones([N,nr_basis,10],requires_grad = True,device = 'cuda')*10 # We have N x nr_basis x 10 (xyz,scales,rots) weights
     if not use_distributed_biases:
         biases = torch.randn([N,nr_basis,10],requires_grad = True,device = 'cuda')*0.0 # We have N x nr_basis x 10 (xyz,scales,rots) weights
     
