@@ -129,7 +129,11 @@ def initialize_deformations(params,nr_basis,use_distributed_biases,total_timesca
     # Means3D, unnorm rotations and log_scales should receive deformation params
     N = params['means3D'].shape[0]
     weights = torch.randn([N,nr_basis,10],requires_grad = True,device = 'cuda')*0.0 # We have N x nr_basis x 10 (xyz,scales,rots) weights
+<<<<<<< HEAD
     stds = torch.ones([N,nr_basis,10],requires_grad = True,device = 'cuda')*10 # We have N x nr_basis x 10 (xyz,scales,rots) weights
+=======
+    stds = torch.ones([N,nr_basis,10],requires_grad = True,device = 'cuda')*0.01 # We have N x nr_basis x 10 (xyz,scales,rots) weights
+>>>>>>> 34ea6d6b46d7db7e1f78c60a009b4322f9f1e8a7
     if not use_distributed_biases:
         biases = torch.randn([N,nr_basis,10],requires_grad = True,device = 'cuda')*0.0 # We have N x nr_basis x 10 (xyz,scales,rots) weights
     
@@ -906,6 +910,9 @@ def rgbd_slam(config: dict):
             # Keep Track of Best Candidate Rotation & Translation
             candidate_cam_unnorm_rot = params['cam_unnorm_rots'][..., time_idx].detach().clone()
             candidate_cam_tran = params['cam_trans'][..., time_idx].detach().clone()
+            candidate_deform_biases = params['deform_biases'].detach().clone()
+            candidate_deform_weights = params['deform_weights'].detach().clone()
+            candidate_deform_stds = params['deform_stds'].detach().clone()
             current_min_loss = float(1e20)
             # Tracking Optimization
             iter = 0
@@ -920,7 +927,7 @@ def rgbd_slam(config: dict):
                                                    config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
                                                    plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
-                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=None,gaussian_deformations=config['deforms']['use_deformations'])
+                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=save_idx,gaussian_deformations=config['deforms']['use_deformations'])
                 save_idx = save_idx+1
 
                 # Backprop
@@ -942,6 +949,9 @@ def rgbd_slam(config: dict):
                         current_min_loss = loss
                         candidate_cam_unnorm_rot = params['cam_unnorm_rots'][..., time_idx].detach().clone()
                         candidate_cam_tran = params['cam_trans'][..., time_idx].detach().clone()
+                        candidate_deform_biases = params['deform_biases'].detach().clone()
+                        candidate_deform_weights = params['deform_weights'].detach().clone()
+                        candidate_deform_stds = params['deform_stds'].detach().clone()
                     # Report Progress
                     if config['report_iter_progress']:
                         report_progress(params, tracking_curr_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True)
@@ -968,6 +978,10 @@ def rgbd_slam(config: dict):
             with torch.no_grad():
                 params['cam_unnorm_rots'][..., time_idx] = candidate_cam_unnorm_rot
                 params['cam_trans'][..., time_idx] = candidate_cam_tran
+                params['deform_biases'] = candidate_deform_biases
+                params['deform_weights'] = candidate_deform_weights
+                params['deform_stds'] = candidate_deform_stds
+
         elif time_idx > 0 and config['tracking']['use_gt_poses']:
             with torch.no_grad():
                 # Get the ground truth pose relative to frame 0
