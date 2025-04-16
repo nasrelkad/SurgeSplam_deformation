@@ -138,7 +138,7 @@ config = dict(
     ),
     depth = dict(
         use_gt_depth = False,
-        model_path = '/media/thesis_ssd/code/EndoGSLAM/EndoGSLAM/models/SurgeDepth/SurgeDepthStudent_V5.pth',
+        model_path = '/home/hhuitema/github_repos/SurgeSplam/models/SurgeDepth/SurgeDepthStudent_V5.pth',
         model_size = 'vitb',
         normalization_means = [0.46888983, 0.29536288, 0.28712815], 
         normalization_stds = [0.24689102 ,0.21034359, 0.21188641],
