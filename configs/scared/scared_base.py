@@ -145,5 +145,10 @@ config = dict(
         shift_gt =   0.0021386505104601383   ,
         scale_gt =   0.01995653659105301    ,
     ), 
-    deforms = True  
+    deforms = dict(
+        use_deformations = False,
+        nr_basis = 10,
+        use_distributed_biases = True,
+        total_timescale = 100
+    )     
 )
