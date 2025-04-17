@@ -129,11 +129,7 @@ def initialize_deformations(params,nr_basis,use_distributed_biases,total_timesca
     # Means3D, unnorm rotations and log_scales should receive deformation params
     N = params['means3D'].shape[0]
     weights = torch.randn([N,nr_basis,10],requires_grad = True,device = 'cuda')*0.0 # We have N x nr_basis x 10 (xyz,scales,rots) weights
-<<<<<<< HEAD
-    stds = torch.ones([N,nr_basis,10],requires_grad = True,device = 'cuda')*10 # We have N x nr_basis x 10 (xyz,scales,rots) weights
-=======
-    stds = torch.ones([N,nr_basis,10],requires_grad = True,device = 'cuda')*0.01 # We have N x nr_basis x 10 (xyz,scales,rots) weights
->>>>>>> 34ea6d6b46d7db7e1f78c60a009b4322f9f1e8a7
+    stds = torch.ones([N,nr_basis,10],requires_grad = True,device = 'cuda') # We have N x nr_basis x 10 (xyz,scales,rots) weights
     if not use_distributed_biases:
         biases = torch.randn([N,nr_basis,10],requires_grad = True,device = 'cuda')*0.0 # We have N x nr_basis x 10 (xyz,scales,rots) weights
     
@@ -1147,7 +1143,7 @@ def rgbd_slam(config: dict):
                 # Loss for current frame
                 loss, variables, losses = get_loss(params, iter_data, variables, iter_time_idx, config['mapping']['loss_weights'],
                                                 config['mapping']['use_sil_for_loss'], config['mapping']['sil_thres'],
-                                                config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'],use_gt_depth = config['depth']['use_gt_depth'], mapping=True,save_idx = None,gaussian_deformations=config['deforms']['use_deformations'])
+                                                config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'],use_gt_depth = config['depth']['use_gt_depth'], mapping=True,save_idx = iter,gaussian_deformations=config['deforms']['use_deformations'])
                 # Backprop
                 loss.backward()
                 with torch.no_grad():
