@@ -31,7 +31,8 @@ from utils.keyframe_selection import keyframe_selection_overlap, keyframe_select
 from utils.recon_helpers import setup_camera, energy_mask
 from utils.slam_helpers import (
     transformed_params2rendervar, transformed_params2depthplussilhouette,
-    transform_to_frame, l1_loss_v1, matrix_to_quaternion
+    transform_to_frame, l1_loss_v1, matrix_to_quaternion,
+    transformed_GRNparams2depthplussilhouette,transformed_GRNparams2rendervar,
 )
 from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, densify
 from utils.vis_utils import plot_video
@@ -213,7 +214,37 @@ def initialize_optimizer(params, lrs_dict):
     return torch.optim.Adam(param_groups, lr=0.0, eps=1e-15)
 
 
-def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_radius_depth_ratio, mean_sq_dist_method, densify_dataset=None, use_simplification=True,use_gt_depth = True,nr_basis = 10,use_distributed_biases = False,total_timescale=None):
+def grn_initialization(model,params,init_pt_cld,mean3_sq_dist,color,depth,mask = None):
+
+    normalize = torchvision.transforms.Normalize([0.46888983, 0.29536288, 0.28712815],[0.24689102 ,0.21034359, 0.21188641])
+    inv_normalize = torchvision.transforms.Normalize([-0.46888983/0.24689102,-0.29536288/0.21034359,-0.28712815/0.21188641],[1/0.24689102,1/0.21034359,1/0.21188641]) #Take the inverse of the normalization
+
+    color = normalize(color).detach()
+    scale = torch.max(depth).detach()
+    depth = (depth/scale).detach()
+
+    input = torch.cat((color,depth),axis = 0).unsqueeze(0).detach()
+    if mask == None:
+        mask = depth > 0
+        mask = mask.tile(1,3,1,1)
+        mask = mask[0,0,:,:].reshape(-1)
+        
+
+    output = model(input).detach()
+    # print(output)
+    cols = torch.permute(output[0], (1, 2, 0)).reshape(-1, 8) # (C, H, W) -> (H, W, C) -> (H * W, C)
+    rots = cols[:,:4]
+
+    scales_norm = cols[:,4:7]
+    opacities = cols[:,7][:,None]
+
+    params['unnorm_rotations'] = rots[mask]
+    params['log_scales'] = scales_norm[mask]*mean3_sq_dist[:,None].tile(1,3)
+    params['logit_opacities'] = opacities[mask]
+
+    return params
+
+def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_radius_depth_ratio, mean_sq_dist_method, densify_dataset=None, use_simplification=True,use_gt_depth = True,nr_basis = 10,use_distributed_biases = False,total_timescale=None,use_grn=False,grn_model=None):
     # Get RGB-D Data & Camera Parameters
     # color, depth, intrinsics, pose = dataset[0]
 
@@ -248,7 +279,10 @@ def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_rad
                                                 mean_sq_dist_method=mean_sq_dist_method)
 
     # Initialize Parameters
+
     params, variables = initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification,nr_basis = nr_basis,use_distributed_biases=use_distributed_biases,total_timescale=total_timescale)
+    if use_grn:
+        params = grn_initialization(grn_model,params,init_pt_cld,mean3_sq_dist,color,depth)
 
     # Initialize an estimate of scene radius for Gaussian-Splatting Densification
     variables['scene_radius'] = torch.max(depth)/scene_radius_depth_ratio # NOTE: change_here
@@ -281,7 +315,8 @@ def align_shift_and_scale(gt_disp, pred_disp,mask):
 
 def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_for_loss, 
              sil_thres, use_l1,ignore_outlier_depth_loss, tracking=False, 
-             mapping=False, do_ba=False, plot_dir=None, visualize_tracking_loss=False, tracking_iteration=None,use_gt_depth = True,gaussian_deformations = True,save_idx=0):
+             mapping=False, do_ba=False, plot_dir=None, visualize_tracking_loss=False, tracking_iteration=None,use_gt_depth = True,gaussian_deformations = True,save_idx=0,
+             use_grn = False):
 
     global w2cs, w2ci
     # Initialize Loss Dictionary
@@ -321,10 +356,17 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
                                              camera_grad=False)
 
     # Initialize Render Variables
-    rendervar = transformed_params2rendervar(params, transformed_pts,local_rots,local_scales)
-    rendervar['means3D'].retain_grad()
-    depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
-                                                                 transformed_pts,local_rots,local_scales)
+    if use_grn:
+        rendervar = transformed_GRNparams2rendervar(params, transformed_pts,local_rots,local_scales)
+
+        depth_sil_rendervar = transformed_GRNparams2depthplussilhouette(params, curr_data['w2c'],
+                                                                    transformed_pts,local_rots,local_scales)
+
+    else:
+        rendervar = transformed_params2rendervar(params, transformed_pts,local_rots,local_scales)
+
+        depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
+                                                                    transformed_pts,local_rots,local_scales)
     
     # Visualize the Rendered Images
     # online_render(curr_data, iter_time_idx, rendervar, dev_use_controller=False)
@@ -484,12 +526,17 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis
     return params
 
 
-def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq_dist_method, use_simplification=True,nr_basis = 10,use_distributed_biases = False,total_timescale = None):
+def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq_dist_method, use_simplification=True,nr_basis = 10,use_distributed_biases = False,total_timescale = None,use_grn=False,grn_model=None):
     # Silhouette Rendering
     local_means,local_rots,local_scales = deform_gaussians(params,time_idx,True)
+    
     transformed_pts = transform_to_frame(local_means,params, time_idx, gaussians_grad=False, camera_grad=False)
-    depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
-                                                                 transformed_pts,local_rots,local_scales)
+    if not use_grn:
+        depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
+                                                                    transformed_pts,local_rots,local_scales)
+    else:
+        depth_sil_rendervar = transformed_GRNparams2depthplussilhouette(params, curr_data['w2c'],
+                                                                    transformed_pts,local_rots,local_scales)
     depth_sil, _, _ = Renderer(raster_settings=curr_data['cam'])(**depth_sil_rendervar)
     silhouette = depth_sil[1, :, :]
     non_presence_sil_mask = (silhouette < sil_thres)
@@ -519,6 +566,11 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
                                     curr_w2c, mask=non_presence_mask, compute_mean_sq_dist=True,
                                     mean_sq_dist_method=mean_sq_dist_method)
         new_params = initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis = nr_basis,use_distributed_biases=use_distributed_biases,total_timescale = total_timescale)
+        if use_grn:
+            new_params = grn_initialization(grn_model,new_params,new_pt_cld,mean3_sq_dist,curr_data['im'],curr_data['depth'],non_presence_mask)
+
+
+
         for k, v in new_params.items():
             params[k] = torch.nn.Parameter(torch.cat((params[k], v), dim=0).requires_grad_(True))
         num_pts = params['means3D'].shape[0]
@@ -640,10 +692,25 @@ def rgbd_slam(config: dict):
         }
         model = SurgeDepth(**model_configs[config['depth']['model_size']]).cuda()
         model.load_state_dict(torch.load(config['depth']['model_path']))
+        model.eval()
         for param in model.parameters():
             param.requires_grad = False
         # model = SurgeDepth()
     # Poses are relative to the first frame
+
+    if config['GRN']['use_grn']:
+        print('Using GRN for initialization')
+        from GRN.models.conv_unet import GaussianRegressionNetwork
+
+        grn_model = GaussianRegressionNetwork().cuda()
+        grn_model.load_state_dict(torch.load(config['GRN']['model_path']))
+        grn_model.eval()
+        grn_model.requires_grad = False
+    else:
+        grn_model = None
+
+
+
     print(gradslam_data_cfg)
     dataset = get_dataset(
         config_dict=gradslam_data_cfg,
@@ -752,7 +819,9 @@ def rgbd_slam(config: dict):
                                                                             use_gt_depth = config['depth']['use_gt_depth'],
                                                                             nr_basis=config['deforms']['nr_basis'],
                                                                             use_distributed_biases=config['deforms']['use_distributed_biases'],
-                                                                            total_timescale=config['deforms']['total_timescale'])        
+                                                                            total_timescale=config['deforms']['total_timescale'],
+                                                                            use_grn=config['GRN']['use_grn'],
+                                                                            grn_model=grn_model)        
         
         
     
@@ -923,7 +992,8 @@ def rgbd_slam(config: dict):
                                                    config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
                                                    plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
-                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=save_idx,gaussian_deformations=config['deforms']['use_deformations'])
+                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=save_idx,gaussian_deformations=config['deforms']['use_deformations'],
+                                                   use_grn = config['GRN']['use_grn'])
                 save_idx = save_idx+1
 
                 # Backprop
@@ -1009,8 +1079,12 @@ def rgbd_slam(config: dict):
             # local_scales = params['log_scales']
             transformed_pts = transform_to_frame(local_means,params, time_idx, gaussians_grad=False, camera_grad=False)
             # img_rendervar = transformed_params2rendervar(params,transformed_pts,local_rots,local_scales)
-            rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
-                                                                 transformed_pts,local_rots,local_scales)
+            if config['GRN']['use_grn']:
+                rendervar = transformed_GRNparams2depthplussilhouette(params, curr_data['w2c'],
+                                                                     transformed_pts,local_rots,local_scales)
+            else:
+                rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
+                                                                    transformed_pts,local_rots,local_scales)
             rendered_depth,_,_ = Renderer(raster_settings=curr_data['cam'])(**rendervar)
             # im,_,_ = Renderer(raster_settings = curr_data['cam'])(**img_rendervar)
             mask = rendered_depth[1,:,:] > config['tracking']['sil_thres']
@@ -1061,7 +1135,9 @@ def rgbd_slam(config: dict):
                                                         config['gaussian_simplification'],
                                                         nr_basis = config['deforms']['nr_basis'],
                                                         use_distributed_biases = config['deforms']['use_distributed_biases'],
-                                                        total_timescale = config['deforms']['total_timescale'])
+                                                        total_timescale = config['deforms']['total_timescale'],
+                                                        use_grn=config['GRN']['use_grn'],
+                                                        grn_model=grn_model,)
                     post_num_pts = params['means3D'].shape[0]
                     added_new_gaussians.append(post_num_pts)
                 if not config['distance_keyframe_selection']:
@@ -1143,7 +1219,8 @@ def rgbd_slam(config: dict):
                     # Loss for current frame
                     loss, variables, losses = get_loss(params, iter_data, variables, iter_time_idx, config['mapping']['loss_weights'],
                                                     config['mapping']['use_sil_for_loss'], config['mapping']['sil_thres'],
-                                                    config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'],use_gt_depth = config['depth']['use_gt_depth'], mapping=True,save_idx = None,gaussian_deformations=config['deforms']['use_deformations'])
+                                                    config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'],use_gt_depth = config['depth']['use_gt_depth'], mapping=True,save_idx = None,gaussian_deformations=config['deforms']['use_deformations'],
+                                                    use_grn = config['GRN']['use_grn'])
                     # Backprop
                     loss.backward()
                     with torch.no_grad():
