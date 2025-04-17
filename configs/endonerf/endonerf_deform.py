@@ -14,7 +14,7 @@ except KeyError:
 map_every = 1
 keyframe_every = 8
 # mapping_window_size = 24
-tracking_iters = 50
+tracking_iters = 25
 mapping_iters = 25
 
 group_name = f"EndoNerf {scene_name}"
@@ -61,6 +61,7 @@ config = dict(
         loss_weights=dict(
             im=0.5,
             depth=1.0,
+            deform = 0.5
         ),
         lrs=dict(
             means3D=0.0,
@@ -68,14 +69,15 @@ config = dict(
             unnorm_rotations=0.0,
             logit_opacities=0.0,
             log_scales=0.0,
-            cam_unnorm_rots=0.001,
-            cam_trans=0.001,
-            deform_weights = 0.01,
-            deform_stds = 0.01,
-            deform_biases = 0.01,
+            cam_unnorm_rots=0.0002,
+            cam_trans=0.0005,
+            deform_weights = 0.001,
+            deform_stds = 0.001,
+            deform_biases = 0.001,
         ),
     ),
     mapping=dict(
+        perform_mapping = True,
         num_iters=mapping_iters,
         add_new_gaussians=True,
         sil_thres=0.5, # For Addition of new Gaussians
@@ -85,20 +87,21 @@ config = dict(
         loss_weights=dict(
             im=1.0,
             depth=1.0,
+            deform = 0.5
         ),
         lrs=dict(
-            means3D=0.0001,
+            means3D=0.000,
             rgb_colors=0.0025,
-            unnorm_rotations=0.001,
+            unnorm_rotations=0.00,
             logit_opacities=0.05,
-            log_scales=0.001,
+            log_scales=0.000,
             cam_unnorm_rots=0.000,
             cam_trans=0.000,
-            deform_weights = 0.00,
-            deform_stds = 0.00,
-            deform_biases = 0.00,
+            deform_weights = 0.001,
+            deform_stds = 0.001,
+            deform_biases = 0.001,
         ),
-        prune_gaussians=True, # Prune Gaussians during Mapping
+        prune_gaussians=False, # Prune Gaussians during Mapping
         pruning_dict=dict( # Needs to be updated based on the number of mapping iterations
             start_after=0,
             remove_big_after=0,
@@ -136,7 +139,7 @@ config = dict(
     ),
     depth = dict(
         use_gt_depth = False,
-        model_path = '/media/thesis_ssd/code/EndoGSLAM/EndoGSLAM/models/SurgeDepth/SurgeDepthStudent_V5.pth',
+        model_path = 'models/SurgeDepth/SurgeDepthStudent_V5.pth',
         model_size = 'vitb',
         normalization_means = [0.46888983, 0.29536288, 0.28712815], 
         normalization_stds = [0.24689102 ,0.21034359, 0.21188641],
@@ -145,5 +148,10 @@ config = dict(
         shift_gt =   0.0021386505104601383   ,
         scale_gt =   0.01995653659105301    ,
     ), 
-    deforms = False     
+    deforms = dict(
+        use_deformations = True,
+        nr_basis = 20,
+        use_distributed_biases = True,
+        total_timescale = 100
+    )     
 )

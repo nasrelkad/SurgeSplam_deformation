@@ -115,12 +115,29 @@ def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True,
         return point_cld
 
 
-def initialize_deformations(params,nr_basis):
+def initialize_deformations(params,nr_basis,use_distributed_biases,total_timescale= None):
+    """Function to initialize deformation parameters
+
+    Args:
+        params (dict): dict containing all the gaussian parameters
+        nr_basis (int): nr of basis functions to generate for each gaussian attribute
+        total_timescale (int): the total timescale of the deformation model, used to evenly distribute biases across timespan
+
+    Returns:
+        params (dict): Updated params dict with the gaussian deformation parameters
+    """
     # Means3D, unnorm rotations and log_scales should receive deformation params
     N = params['means3D'].shape[0]
     weights = torch.randn([N,nr_basis,10],requires_grad = True,device = 'cuda')*0.0 # We have N x nr_basis x 10 (xyz,scales,rots) weights
-    stds = torch.ones([N,nr_basis,10],requires_grad = True,device = 'cuda') # We have N x nr_basis x 10 (xyz,scales,rots) weights
-    biases = torch.randn([N,nr_basis,10],requires_grad = True,device = 'cuda')*0.0 # We have N x nr_basis x 10 (xyz,scales,rots) weights
+    stds = torch.ones([N,nr_basis,10],requires_grad = True,device = 'cuda')/0.1 # We have N x nr_basis x 10 (xyz,scales,rots) weights
+    if not use_distributed_biases:
+        biases = torch.randn([N,nr_basis,10],requires_grad = True,device = 'cuda')*0.0 # We have N x nr_basis x 10 (xyz,scales,rots) weights
+    
+    
+    else:
+        interval = torch.ceil(torch.tensor(total_timescale/nr_basis)) # For biases, we want to evenly distribute them across the timespan, so we have nr_basis biases at an interval of total_timescale/nr_basis
+        arange = torch.arange(0,total_timescale,interval).unsqueeze(0).unsqueeze(-1)
+        biases = torch.tile(arange,(N,1,10)) # Repeat the distributed biases to generate basis functions for each parameter
 
     params['deform_weights'] = weights
     params['deform_stds'] = stds
@@ -144,15 +161,16 @@ def deform_gaussians(params,time,deform_grad):
     deform_xyz = deform[:,:3]
     deform_rots = deform[:,3:7]
     deform_scales = deform[:,7:10]
-
-
+    # print(f'xyz: {torch.sum(deform_xyz)}')
+    # print(torch.sum(deform_rots).item())
+    # print(torch.sum(deform_scales).item())
     xyz = params['means3D']+deform_xyz
     rots = params['unnorm_rotations']+deform_rots
     scales = params['log_scales']+deform_scales
 
     return xyz,rots,scales
 
-def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification=True,nr_basis = 10):
+def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification=True,nr_basis = 10,use_distributed_biases = False,total_timescale = None):
     num_pts = init_pt_cld.shape[0]
     means3D = init_pt_cld[:, :3] # [num_gaussians, 3]
     unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1)) # [num_gaussians, 3]
@@ -166,13 +184,12 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification
     }
     if not use_simplification:
         params['feature_rest'] = torch.zeros(num_pts, 45) # set SH degree 3 fixed
-    params = initialize_deformations(params,nr_basis)
+    params = initialize_deformations(params,nr_basis,use_distributed_biases=use_distributed_biases,total_timescale = total_timescale)
     # Initialize a single gaussian trajectory to model the camera poses relative to the first frame
     cam_rots = np.tile([1, 0, 0, 0], (1, 1))
     cam_rots = np.tile(cam_rots[:, :, None], (1, 1, num_frames))
     params['cam_unnorm_rots'] = cam_rots
     params['cam_trans'] = np.zeros((1, 3, num_frames))
-    # params = initialize_deformations(params,10) ## TODO: add nr_basis to config
     for k, v in params.items():
         # Check if value is already a torch tensor
         if not isinstance(v, torch.Tensor):
@@ -196,7 +213,7 @@ def initialize_optimizer(params, lrs_dict):
     return torch.optim.Adam(param_groups, lr=0.0, eps=1e-15)
 
 
-def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_radius_depth_ratio, mean_sq_dist_method, densify_dataset=None, use_simplification=True,use_gt_depth = True):
+def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_radius_depth_ratio, mean_sq_dist_method, densify_dataset=None, use_simplification=True,use_gt_depth = True,nr_basis = 10,use_distributed_biases = False,total_timescale=None):
     # Get RGB-D Data & Camera Parameters
     # color, depth, intrinsics, pose = dataset[0]
 
@@ -231,7 +248,7 @@ def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_rad
                                                 mean_sq_dist_method=mean_sq_dist_method)
 
     # Initialize Parameters
-    params, variables = initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification)
+    params, variables = initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification,nr_basis = nr_basis,use_distributed_biases=use_distributed_biases,total_timescale=total_timescale)
 
     # Initialize an estimate of scene radius for Gaussian-Splatting Densification
     variables['scene_radius'] = torch.max(depth)/scene_radius_depth_ratio # NOTE: change_here
@@ -273,7 +290,7 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
         if tracking:
             local_means,local_rots,local_scales = deform_gaussians(params,iter_time_idx,deform_grad = True)
             # raise ValueError('This shouldnt really happen tbh')
-
+            # print(torch.sum(local_means-params['means3D']))
         else:
             local_means,local_rots,local_scales= deform_gaussians(params,iter_time_idx,deform_grad = False)
     else:
@@ -284,7 +301,7 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
         # Get current frame Gaussians, where only the camera pose gets gradient
         
         transformed_pts = transform_to_frame(local_means,params, iter_time_idx, 
-                                             gaussians_grad=False,
+                                             gaussians_grad=True,
                                              camera_grad=True)
     elif mapping:
         if do_ba: # Bundle Adjustment
@@ -424,6 +441,11 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
         losses['im'] = torch.abs(curr_data['im'] - im).sum()
     else:
         losses['im'] = 0.8 * l1_loss_v1(im, curr_data['im']) + 0.2 * (1.0 - calc_ssim(im, curr_data['im']))
+    
+    # Deformation regularization
+    if tracking and gaussian_deformations:
+        losses['deform'] = torch.sum(torch.square(params['means3D']-local_means))/params['means3D'].shape[0]
+
 
     weighted_losses = {k: v * loss_weights[k] for k, v in losses.items()}
     loss = sum(weighted_losses.values())
@@ -432,11 +454,11 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     variables['max_2D_radius'][seen] = torch.max(radius[seen], variables['max_2D_radius'][seen])
     variables['seen'] = seen
     weighted_losses['loss'] = loss
-
+    # print(weighted_losses)
     return loss, variables, weighted_losses
 
 
-def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis = 10):
+def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis = 10,use_distributed_biases = False, total_timescale = None):
     num_pts = new_pt_cld.shape[0]
     means3D = new_pt_cld[:, :3] # [num_gaussians, 3]
     unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1)) # [num_gaussians, 3]
@@ -449,7 +471,7 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis
         'log_scales': torch.tile(torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 1 if use_simplification else 3)),
     }
     # print(f'num pts {num_pts}')
-    params = initialize_deformations(params,10)
+    params = initialize_deformations(params,nr_basis = nr_basis,use_distributed_biases=use_distributed_biases,total_timescale = total_timescale)
     if not use_simplification:
         params['feature_rest'] = torch.zeros(num_pts, 45) # set SH degree 3 fixed
     for k, v in params.items():
@@ -462,7 +484,7 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis
     return params
 
 
-def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq_dist_method, use_simplification=True):
+def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq_dist_method, use_simplification=True,nr_basis = 10,use_distributed_biases = False,total_timescale = None):
     # Silhouette Rendering
     local_means,local_rots,local_scales = deform_gaussians(params,time_idx,True)
     transformed_pts = transform_to_frame(local_means,params, time_idx, gaussians_grad=False, camera_grad=False)
@@ -496,7 +518,7 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
         new_pt_cld, mean3_sq_dist = get_pointcloud(curr_data['im'], curr_data['depth'], curr_data['intrinsics'], 
                                     curr_w2c, mask=non_presence_mask, compute_mean_sq_dist=True,
                                     mean_sq_dist_method=mean_sq_dist_method)
-        new_params = initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification)
+        new_params = initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis = nr_basis,use_distributed_biases=use_distributed_biases,total_timescale = total_timescale)
         for k, v in new_params.items():
             params[k] = torch.nn.Parameter(torch.cat((params[k], v), dim=0).requires_grad_(True))
         num_pts = params['means3D'].shape[0]
@@ -682,7 +704,10 @@ def rgbd_slam(config: dict):
                                                                         config['scene_radius_depth_ratio'],
                                                                         config['mean_sq_dist_method'],
                                                                         densify_dataset=densify_dataset, 
-                                                                        use_simplification=config['gaussian_simplification'])                                                                                                                  
+                                                                        use_simplification=config['gaussian_simplification'],
+                                                                        nr_basis=config['deforms']['nr_basis'],
+                                                                        use_distributed_biases=config['deforms']['use_distributed_biases'],
+                                                                        total_timescale=config['deforms']['total_timescale'])                                                                                                                  
     else:
         color, depth, intrinsics, pose = dataset[0]
         # Initialize Parameters & Canoncial Camera parameters
@@ -724,7 +749,12 @@ def rgbd_slam(config: dict):
                                                                             config['scene_radius_depth_ratio'],
                                                                             config['mean_sq_dist_method'], 
                                                                             use_simplification=config['gaussian_simplification'],
-                                                                            use_gt_depth = config['depth']['use_gt_depth'])        
+                                                                            use_gt_depth = config['depth']['use_gt_depth'],
+                                                                            nr_basis=config['deforms']['nr_basis'],
+                                                                            use_distributed_biases=config['deforms']['use_distributed_biases'],
+                                                                            total_timescale=config['deforms']['total_timescale'])        
+        
+        
     
     # Init seperate dataloader for tracking if required
     if seperate_tracking_res:
@@ -876,6 +906,9 @@ def rgbd_slam(config: dict):
             # Keep Track of Best Candidate Rotation & Translation
             candidate_cam_unnorm_rot = params['cam_unnorm_rots'][..., time_idx].detach().clone()
             candidate_cam_tran = params['cam_trans'][..., time_idx].detach().clone()
+            candidate_deform_biases = params['deform_biases']
+            candidate_deform_weights = params['deform_weights']
+            candidate_deform_stds = params['deform_stds']
             current_min_loss = float(1e20)
             # Tracking Optimization
             iter = 0
@@ -890,7 +923,7 @@ def rgbd_slam(config: dict):
                                                    config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
                                                    plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
-                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=None,gaussian_deformations=config['deforms'])
+                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=save_idx,gaussian_deformations=config['deforms']['use_deformations'])
                 save_idx = save_idx+1
 
                 # Backprop
@@ -912,6 +945,9 @@ def rgbd_slam(config: dict):
                         current_min_loss = loss
                         candidate_cam_unnorm_rot = params['cam_unnorm_rots'][..., time_idx].detach().clone()
                         candidate_cam_tran = params['cam_trans'][..., time_idx].detach().clone()
+                        candidate_deform_biases = params['deform_biases']
+                        candidate_deform_weights = params['deform_weights']
+                        candidate_deform_stds = params['deform_stds']
                     # Report Progress
                     if config['report_iter_progress']:
                         report_progress(params, tracking_curr_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True)
@@ -938,6 +974,10 @@ def rgbd_slam(config: dict):
             with torch.no_grad():
                 params['cam_unnorm_rots'][..., time_idx] = candidate_cam_unnorm_rot
                 params['cam_trans'][..., time_idx] = candidate_cam_tran
+                params['deform_biases'] = candidate_deform_biases
+                params['deform_weights'] = candidate_deform_weights
+                params['deform_stds'] = candidate_deform_stds
+
         elif time_idx > 0 and config['tracking']['use_gt_poses']:
             with torch.no_grad():
                 # Get the ground truth pose relative to frame 0
@@ -995,33 +1035,162 @@ def rgbd_slam(config: dict):
             curr_data['depth'] = ((invariant_depth-t_invar)/s_invar)*s_render + t_render
 
     
+        if config['mapping']['perform_mapping']:
+            # Densification & KeyFrame-based Mapping
+            if time_idx == 0 or (time_idx+1) % config['map_every'] == 0:
+                # Densification
+                if config['mapping']['add_new_gaussians'] and time_idx > 0:
+                    # Setup Data for Densification
+                    if seperate_densification_res:
+                        # Load RGBD frames incrementally instead of all frames
+                        densify_color, densify_depth, _, _ = densify_dataset[time_idx]
+                        densify_color = densify_color.permute(2, 0, 1) / 255
+                        densify_depth = densify_depth.permute(2, 0, 1)
+                        densify_curr_data = {'cam': densify_cam, 'im': densify_color, 'depth': densify_depth, 'id': time_idx, 
+                                    'intrinsics': densify_intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
+                    else:
+                        densify_curr_data = curr_data
 
-        # Densification & KeyFrame-based Mapping
-        if time_idx == 0 or (time_idx+1) % config['map_every'] == 0:
-            # Densification
-            if config['mapping']['add_new_gaussians'] and time_idx > 0:
-                # Setup Data for Densification
-                if seperate_densification_res:
-                    # Load RGBD frames incrementally instead of all frames
-                    densify_color, densify_depth, _, _ = densify_dataset[time_idx]
-                    densify_color = densify_color.permute(2, 0, 1) / 255
-                    densify_depth = densify_depth.permute(2, 0, 1)
-                    densify_curr_data = {'cam': densify_cam, 'im': densify_color, 'depth': densify_depth, 'id': time_idx, 
-                                 'intrinsics': densify_intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
-                else:
-                    densify_curr_data = curr_data
+                    # delete floating gaussians
+                    # params, variables = remove_floating_gaussians(params, variables, densify_curr_data, time_idx)
+                    
+                    # Add new Gaussians to the scene based on the Silhouette
+                    params, variables = add_new_gaussians(params, variables, densify_curr_data, 
+                                                        config['mapping']['sil_thres'], time_idx,
+                                                        config['mean_sq_dist_method'], 
+                                                        config['gaussian_simplification'],
+                                                        nr_basis = config['deforms']['nr_basis'],
+                                                        use_distributed_biases = config['deforms']['use_distributed_biases'],
+                                                        total_timescale = config['deforms']['total_timescale'])
+                    post_num_pts = params['means3D'].shape[0]
+                    added_new_gaussians.append(post_num_pts)
+                if not config['distance_keyframe_selection']:
+                    with torch.no_grad():
+                        # Get the current estimated rotation & translation
+                        curr_cam_rot = F.normalize(params['cam_unnorm_rots'][..., time_idx].detach())
+                        curr_cam_tran = params['cam_trans'][..., time_idx].detach()
+                        curr_w2c = torch.eye(4).cuda().float()
+                        curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
+                        curr_w2c[:3, 3] = curr_cam_tran
+                        # Select Keyframes for Mapping
+                        num_keyframes = config['mapping_window_size']-2
+                        selected_keyframes = keyframe_selection_overlap(depth, curr_w2c, intrinsics, keyframe_list[:-1], num_keyframes)
+                        selected_time_idx = [keyframe_list[frame_idx]['id'] for frame_idx in selected_keyframes]
+                        if len(keyframe_list) > 0:
+                            # Add last keyframe to the selected keyframes
+                            selected_time_idx.append(keyframe_list[-1]['id'])
+                            selected_keyframes.append(len(keyframe_list)-1)
+                        # Add current frame to the selected keyframes
+                        selected_time_idx.append(time_idx)
+                        selected_keyframes.append(-1)
+                        # Print the selected keyframes
+                        print(f"\nSelected Keyframes at Frame {time_idx}: {selected_time_idx}")
 
-                # delete floating gaussians
-                # params, variables = remove_floating_gaussians(params, variables, densify_curr_data, time_idx)
-                
-                # Add new Gaussians to the scene based on the Silhouette
-                params, variables = add_new_gaussians(params, variables, densify_curr_data, 
-                                                      config['mapping']['sil_thres'], time_idx,
-                                                      config['mean_sq_dist_method'], 
-                                                      config['gaussian_simplification'])
-                post_num_pts = params['means3D'].shape[0]
-                added_new_gaussians.append(post_num_pts)
-            if not config['distance_keyframe_selection']:
+                # Reset Optimizer & Learning Rates for Full Map Optimization
+                optimizer = initialize_optimizer(params, config['mapping']['lrs']) 
+
+                # timer.lap("Densification Done at frame "+str(time_idx), 3)
+
+                # Mapping
+                mapping_start_time = time.time()
+                if num_iters_mapping > 0:
+                    progress_bar = tqdm(range(num_iters_mapping), desc=f"Mapping Time Step: {time_idx}")
+                    
+                actural_keyframe_ids = []
+                for iter in range(num_iters_mapping):
+                    iter_start_time = time.time()
+                    if not config['distance_keyframe_selection']:
+                        # Randomly select a frame until current time step amongst keyframes
+                        rand_idx = np.random.randint(0, len(selected_keyframes))
+                        selected_rand_keyframe_idx = selected_keyframes[rand_idx]
+                        actural_keyframe_ids.append(selected_rand_keyframe_idx)
+                        if selected_rand_keyframe_idx == -1:
+                            # Use Current Frame Data
+                            iter_time_idx = time_idx
+                            iter_color = color
+                            iter_depth = depth
+                        else:
+                            # Use Keyframe Data
+                            iter_time_idx = keyframe_list[selected_rand_keyframe_idx]['id']
+                            iter_color = keyframe_list[selected_rand_keyframe_idx]['color']
+                            iter_depth = keyframe_list[selected_rand_keyframe_idx]['depth']
+                    else:
+                        if len(actural_keyframe_ids) == 0:
+                            if len(keyframe_list) > 0:
+                                curr_position = params['cam_trans'][..., time_idx].detach().cpu()
+                                actural_keyframe_ids = keyframe_selection_distance(time_idx, curr_position, keyframe_list, config['distance_current_frame_prob'], num_iters_mapping)
+                            else:
+                                actural_keyframe_ids = [0] * num_iters_mapping
+                            print(f"\nUsed Frames for mapping at Frame {time_idx}: {[keyframe_list[i]['id'] if i != len(keyframe_list) else 'curr' for i in actural_keyframe_ids]}")
+
+                        selected_keyframe_ids = actural_keyframe_ids[iter]
+
+                        if selected_keyframe_ids == len(keyframe_list):
+                            # Use Current Frame Data
+                            iter_time_idx = time_idx
+                            iter_color = color
+                            iter_depth = depth
+                        else:
+                            # Use Keyframe Data
+                            iter_time_idx = keyframe_list[selected_keyframe_ids]['id']
+                            iter_color = keyframe_list[selected_keyframe_ids]['color']
+                            iter_depth = keyframe_list[selected_keyframe_ids]['depth']
+                        
+                        
+                    iter_gt_w2c = gt_w2c_all_frames[:iter_time_idx+1]
+                    iter_data = {'cam': cam, 'im': iter_color, 'depth': iter_depth, 'id': iter_time_idx, 
+                                'intrinsics': intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': iter_gt_w2c}
+                    # Loss for current frame
+                    loss, variables, losses = get_loss(params, iter_data, variables, iter_time_idx, config['mapping']['loss_weights'],
+                                                    config['mapping']['use_sil_for_loss'], config['mapping']['sil_thres'],
+                                                    config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'],use_gt_depth = config['depth']['use_gt_depth'], mapping=True,save_idx = None,gaussian_deformations=config['deforms']['use_deformations'])
+                    # Backprop
+                    loss.backward()
+                    with torch.no_grad():
+                        # Prune Gaussians
+                        if config['mapping']['prune_gaussians']:
+                            params, variables = prune_gaussians(params, variables, optimizer, iter, config['mapping']['pruning_dict'])
+                        # Gaussian-Splatting's Gradient-based Densification
+                        if config['mapping']['use_gaussian_splatting_densification']:
+                            params, variables = densify(params, variables, optimizer, iter, config['mapping']['densify_dict'])
+                        # Optimizer Update
+                        optimizer.step()
+                        optimizer.zero_grad(set_to_none=True)
+                        # Report Progress
+                        if config['report_iter_progress']:
+                            report_progress(params, iter_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['mapping']['sil_thres'], 
+                                            mapping=True, online_time_idx=time_idx)
+                        else:
+                            progress_bar.update(1)
+                    # Update the runtime numbers
+                    iter_end_time = time.time()
+                    mapping_iter_time_sum += iter_end_time - iter_start_time
+                    mapping_iter_time_count += 1
+                if num_iters_mapping > 0:
+                    progress_bar.close()
+                # Update the runtime numbers
+                mapping_end_time = time.time()
+                mapping_frame_time_sum += mapping_end_time - mapping_start_time
+                mapping_frame_time_count += 1
+
+                if time_idx == 0 or (time_idx+1) % config['report_global_progress_every'] == 0:
+                    try:
+                        # Report Mapping Progress
+                        progress_bar = tqdm(range(1), desc=f"Mapping Result Time Step: {time_idx}")
+                        with torch.no_grad():
+                            report_progress(params, curr_data, 1, progress_bar, time_idx, sil_thres=config['mapping']['sil_thres'], 
+                                            mapping=True, online_time_idx=time_idx)
+                        progress_bar.close()
+                    except:
+                        ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
+                        save_params_ckpt(params, ckpt_output_dir, time_idx)
+                        print('Failed to evaluate trajectory.')
+            
+            # timer.lap('Mapping Done.', 4)
+            
+            # Add frame to keyframe list
+            if ((time_idx == 0) or ((time_idx+1) % config['keyframe_every'] == 0) or \
+                        (time_idx == num_frames-2)) and (not torch.isinf(curr_gt_w2c[-1]).any()) and (not torch.isnan(curr_gt_w2c[-1]).any()):
                 with torch.no_grad():
                     # Get the current estimated rotation & translation
                     curr_cam_rot = F.normalize(params['cam_unnorm_rots'][..., time_idx].detach())
@@ -1029,137 +1198,11 @@ def rgbd_slam(config: dict):
                     curr_w2c = torch.eye(4).cuda().float()
                     curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
                     curr_w2c[:3, 3] = curr_cam_tran
-                    # Select Keyframes for Mapping
-                    num_keyframes = config['mapping_window_size']-2
-                    selected_keyframes = keyframe_selection_overlap(depth, curr_w2c, intrinsics, keyframe_list[:-1], num_keyframes)
-                    selected_time_idx = [keyframe_list[frame_idx]['id'] for frame_idx in selected_keyframes]
-                    if len(keyframe_list) > 0:
-                        # Add last keyframe to the selected keyframes
-                        selected_time_idx.append(keyframe_list[-1]['id'])
-                        selected_keyframes.append(len(keyframe_list)-1)
-                    # Add current frame to the selected keyframes
-                    selected_time_idx.append(time_idx)
-                    selected_keyframes.append(-1)
-                    # Print the selected keyframes
-                    print(f"\nSelected Keyframes at Frame {time_idx}: {selected_time_idx}")
-
-            # Reset Optimizer & Learning Rates for Full Map Optimization
-            optimizer = initialize_optimizer(params, config['mapping']['lrs']) 
-
-            # timer.lap("Densification Done at frame "+str(time_idx), 3)
-
-            # Mapping
-            mapping_start_time = time.time()
-            if num_iters_mapping > 0:
-                progress_bar = tqdm(range(num_iters_mapping), desc=f"Mapping Time Step: {time_idx}")
-                
-            actural_keyframe_ids = []
-            for iter in range(num_iters_mapping):
-                iter_start_time = time.time()
-                if not config['distance_keyframe_selection']:
-                    # Randomly select a frame until current time step amongst keyframes
-                    rand_idx = np.random.randint(0, len(selected_keyframes))
-                    selected_rand_keyframe_idx = selected_keyframes[rand_idx]
-                    actural_keyframe_ids.append(selected_rand_keyframe_idx)
-                    if selected_rand_keyframe_idx == -1:
-                        # Use Current Frame Data
-                        iter_time_idx = time_idx
-                        iter_color = color
-                        iter_depth = depth
-                    else:
-                        # Use Keyframe Data
-                        iter_time_idx = keyframe_list[selected_rand_keyframe_idx]['id']
-                        iter_color = keyframe_list[selected_rand_keyframe_idx]['color']
-                        iter_depth = keyframe_list[selected_rand_keyframe_idx]['depth']
-                else:
-                    if len(actural_keyframe_ids) == 0:
-                        if len(keyframe_list) > 0:
-                            curr_position = params['cam_trans'][..., time_idx].detach().cpu()
-                            actural_keyframe_ids = keyframe_selection_distance(time_idx, curr_position, keyframe_list, config['distance_current_frame_prob'], num_iters_mapping)
-                        else:
-                            actural_keyframe_ids = [0] * num_iters_mapping
-                        print(f"\nUsed Frames for mapping at Frame {time_idx}: {[keyframe_list[i]['id'] if i != len(keyframe_list) else 'curr' for i in actural_keyframe_ids]}")
-
-                    selected_keyframe_ids = actural_keyframe_ids[iter]
-
-                    if selected_keyframe_ids == len(keyframe_list):
-                        # Use Current Frame Data
-                        iter_time_idx = time_idx
-                        iter_color = color
-                        iter_depth = depth
-                    else:
-                        # Use Keyframe Data
-                        iter_time_idx = keyframe_list[selected_keyframe_ids]['id']
-                        iter_color = keyframe_list[selected_keyframe_ids]['color']
-                        iter_depth = keyframe_list[selected_keyframe_ids]['depth']
-                    
-                    
-                iter_gt_w2c = gt_w2c_all_frames[:iter_time_idx+1]
-                iter_data = {'cam': cam, 'im': iter_color, 'depth': iter_depth, 'id': iter_time_idx, 
-                             'intrinsics': intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': iter_gt_w2c}
-                # Loss for current frame
-                loss, variables, losses = get_loss(params, iter_data, variables, iter_time_idx, config['mapping']['loss_weights'],
-                                                config['mapping']['use_sil_for_loss'], config['mapping']['sil_thres'],
-                                                config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'],use_gt_depth = config['depth']['use_gt_depth'], mapping=True,save_idx = None,gaussian_deformations=config['deforms'])
-                # Backprop
-                loss.backward()
-                with torch.no_grad():
-                    # Prune Gaussians
-                    if config['mapping']['prune_gaussians']:
-                        params, variables = prune_gaussians(params, variables, optimizer, iter, config['mapping']['pruning_dict'])
-                    # Gaussian-Splatting's Gradient-based Densification
-                    if config['mapping']['use_gaussian_splatting_densification']:
-                        params, variables = densify(params, variables, optimizer, iter, config['mapping']['densify_dict'])
-                    # Optimizer Update
-                    optimizer.step()
-                    optimizer.zero_grad(set_to_none=True)
-                    # Report Progress
-                    if config['report_iter_progress']:
-                        report_progress(params, iter_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['mapping']['sil_thres'], 
-                                        mapping=True, online_time_idx=time_idx)
-                    else:
-                        progress_bar.update(1)
-                # Update the runtime numbers
-                iter_end_time = time.time()
-                mapping_iter_time_sum += iter_end_time - iter_start_time
-                mapping_iter_time_count += 1
-            if num_iters_mapping > 0:
-                progress_bar.close()
-            # Update the runtime numbers
-            mapping_end_time = time.time()
-            mapping_frame_time_sum += mapping_end_time - mapping_start_time
-            mapping_frame_time_count += 1
-
-            if time_idx == 0 or (time_idx+1) % config['report_global_progress_every'] == 0:
-                try:
-                    # Report Mapping Progress
-                    progress_bar = tqdm(range(1), desc=f"Mapping Result Time Step: {time_idx}")
-                    with torch.no_grad():
-                        report_progress(params, curr_data, 1, progress_bar, time_idx, sil_thres=config['mapping']['sil_thres'], 
-                                        mapping=True, online_time_idx=time_idx)
-                    progress_bar.close()
-                except:
-                    ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
-                    save_params_ckpt(params, ckpt_output_dir, time_idx)
-                    print('Failed to evaluate trajectory.')
-        
-        # timer.lap('Mapping Done.', 4)
-        
-        # Add frame to keyframe list
-        if ((time_idx == 0) or ((time_idx+1) % config['keyframe_every'] == 0) or \
-                    (time_idx == num_frames-2)) and (not torch.isinf(curr_gt_w2c[-1]).any()) and (not torch.isnan(curr_gt_w2c[-1]).any()):
-            with torch.no_grad():
-                # Get the current estimated rotation & translation
-                curr_cam_rot = F.normalize(params['cam_unnorm_rots'][..., time_idx].detach())
-                curr_cam_tran = params['cam_trans'][..., time_idx].detach()
-                curr_w2c = torch.eye(4).cuda().float()
-                curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
-                curr_w2c[:3, 3] = curr_cam_tran
-                # Initialize Keyframe Info
-                curr_keyframe = {'id': time_idx, 'est_w2c': curr_w2c, 'color': color, 'depth': depth}
-                # Add to keyframe list
-                keyframe_list.append(curr_keyframe)
-                keyframe_time_indices.append(time_idx)
+                    # Initialize Keyframe Info
+                    curr_keyframe = {'id': time_idx, 'est_w2c': curr_w2c, 'color': color, 'depth': depth}
+                    # Add to keyframe list
+                    keyframe_list.append(curr_keyframe)
+                    keyframe_time_indices.append(time_idx)
         
         # Checkpoint every iteration
         if time_idx % config["checkpoint_interval"] == 0 and config['save_checkpoints']:
@@ -1195,11 +1238,7 @@ def rgbd_slam(config: dict):
         f.write(f"Average Mapping/Frame Time: {mapping_frame_time_avg} s\n")
         f.write(f"Frame Time: {tracking_frame_time_avg + mapping_frame_time_avg} s\n")
     
-    # Evaluate Final Parameters
-    dataset = [dataset, eval_dataset, 'C3VD'] if dataset_config["train_or_test"] == 'train' else dataset
-    with torch.no_grad():
-        eval_save(dataset, params, eval_dir, sil_thres=config['mapping']['sil_thres'],
-                mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'])
+
 
     # Add Camera Parameters to Save them
     params['timestep'] = variables['timestep']
@@ -1216,6 +1255,12 @@ def rgbd_slam(config: dict):
     # Save Parameters
     save_params(params, output_dir)
     save_means3D(params['means3D'], output_dir)
+
+        # Evaluate Final Parameters
+    dataset = [dataset, eval_dataset, 'C3VD'] if dataset_config["train_or_test"] == 'train' else dataset
+    with torch.no_grad():
+        eval_save(dataset, params, eval_dir, sil_thres=config['mapping']['sil_thres'],
+                mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'])
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

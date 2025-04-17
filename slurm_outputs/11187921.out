@@ -1,0 +1,17 @@
+FATAL:   While checking container encryption: could not open image /home/hhuitema/docker/endogslam:v2.sif: failed to retrieve path for /home/hhuitema/docker/endogslam:v2.sif: lstat /gpfs/home6/hhuitema/docker/endogslam:v2.sif: no such file or directory
+srun: error: gcn3: task 0: Exited with exit code 255
+srun: Terminating StepId=11187921.0
+
+JOB STATISTICS
+==============
+Job ID: 11187921
+Cluster: snellius
+User/Group: hhuitema/hhuitema
+State: FAILED (exit code 255)
+Nodes: 1
+Cores per node: 9
+CPU Utilized: 00:00:00
+CPU Efficiency: 0.00% of 00:01:21 core-walltime
+Job Wall-clock time: 00:00:09
+Memory Utilized: 1.53 MB
+Memory Efficiency: 0.00% of 60.00 GB (60.00 GB/node)
