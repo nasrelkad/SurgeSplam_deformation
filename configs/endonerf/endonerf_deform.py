@@ -14,7 +14,7 @@ except KeyError:
 map_every = 1
 keyframe_every = 8
 # mapping_window_size = 24
-tracking_iters = 50
+tracking_iters = 25
 mapping_iters = 25
 
 group_name = f"EndoNerf {scene_name}"
@@ -61,7 +61,7 @@ config = dict(
         loss_weights=dict(
             im=0.5,
             depth=1.0,
-            deform = 0.5
+            deform = 0.0
         ),
         lrs=dict(
             means3D=0.0,
@@ -69,17 +69,18 @@ config = dict(
             unnorm_rotations=0.0,
             logit_opacities=0.0,
             log_scales=0.0,
-            cam_unnorm_rots=0.00,
-            cam_trans=0.00,
-            deform_weights = 0.01,
-            deform_stds = 0.01,
-            deform_biases = 0.01,
+            cam_unnorm_rots=0.002,
+            cam_trans=0.005,
+            deform_weights = 0.001,
+            deform_stds = 0.001,
+            deform_biases = 0.001,
         ),
     ),
     mapping=dict(
+        perform_mapping = False,
         num_iters=mapping_iters,
-        add_new_gaussians=False,
-        sil_thres=0.5, # For Addition of new Gaussians
+        add_new_gaussians=True,
+        sil_thres=0.9, # For Addition of new Gaussians
         use_l1=True,
         use_sil_for_loss=False,
         ignore_outlier_depth_loss=False,
@@ -89,11 +90,11 @@ config = dict(
             deform = 0
         ),
         lrs=dict(
-            means3D=0.0000,
-            rgb_colors=0.00,
-            unnorm_rotations=0.00,
-            logit_opacities=0.0,
-            log_scales=0.00,
+            means3D=0.0001,
+            rgb_colors=0.0025,
+            unnorm_rotations=0.001,
+            logit_opacities=0.05,
+            log_scales=0.001,
             cam_unnorm_rots=0.000,
             cam_trans=0.000,
             deform_weights = 0.00,
@@ -138,7 +139,7 @@ config = dict(
     ),
     depth = dict(
         use_gt_depth = False,
-        model_path = '/home/hhuitema/github_repos/SurgeSplam/models/SurgeDepth/SurgeDepthStudent_V5.pth',
+        model_path = 'models/SurgeDepth/SurgeDepthStudent_V5.pth',
         model_size = 'vitb',
         normalization_means = [0.46888983, 0.29536288, 0.28712815], 
         normalization_stds = [0.24689102 ,0.21034359, 0.21188641],
