@@ -76,6 +76,7 @@ config = dict(
         ),
     ),
     mapping=dict(
+        perform_mapping = True,
         num_iters=mapping_iters,
         add_new_gaussians=True,
         sil_thres=0.5, # For Addition of new Gaussians
