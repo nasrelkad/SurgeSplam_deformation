@@ -129,11 +129,7 @@ def initialize_deformations(params,nr_basis,use_distributed_biases,total_timesca
     # Means3D, unnorm rotations and log_scales should receive deformation params
     N = params['means3D'].shape[0]
     weights = torch.randn([N,nr_basis,10],requires_grad = True,device = 'cuda')*0.0 # We have N x nr_basis x 10 (xyz,scales,rots) weights
-<<<<<<< HEAD
-    stds = torch.ones([N,nr_basis,10],requires_grad = True,device = 'cuda')*10 # We have N x nr_basis x 10 (xyz,scales,rots) weights
-=======
-    stds = torch.ones([N,nr_basis,10],requires_grad = True,device = 'cuda')*0.01 # We have N x nr_basis x 10 (xyz,scales,rots) weights
->>>>>>> 34ea6d6b46d7db7e1f78c60a009b4322f9f1e8a7
+    stds = torch.ones([N,nr_basis,10],requires_grad = True,device = 'cuda')/1 # We have N x nr_basis x 10 (xyz,scales,rots) weights
     if not use_distributed_biases:
         biases = torch.randn([N,nr_basis,10],requires_grad = True,device = 'cuda')*0.0 # We have N x nr_basis x 10 (xyz,scales,rots) weights
     
@@ -910,9 +906,9 @@ def rgbd_slam(config: dict):
             # Keep Track of Best Candidate Rotation & Translation
             candidate_cam_unnorm_rot = params['cam_unnorm_rots'][..., time_idx].detach().clone()
             candidate_cam_tran = params['cam_trans'][..., time_idx].detach().clone()
-            candidate_deform_biases = params['deform_biases'].detach().clone()
-            candidate_deform_weights = params['deform_weights'].detach().clone()
-            candidate_deform_stds = params['deform_stds'].detach().clone()
+            candidate_deform_biases = params['deform_biases']
+            candidate_deform_weights = params['deform_weights']
+            candidate_deform_stds = params['deform_stds']
             current_min_loss = float(1e20)
             # Tracking Optimization
             iter = 0
@@ -949,9 +945,9 @@ def rgbd_slam(config: dict):
                         current_min_loss = loss
                         candidate_cam_unnorm_rot = params['cam_unnorm_rots'][..., time_idx].detach().clone()
                         candidate_cam_tran = params['cam_trans'][..., time_idx].detach().clone()
-                        candidate_deform_biases = params['deform_biases'].detach().clone()
-                        candidate_deform_weights = params['deform_weights'].detach().clone()
-                        candidate_deform_stds = params['deform_stds'].detach().clone()
+                        candidate_deform_biases = params['deform_biases']
+                        candidate_deform_weights = params['deform_weights']
+                        candidate_deform_stds = params['deform_stds']
                     # Report Progress
                     if config['report_iter_progress']:
                         report_progress(params, tracking_curr_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True)
@@ -1039,36 +1035,162 @@ def rgbd_slam(config: dict):
             curr_data['depth'] = ((invariant_depth-t_invar)/s_invar)*s_render + t_render
 
     
+        if config['mapping']['perform_mapping']:
+            # Densification & KeyFrame-based Mapping
+            if time_idx == 0 or (time_idx+1) % config['map_every'] == 0:
+                # Densification
+                if config['mapping']['add_new_gaussians'] and time_idx > 0:
+                    # Setup Data for Densification
+                    if seperate_densification_res:
+                        # Load RGBD frames incrementally instead of all frames
+                        densify_color, densify_depth, _, _ = densify_dataset[time_idx]
+                        densify_color = densify_color.permute(2, 0, 1) / 255
+                        densify_depth = densify_depth.permute(2, 0, 1)
+                        densify_curr_data = {'cam': densify_cam, 'im': densify_color, 'depth': densify_depth, 'id': time_idx, 
+                                    'intrinsics': densify_intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
+                    else:
+                        densify_curr_data = curr_data
 
-        # Densification & KeyFrame-based Mapping
-        if time_idx == 0 or (time_idx+1) % config['map_every'] == 0:
-            # Densification
-            if config['mapping']['add_new_gaussians'] and time_idx > 0:
-                # Setup Data for Densification
-                if seperate_densification_res:
-                    # Load RGBD frames incrementally instead of all frames
-                    densify_color, densify_depth, _, _ = densify_dataset[time_idx]
-                    densify_color = densify_color.permute(2, 0, 1) / 255
-                    densify_depth = densify_depth.permute(2, 0, 1)
-                    densify_curr_data = {'cam': densify_cam, 'im': densify_color, 'depth': densify_depth, 'id': time_idx, 
-                                 'intrinsics': densify_intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
-                else:
-                    densify_curr_data = curr_data
+                    # delete floating gaussians
+                    # params, variables = remove_floating_gaussians(params, variables, densify_curr_data, time_idx)
+                    
+                    # Add new Gaussians to the scene based on the Silhouette
+                    params, variables = add_new_gaussians(params, variables, densify_curr_data, 
+                                                        config['mapping']['sil_thres'], time_idx,
+                                                        config['mean_sq_dist_method'], 
+                                                        config['gaussian_simplification'],
+                                                        nr_basis = config['deforms']['nr_basis'],
+                                                        use_distributed_biases = config['deforms']['use_distributed_biases'],
+                                                        total_timescale = config['deforms']['total_timescale'])
+                    post_num_pts = params['means3D'].shape[0]
+                    added_new_gaussians.append(post_num_pts)
+                if not config['distance_keyframe_selection']:
+                    with torch.no_grad():
+                        # Get the current estimated rotation & translation
+                        curr_cam_rot = F.normalize(params['cam_unnorm_rots'][..., time_idx].detach())
+                        curr_cam_tran = params['cam_trans'][..., time_idx].detach()
+                        curr_w2c = torch.eye(4).cuda().float()
+                        curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
+                        curr_w2c[:3, 3] = curr_cam_tran
+                        # Select Keyframes for Mapping
+                        num_keyframes = config['mapping_window_size']-2
+                        selected_keyframes = keyframe_selection_overlap(depth, curr_w2c, intrinsics, keyframe_list[:-1], num_keyframes)
+                        selected_time_idx = [keyframe_list[frame_idx]['id'] for frame_idx in selected_keyframes]
+                        if len(keyframe_list) > 0:
+                            # Add last keyframe to the selected keyframes
+                            selected_time_idx.append(keyframe_list[-1]['id'])
+                            selected_keyframes.append(len(keyframe_list)-1)
+                        # Add current frame to the selected keyframes
+                        selected_time_idx.append(time_idx)
+                        selected_keyframes.append(-1)
+                        # Print the selected keyframes
+                        print(f"\nSelected Keyframes at Frame {time_idx}: {selected_time_idx}")
 
-                # delete floating gaussians
-                # params, variables = remove_floating_gaussians(params, variables, densify_curr_data, time_idx)
-                
-                # Add new Gaussians to the scene based on the Silhouette
-                params, variables = add_new_gaussians(params, variables, densify_curr_data, 
-                                                      config['mapping']['sil_thres'], time_idx,
-                                                      config['mean_sq_dist_method'], 
-                                                      config['gaussian_simplification'],
-                                                      nr_basis = config['deforms']['nr_basis'],
-                                                      use_distributed_biases = config['deforms']['use_distributed_biases'],
-                                                      total_timescale = config['deforms']['total_timescale'])
-                post_num_pts = params['means3D'].shape[0]
-                added_new_gaussians.append(post_num_pts)
-            if not config['distance_keyframe_selection']:
+                # Reset Optimizer & Learning Rates for Full Map Optimization
+                optimizer = initialize_optimizer(params, config['mapping']['lrs']) 
+
+                # timer.lap("Densification Done at frame "+str(time_idx), 3)
+
+                # Mapping
+                mapping_start_time = time.time()
+                if num_iters_mapping > 0:
+                    progress_bar = tqdm(range(num_iters_mapping), desc=f"Mapping Time Step: {time_idx}")
+                    
+                actural_keyframe_ids = []
+                for iter in range(num_iters_mapping):
+                    iter_start_time = time.time()
+                    if not config['distance_keyframe_selection']:
+                        # Randomly select a frame until current time step amongst keyframes
+                        rand_idx = np.random.randint(0, len(selected_keyframes))
+                        selected_rand_keyframe_idx = selected_keyframes[rand_idx]
+                        actural_keyframe_ids.append(selected_rand_keyframe_idx)
+                        if selected_rand_keyframe_idx == -1:
+                            # Use Current Frame Data
+                            iter_time_idx = time_idx
+                            iter_color = color
+                            iter_depth = depth
+                        else:
+                            # Use Keyframe Data
+                            iter_time_idx = keyframe_list[selected_rand_keyframe_idx]['id']
+                            iter_color = keyframe_list[selected_rand_keyframe_idx]['color']
+                            iter_depth = keyframe_list[selected_rand_keyframe_idx]['depth']
+                    else:
+                        if len(actural_keyframe_ids) == 0:
+                            if len(keyframe_list) > 0:
+                                curr_position = params['cam_trans'][..., time_idx].detach().cpu()
+                                actural_keyframe_ids = keyframe_selection_distance(time_idx, curr_position, keyframe_list, config['distance_current_frame_prob'], num_iters_mapping)
+                            else:
+                                actural_keyframe_ids = [0] * num_iters_mapping
+                            print(f"\nUsed Frames for mapping at Frame {time_idx}: {[keyframe_list[i]['id'] if i != len(keyframe_list) else 'curr' for i in actural_keyframe_ids]}")
+
+                        selected_keyframe_ids = actural_keyframe_ids[iter]
+
+                        if selected_keyframe_ids == len(keyframe_list):
+                            # Use Current Frame Data
+                            iter_time_idx = time_idx
+                            iter_color = color
+                            iter_depth = depth
+                        else:
+                            # Use Keyframe Data
+                            iter_time_idx = keyframe_list[selected_keyframe_ids]['id']
+                            iter_color = keyframe_list[selected_keyframe_ids]['color']
+                            iter_depth = keyframe_list[selected_keyframe_ids]['depth']
+                        
+                        
+                    iter_gt_w2c = gt_w2c_all_frames[:iter_time_idx+1]
+                    iter_data = {'cam': cam, 'im': iter_color, 'depth': iter_depth, 'id': iter_time_idx, 
+                                'intrinsics': intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': iter_gt_w2c}
+                    # Loss for current frame
+                    loss, variables, losses = get_loss(params, iter_data, variables, iter_time_idx, config['mapping']['loss_weights'],
+                                                    config['mapping']['use_sil_for_loss'], config['mapping']['sil_thres'],
+                                                    config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'],use_gt_depth = config['depth']['use_gt_depth'], mapping=True,save_idx = None,gaussian_deformations=config['deforms']['use_deformations'])
+                    # Backprop
+                    loss.backward()
+                    with torch.no_grad():
+                        # Prune Gaussians
+                        if config['mapping']['prune_gaussians']:
+                            params, variables = prune_gaussians(params, variables, optimizer, iter, config['mapping']['pruning_dict'])
+                        # Gaussian-Splatting's Gradient-based Densification
+                        if config['mapping']['use_gaussian_splatting_densification']:
+                            params, variables = densify(params, variables, optimizer, iter, config['mapping']['densify_dict'])
+                        # Optimizer Update
+                        optimizer.step()
+                        optimizer.zero_grad(set_to_none=True)
+                        # Report Progress
+                        if config['report_iter_progress']:
+                            report_progress(params, iter_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['mapping']['sil_thres'], 
+                                            mapping=True, online_time_idx=time_idx)
+                        else:
+                            progress_bar.update(1)
+                    # Update the runtime numbers
+                    iter_end_time = time.time()
+                    mapping_iter_time_sum += iter_end_time - iter_start_time
+                    mapping_iter_time_count += 1
+                if num_iters_mapping > 0:
+                    progress_bar.close()
+                # Update the runtime numbers
+                mapping_end_time = time.time()
+                mapping_frame_time_sum += mapping_end_time - mapping_start_time
+                mapping_frame_time_count += 1
+
+                if time_idx == 0 or (time_idx+1) % config['report_global_progress_every'] == 0:
+                    try:
+                        # Report Mapping Progress
+                        progress_bar = tqdm(range(1), desc=f"Mapping Result Time Step: {time_idx}")
+                        with torch.no_grad():
+                            report_progress(params, curr_data, 1, progress_bar, time_idx, sil_thres=config['mapping']['sil_thres'], 
+                                            mapping=True, online_time_idx=time_idx)
+                        progress_bar.close()
+                    except:
+                        ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
+                        save_params_ckpt(params, ckpt_output_dir, time_idx)
+                        print('Failed to evaluate trajectory.')
+            
+            # timer.lap('Mapping Done.', 4)
+            
+            # Add frame to keyframe list
+            if ((time_idx == 0) or ((time_idx+1) % config['keyframe_every'] == 0) or \
+                        (time_idx == num_frames-2)) and (not torch.isinf(curr_gt_w2c[-1]).any()) and (not torch.isnan(curr_gt_w2c[-1]).any()):
                 with torch.no_grad():
                     # Get the current estimated rotation & translation
                     curr_cam_rot = F.normalize(params['cam_unnorm_rots'][..., time_idx].detach())
@@ -1076,137 +1198,11 @@ def rgbd_slam(config: dict):
                     curr_w2c = torch.eye(4).cuda().float()
                     curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
                     curr_w2c[:3, 3] = curr_cam_tran
-                    # Select Keyframes for Mapping
-                    num_keyframes = config['mapping_window_size']-2
-                    selected_keyframes = keyframe_selection_overlap(depth, curr_w2c, intrinsics, keyframe_list[:-1], num_keyframes)
-                    selected_time_idx = [keyframe_list[frame_idx]['id'] for frame_idx in selected_keyframes]
-                    if len(keyframe_list) > 0:
-                        # Add last keyframe to the selected keyframes
-                        selected_time_idx.append(keyframe_list[-1]['id'])
-                        selected_keyframes.append(len(keyframe_list)-1)
-                    # Add current frame to the selected keyframes
-                    selected_time_idx.append(time_idx)
-                    selected_keyframes.append(-1)
-                    # Print the selected keyframes
-                    print(f"\nSelected Keyframes at Frame {time_idx}: {selected_time_idx}")
-
-            # Reset Optimizer & Learning Rates for Full Map Optimization
-            optimizer = initialize_optimizer(params, config['mapping']['lrs']) 
-
-            # timer.lap("Densification Done at frame "+str(time_idx), 3)
-
-            # Mapping
-            mapping_start_time = time.time()
-            if num_iters_mapping > 0:
-                progress_bar = tqdm(range(num_iters_mapping), desc=f"Mapping Time Step: {time_idx}")
-                
-            actural_keyframe_ids = []
-            for iter in range(num_iters_mapping):
-                iter_start_time = time.time()
-                if not config['distance_keyframe_selection']:
-                    # Randomly select a frame until current time step amongst keyframes
-                    rand_idx = np.random.randint(0, len(selected_keyframes))
-                    selected_rand_keyframe_idx = selected_keyframes[rand_idx]
-                    actural_keyframe_ids.append(selected_rand_keyframe_idx)
-                    if selected_rand_keyframe_idx == -1:
-                        # Use Current Frame Data
-                        iter_time_idx = time_idx
-                        iter_color = color
-                        iter_depth = depth
-                    else:
-                        # Use Keyframe Data
-                        iter_time_idx = keyframe_list[selected_rand_keyframe_idx]['id']
-                        iter_color = keyframe_list[selected_rand_keyframe_idx]['color']
-                        iter_depth = keyframe_list[selected_rand_keyframe_idx]['depth']
-                else:
-                    if len(actural_keyframe_ids) == 0:
-                        if len(keyframe_list) > 0:
-                            curr_position = params['cam_trans'][..., time_idx].detach().cpu()
-                            actural_keyframe_ids = keyframe_selection_distance(time_idx, curr_position, keyframe_list, config['distance_current_frame_prob'], num_iters_mapping)
-                        else:
-                            actural_keyframe_ids = [0] * num_iters_mapping
-                        print(f"\nUsed Frames for mapping at Frame {time_idx}: {[keyframe_list[i]['id'] if i != len(keyframe_list) else 'curr' for i in actural_keyframe_ids]}")
-
-                    selected_keyframe_ids = actural_keyframe_ids[iter]
-
-                    if selected_keyframe_ids == len(keyframe_list):
-                        # Use Current Frame Data
-                        iter_time_idx = time_idx
-                        iter_color = color
-                        iter_depth = depth
-                    else:
-                        # Use Keyframe Data
-                        iter_time_idx = keyframe_list[selected_keyframe_ids]['id']
-                        iter_color = keyframe_list[selected_keyframe_ids]['color']
-                        iter_depth = keyframe_list[selected_keyframe_ids]['depth']
-                    
-                    
-                iter_gt_w2c = gt_w2c_all_frames[:iter_time_idx+1]
-                iter_data = {'cam': cam, 'im': iter_color, 'depth': iter_depth, 'id': iter_time_idx, 
-                             'intrinsics': intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': iter_gt_w2c}
-                # Loss for current frame
-                loss, variables, losses = get_loss(params, iter_data, variables, iter_time_idx, config['mapping']['loss_weights'],
-                                                config['mapping']['use_sil_for_loss'], config['mapping']['sil_thres'],
-                                                config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'],use_gt_depth = config['depth']['use_gt_depth'], mapping=True,save_idx = None,gaussian_deformations=config['deforms']['use_deformations'])
-                # Backprop
-                loss.backward()
-                with torch.no_grad():
-                    # Prune Gaussians
-                    if config['mapping']['prune_gaussians']:
-                        params, variables = prune_gaussians(params, variables, optimizer, iter, config['mapping']['pruning_dict'])
-                    # Gaussian-Splatting's Gradient-based Densification
-                    if config['mapping']['use_gaussian_splatting_densification']:
-                        params, variables = densify(params, variables, optimizer, iter, config['mapping']['densify_dict'])
-                    # Optimizer Update
-                    optimizer.step()
-                    optimizer.zero_grad(set_to_none=True)
-                    # Report Progress
-                    if config['report_iter_progress']:
-                        report_progress(params, iter_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['mapping']['sil_thres'], 
-                                        mapping=True, online_time_idx=time_idx)
-                    else:
-                        progress_bar.update(1)
-                # Update the runtime numbers
-                iter_end_time = time.time()
-                mapping_iter_time_sum += iter_end_time - iter_start_time
-                mapping_iter_time_count += 1
-            if num_iters_mapping > 0:
-                progress_bar.close()
-            # Update the runtime numbers
-            mapping_end_time = time.time()
-            mapping_frame_time_sum += mapping_end_time - mapping_start_time
-            mapping_frame_time_count += 1
-
-            if time_idx == 0 or (time_idx+1) % config['report_global_progress_every'] == 0:
-                try:
-                    # Report Mapping Progress
-                    progress_bar = tqdm(range(1), desc=f"Mapping Result Time Step: {time_idx}")
-                    with torch.no_grad():
-                        report_progress(params, curr_data, 1, progress_bar, time_idx, sil_thres=config['mapping']['sil_thres'], 
-                                        mapping=True, online_time_idx=time_idx)
-                    progress_bar.close()
-                except:
-                    ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
-                    save_params_ckpt(params, ckpt_output_dir, time_idx)
-                    print('Failed to evaluate trajectory.')
-        
-        # timer.lap('Mapping Done.', 4)
-        
-        # Add frame to keyframe list
-        if ((time_idx == 0) or ((time_idx+1) % config['keyframe_every'] == 0) or \
-                    (time_idx == num_frames-2)) and (not torch.isinf(curr_gt_w2c[-1]).any()) and (not torch.isnan(curr_gt_w2c[-1]).any()):
-            with torch.no_grad():
-                # Get the current estimated rotation & translation
-                curr_cam_rot = F.normalize(params['cam_unnorm_rots'][..., time_idx].detach())
-                curr_cam_tran = params['cam_trans'][..., time_idx].detach()
-                curr_w2c = torch.eye(4).cuda().float()
-                curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
-                curr_w2c[:3, 3] = curr_cam_tran
-                # Initialize Keyframe Info
-                curr_keyframe = {'id': time_idx, 'est_w2c': curr_w2c, 'color': color, 'depth': depth}
-                # Add to keyframe list
-                keyframe_list.append(curr_keyframe)
-                keyframe_time_indices.append(time_idx)
+                    # Initialize Keyframe Info
+                    curr_keyframe = {'id': time_idx, 'est_w2c': curr_w2c, 'color': color, 'depth': depth}
+                    # Add to keyframe list
+                    keyframe_list.append(curr_keyframe)
+                    keyframe_time_indices.append(time_idx)
         
         # Checkpoint every iteration
         if time_idx % config["checkpoint_interval"] == 0 and config['save_checkpoints']:
