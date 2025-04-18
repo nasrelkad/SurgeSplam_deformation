@@ -147,8 +147,100 @@ def initialize_deformations(params,nr_basis,use_distributed_biases,total_timesca
 
     return params
 
-def deform_gaussians(params,time,deform_grad):
+# def deform_gaussians(params,time,deform_grad):
 
+#     if deform_grad:
+#         weights = params['deform_weights']
+#         stds = params['deform_stds']
+#         biases = params['deform_biases']
+#     else:
+#         weights = params['deform_weights'].detach()
+#         stds = params['deform_stds'].detach()
+#         biases = params['deform_biases'].detach()
+
+
+#     deform = torch.sum(weights*torch.exp(-1/(2*stds**2)*(time-biases)**2),1) # Nx10 gaussians deformations
+#     deform_xyz = deform[:,:3]
+#     deform_rots = deform[:,3:7]
+#     deform_scales = deform[:,7:10]
+#     # print(f'xyz: {torch.sum(deform_xyz)}')
+#     # print(torch.sum(deform_rots).item())
+#     # print(torch.sum(deform_scales).item())
+#     xyz = params['means3D']+deform_xyz
+#     rots = params['unnorm_rotations']+deform_rots
+#     scales = params['log_scales']+deform_scales
+
+#     return xyz,rots,scales
+
+# def deform_gaussians(params, time, deform_grad, N=5):
+#     """
+#     Calculate deformations using the N closest basis functions based on |time - bias|.
+
+#     Args:
+#         params (dict): Dictionary containing deformation parameters.
+#         time (torch.Tensor): Current time step.
+#         deform_grad (bool): Whether to calculate gradients for deformations.
+#         N (int): Number of closest basis functions to consider.
+
+#     Returns:
+#         xyz (torch.Tensor): Updated 3D positions.
+#         rots (torch.Tensor): Updated rotations.
+#         scales (torch.Tensor): Updated scales.
+#     """
+#     if deform_grad:
+#         weights = params['deform_weights']
+#         stds = params['deform_stds']
+#         biases = params['deform_biases']
+#     else:
+#         weights = params['deform_weights'].detach()
+#         stds = params['deform_stds'].detach()
+#         biases = params['deform_biases'].detach()
+
+#     # Calculate the absolute difference between time and biases
+#     time_diff = torch.abs(time - biases)
+
+#     # Get the indices of the N smallest time differences
+#     _, top_indices = torch.topk(-time_diff, N, dim=1)  # Negative for smallest values
+
+#     # Create a mask to select only the top N basis functions
+#     mask = torch.zeros_like(time_diff, dtype=torch.float)
+#     mask.scatter_(1, top_indices, 1.0)
+
+#     # Apply the mask to weights and biases
+#     masked_weights = weights * mask
+#     masked_biases = biases * mask
+
+#     # Calculate deformations
+#     deform = torch.sum(
+#         masked_weights * torch.exp(-1 / (2 * stds**2) * (time - masked_biases)**2), dim=1
+#     )  # Nx10 gaussians deformations
+
+#     deform_xyz = deform[:, :3]
+#     deform_rots = deform[:, 3:7]
+#     deform_scales = deform[:, 7:10]
+
+#     xyz = params['means3D'] + deform_xyz
+#     rots = params['unnorm_rotations'] + deform_rots
+#     scales = params['log_scales'] + deform_scales
+
+#     return xyz, rots, scales
+
+
+def deform_gaussians(params, time, deform_grad, N=5):
+    """
+    Calculate deformations using the N closest basis functions based on |time - bias|.
+
+    Args:
+        params (dict): Dictionary containing deformation parameters.
+        time (torch.Tensor): Current time step.
+        deform_grad (bool): Whether to calculate gradients for deformations.
+        N (int): Number of closest basis functions to consider.
+
+    Returns:
+        xyz (torch.Tensor): Updated 3D positions.
+        rots (torch.Tensor): Updated rotations.
+        scales (torch.Tensor): Updated scales.
+    """
     if deform_grad:
         weights = params['deform_weights']
         stds = params['deform_stds']
@@ -158,18 +250,39 @@ def deform_gaussians(params,time,deform_grad):
         stds = params['deform_stds'].detach()
         biases = params['deform_biases'].detach()
 
-    deform = torch.sum(weights*torch.exp(-1/(2*stds**2)*(time-biases)**2),1) # Nx10 gaussians deformations
-    deform_xyz = deform[:,:3]
-    deform_rots = deform[:,3:7]
-    deform_scales = deform[:,7:10]
-    # print(f'xyz: {torch.sum(deform_xyz)}')
-    # print(torch.sum(deform_rots).item())
-    # print(torch.sum(deform_scales).item())
-    xyz = params['means3D']+deform_xyz
-    rots = params['unnorm_rotations']+deform_rots
-    scales = params['log_scales']+deform_scales
+    # Calculate the absolute difference between time and biases
+    time_diff = torch.abs(time - biases)
 
-    return xyz,rots,scales
+    # Get the indices of the N smallest time differences
+    _, top_indices = torch.topk(-time_diff, N, dim=1)  # Negative for smallest values
+
+    # Create a mask to select only the top N basis functions
+    mask = torch.zeros_like(time_diff, dtype=torch.float)
+    mask.scatter_(1, top_indices, 1.0)
+
+    # Register a gradient hook to zero out gradients for irrelevant basis functions
+    if deform_grad:
+        def zero_out_irrelevant_gradients(grad):
+            return grad * mask
+
+        weights.register_hook(zero_out_irrelevant_gradients)
+        biases.register_hook(zero_out_irrelevant_gradients)
+        stds.register_hook(zero_out_irrelevant_gradients)
+
+    # Calculate deformations
+    deform = torch.sum(
+        weights * torch.exp(-1 / (2 * stds**2) * (time - biases)**2), dim=1
+    )  # Nx10 gaussians deformations
+
+    deform_xyz = deform[:, :3]
+    deform_rots = deform[:, 3:7]
+    deform_scales = deform[:, 7:10]
+
+    xyz = params['means3D'] + deform_xyz
+    rots = params['unnorm_rotations'] + deform_rots
+    scales = params['log_scales'] + deform_scales
+
+    return xyz, rots, scales
 
 def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification=True,nr_basis = 10,use_distributed_biases = False,total_timescale = None):
     num_pts = init_pt_cld.shape[0]
@@ -439,29 +552,29 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
 
         # c_d_norm = (curr_data['depth']-curr_data['depth'].min())/(curr_data['depth'].max()-curr_data['depth'].min())
         # d_norm = (depth-depth.min())/(depth.max()-depth.min())
-        diff_depth = torch.abs(predicted_depth_aligned.squeeze()-rendered_depth_aligned.squeeze())
+        # diff_depth = torch.abs(predicted_depth_aligned.squeeze()-rendered_depth_aligned.squeeze())
         img = torch.cat([im.permute(1,2,0),curr_data['im'].permute(1,2,0),diff.permute(1,2,0)],dim = 1).cpu().detach().numpy()
         img = Image.fromarray((img*255).astype(np.uint8))
 
 
 
-        rendered_depth_norm = (rendered_depth_aligned-rendered_depth_aligned.min())/(rendered_depth_aligned.max()-rendered_depth_aligned.min())
-        predicted_depth_norm = (predicted_depth_aligned-predicted_depth_aligned.min())/(predicted_depth_aligned.max()-predicted_depth_aligned.min())
-        diff_depth_norm = (diff_depth-diff_depth.min())/(diff_depth.max()-diff_depth.min())
-        depth_img = torch.cat([rendered_depth_norm.squeeze(),predicted_depth_norm.squeeze(),diff_depth_norm.squeeze()],dim = 1).cpu().detach().numpy()
-        
-        depth_img = Image.fromarray((depth_img*255).astype(np.uint8))
+        # rendered_depth_norm = (rendered_depth_aligned-rendered_depth_aligned.min())/(rendered_depth_aligned.max()-rendered_depth_aligned.min())
+        # predicted_depth_norm = (predicted_depth_aligned-predicted_depth_aligned.min())/(predicted_depth_aligned.max()-predicted_depth_aligned.min())
+        # diff_depth_norm = (diff_depth-diff_depth.min())/(diff_depth.max()-diff_depth.min())
+        # depth_img = torch.cat([rendered_depth_norm.squeeze(),predicted_depth_norm.squeeze(),diff_depth_norm.squeeze()],dim = 1).cpu().detach().numpy()
+        #
+        # depth_img = Image.fromarray((depth_img*255).astype(np.uint8))
         
         if tracking:
             os.makedirs(f'./scripts/plots/tracking/rgb/{ii}',exist_ok=True)
             img.save(f'./scripts/plots/tracking/rgb/{ii}/{save_idx}.png')
             os.makedirs(f'./scripts/plots/tracking/depth/{ii}',exist_ok=True)
-            depth_img.save(f'./scripts/plots/tracking/depth/{ii}/{save_idx}.png')
+            # depth_img.save(f'./scripts/plots/tracking/depth/{ii}/{save_idx}.png')
         elif mapping:
             os.makedirs(f'./scripts/plots/mapping/{ii}',exist_ok=True)
             img.save(f'./scripts/plots/mapping/{ii}/{save_idx}.png')
             os.makedirs(f'./scripts/plots/mapping/depth/{ii}',exist_ok=True)
-            depth_img.save(f'./scripts/plots/mapping/depth/{ii}/{save_idx}.png')
+            # depth_img.save(f'./scripts/plots/mapping/depth/{ii}/{save_idx}.png')
     
 
     # Depth loss
@@ -1011,7 +1124,7 @@ def rgbd_slam(config: dict):
                 optimizer.zero_grad(set_to_none=True)
                 with torch.no_grad():
                     # Save the best candidate rotation & translation
-                    if loss < current_min_loss:
+                    if True:#loss < current_min_loss:
                         current_min_loss = loss
                         candidate_cam_unnorm_rot = params['cam_unnorm_rots'][..., time_idx].detach().clone()
                         candidate_cam_tran = params['cam_trans'][..., time_idx].detach().clone()
