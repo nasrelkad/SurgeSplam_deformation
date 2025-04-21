@@ -122,7 +122,7 @@ def transformed_params2rendervar(params, transformed_pts,local_rots,local_scales
         'rotations': F.normalize(local_rots),
         'opacities': torch.sigmoid(params['logit_opacities']),
         # 'scales': torch.exp(torch.tile(params['log_scales'], (1, 3))),
-        'means2D': torch.zeros_like(params['means3D'], requires_grad=True, device="cuda") + 0
+        'means2D': torch.zeros_like(transformed_pts, requires_grad=True, device="cuda") + 0
     }
     if local_scales.shape[1] == 1:
         rendervar['colors_precomp'] = params['rgb_colors']
@@ -219,7 +219,7 @@ def transformed_params2depthplussilhouette(params, w2c, transformed_pts,local_ro
         'rotations': F.normalize(local_rots),
         'opacities': torch.sigmoid(params['logit_opacities']),
         # 'scales': torch.exp(torch.tile(params['log_scales'], (1, 3))),
-        'means2D': torch.zeros_like(params['means3D'], requires_grad=True, device="cuda") + 0
+        'means2D': torch.zeros_like(transformed_pts, requires_grad=True, device="cuda") + 0
     }
     if local_scales.shape[1] == 1:
         rendervar['scales'] = torch.exp(torch.tile(local_scales, (1, 3)))
@@ -313,7 +313,7 @@ def transformed_GRNparams2rendervar(params, transformed_pts,local_rots,local_sca
         'rotations': F.normalize(local_rots),
         'opacities': torch.sigmoid(params['logit_opacities']),
         # 'scales': torch.exp(torch.tile(params['log_scales'], (1, 3))),
-        'means2D': torch.zeros_like(params['means3D'], requires_grad=True, device="cuda") + 0
+        'means2D': torch.zeros_like(transformed_pts, requires_grad=True, device="cuda") + 0
     }
     if params['log_scales'].shape[1] == 1:
         rendervar['colors_precomp'] = params['rgb_colors']
@@ -350,7 +350,7 @@ def transformed_GRNparams2depthplussilhouette(params, w2c, transformed_pts,local
         'rotations': F.normalize(local_rots),
         'opacities': torch.sigmoid(params['logit_opacities']),
         # 'scales': torch.exp(torch.tile(params['log_scales'], (1, 3))),
-        'means2D': torch.zeros_like(params['means3D'], requires_grad=True, device="cuda") + 0
+        'means2D': torch.zeros_like(transformed_pts, requires_grad=True, device="cuda") + 0
     }
     if params['log_scales'].shape[1] == 1:
         rendervar['scales'] = torch.tile(local_scales, (1, 3))
