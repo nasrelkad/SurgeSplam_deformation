@@ -14,8 +14,8 @@ except KeyError:
 map_every = 1
 keyframe_every = 8
 # mapping_window_size = 24
-tracking_iters = 100
-mapping_iters = 100
+tracking_iters = 200
+mapping_iters = 200
 
 group_name = f"EndoNerf {scene_name}"
 run_name = scene_name
@@ -60,7 +60,7 @@ config = dict(
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
             im=2.0,
-            depth=0.5,
+            depth=1.0,
             deform = 0.5
         ),
         lrs=dict(
@@ -150,9 +150,9 @@ config = dict(
     ), 
     deforms = dict(
         use_deformations = True,
-        nr_basis = 20,
+        nr_basis = 50,
         use_distributed_biases = True,
-        total_timescale = 100
+        total_timescale = 50
     ),
     GRN = dict(
         use_grn = True,

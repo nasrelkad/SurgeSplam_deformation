@@ -172,7 +172,7 @@ def initialize_deformations(params,nr_basis,use_distributed_biases,total_timesca
 
 #     return xyz,rots,scales
 
-# def deform_gaussians(params, time, deform_grad, N=5):
+# def deform_gaussians(params, time, deform_grad, N=4):
 #     """
 #     Calculate deformations using the N closest basis functions based on |time - bias|.
 
@@ -258,7 +258,7 @@ def deform_gaussians(params, time, deform_grad, N=5):
 
     # Create a mask to select only the top N basis functions
     mask = torch.zeros_like(time_diff, dtype=torch.float)
-    mask.scatter_(1, top_indices, 1.0)
+    mask.scatter_(1, top_indices, 1.0).detach()
 
     # Register a gradient hook to zero out gradients for irrelevant basis functions
     if deform_grad:
@@ -1105,7 +1105,7 @@ def rgbd_slam(config: dict):
                                                    config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
                                                    plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
-                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=save_idx,gaussian_deformations=config['deforms']['use_deformations'],
+                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=None,gaussian_deformations=config['deforms']['use_deformations'],
                                                    use_grn = config['GRN']['use_grn'])
                 save_idx = save_idx+1
 
@@ -1124,7 +1124,10 @@ def rgbd_slam(config: dict):
                 optimizer.zero_grad(set_to_none=True)
                 with torch.no_grad():
                     # Save the best candidate rotation & translation
-                    if True:#loss < current_min_loss:
+                    # params['deform_biases'].remove_hook()
+                    # params['deform_weights'].remove_hook()
+                    # params['deform_stds'].remove_hook()
+                    if loss < current_min_loss:
                         current_min_loss = loss
                         candidate_cam_unnorm_rot = params['cam_unnorm_rots'][..., time_idx].detach().clone()
                         candidate_cam_tran = params['cam_trans'][..., time_idx].detach().clone()
