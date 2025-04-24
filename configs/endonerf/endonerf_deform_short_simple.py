@@ -9,12 +9,12 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "cutting_deform_short"
+    scene_name = "cutting_deform_short_simple"
 
 map_every = 1
 keyframe_every = 8
 # mapping_window_size = 24
-tracking_iters = 25
+tracking_iters = 50
 mapping_iters = 25
 
 group_name = f"EndoNerf {scene_name}"
@@ -64,22 +64,19 @@ config = dict(
             deform = 0.5
         ),
         lrs=dict(
-            means3D=0.0,
+            means3D=0.005,
             rgb_colors=0.0,
-            unnorm_rotations=0.0,
+            unnorm_rotations=0.005,
             logit_opacities=0.0,
-            log_scales=0.0,
-            cam_unnorm_rots=0.0002,
-            cam_trans=0.0005,
-            deform_weights = 0.001,
-            deform_stds = 0.001,
-            deform_biases = 0.001,
+            log_scales=0.005,
+            cam_unnorm_rots=0.00002,
+            cam_trans=0.00005,
         ),
     ),
     mapping=dict(
         perform_mapping = False,
         num_iters=mapping_iters,
-        add_new_gaussians=False,
+        add_new_gaussians=True,
         sil_thres=0.5, # For Addition of new Gaussians
         use_l1=True,
         use_sil_for_loss=False,
@@ -92,14 +89,11 @@ config = dict(
         lrs=dict(
             means3D=0.0001,
             rgb_colors=0.0025,
-            unnorm_rotations=0.00,
+            unnorm_rotations=0.0001,
             logit_opacities=0.05,
             log_scales=0.0001,
             cam_unnorm_rots=0.000,
             cam_trans=0.000,
-            deform_weights = 0.001,
-            deform_stds = 0.001,
-            deform_biases = 0.001,
         ),
         prune_gaussians=False, # Prune Gaussians during Mapping
         pruning_dict=dict( # Needs to be updated based on the number of mapping iterations
@@ -150,7 +144,7 @@ config = dict(
     ), 
     deforms = dict(
         use_deformations = True,
-        deform_type = 'gaussian',
+        deform_type = 'simple',
         nr_basis = 50,
         use_distributed_biases = True,
         total_timescale = 50
