@@ -242,42 +242,75 @@ def deform_gaussians(params, time, deform_grad, N=5,deformation_type = 'gaussian
         scales (torch.Tensor): Updated scales.
     """
     if deformation_type =='gaussian':
-        if deform_grad:
-            weights = params['deform_weights']
-            stds = params['deform_stds']
-            biases = params['deform_biases']
+        if True:
+            if deform_grad:
+                weights = params['deform_weights']
+                stds = params['deform_stds']
+                biases = params['deform_biases']
+            else:
+                weights = params['deform_weights'].detach()
+                stds = params['deform_stds'].detach()
+                biases = params['deform_biases'].detach()
+
+            # Calculate the absolute difference between time and biases
+            time_diff = torch.abs(time - biases)
+
+            # Get the indices of the N smallest time differences
+            _, top_indices = torch.topk(-time_diff, N, dim=1)  # Negative for smallest values
+
+            # Create a mask to select only the top N basis functions
+            mask = torch.zeros_like(time_diff, dtype=torch.float)
+            mask.scatter_(1, top_indices, 1.0)
+
+            # Apply the mask to weights and biases
+            masked_weights = weights * mask
+            masked_biases = biases * mask
+
+            # Calculate deformations
+            deform = torch.sum(
+                masked_weights * torch.exp(-1 / (2 * stds**2) * (time - masked_biases)**2), dim=1
+            )  # Nx10 gaussians deformations
+
+            deform_xyz = deform[:, :3]
+            deform_rots = deform[:, 3:7]
+            deform_scales = deform[:, 7:10]
         else:
-            weights = params['deform_weights'].detach()
-            stds = params['deform_stds'].detach()
-            biases = params['deform_biases'].detach()
+            if deform_grad:
+                weights = params['deform_weights']
+                stds = params['deform_stds']
+                biases = params['deform_biases']
+            else:
+                weights = params['deform_weights'].detach()
+                stds = params['deform_stds'].detach()
+                biases = params['deform_biases'].detach()
 
-        # Calculate the absolute difference between time and biases
-        time_diff = torch.abs(time - biases)
+            # Calculate the absolute difference between time and biases
+            time_diff = torch.abs(time - biases)
 
-        # Get the indices of the N smallest time differences
-        _, top_indices = torch.topk(-time_diff, N, dim=1)  # Negative for smallest values
+            # Get the indices of the N smallest time differences
+            _, top_indices = torch.topk(-time_diff, N, dim=1)  # Negative for smallest values
 
-        # Create a mask to select only the top N basis functions
-        mask = torch.zeros_like(time_diff, dtype=torch.float)
-        mask.scatter_(1, top_indices, 1.0).detach()
+            # Create a mask to select only the top N basis functions
+            mask = torch.zeros_like(time_diff, dtype=torch.float)
+            mask.scatter_(1, top_indices, 1.0).detach()
 
-        # Register a gradient hook to zero out gradients for irrelevant basis functions
-        if deform_grad:
-            def zero_out_irrelevant_gradients(grad):
-                return grad * mask
+            # Register a gradient hook to zero out gradients for irrelevant basis functions
+            if deform_grad:
+                def zero_out_irrelevant_gradients(grad):
+                    return grad * mask
 
-            weights.register_hook(zero_out_irrelevant_gradients)
-            biases.register_hook(zero_out_irrelevant_gradients)
-            stds.register_hook(zero_out_irrelevant_gradients)
+                weights.register_hook(zero_out_irrelevant_gradients)
+                biases.register_hook(zero_out_irrelevant_gradients)
+                stds.register_hook(zero_out_irrelevant_gradients)
 
-        # Calculate deformations
-        deform = torch.sum(
-            weights * torch.exp(-1 / (2 * stds**2) * (time - biases)**2), dim=1
-        )  # Nx10 gaussians deformations
+            # Calculate deformations
+            deform = torch.sum(
+                weights * torch.exp(-1 / (2 * stds**2) * (time - biases)**2), dim=1
+            )  # Nx10 gaussians deformations
 
-        deform_xyz = deform[:, :3]
-        deform_rots = deform[:, 3:7]
-        deform_scales = deform[:, 7:10]
+            deform_xyz = deform[:, :3]
+            deform_rots = deform[:, 3:7]
+            deform_scales = deform[:, 7:10]
 
         xyz = params['means3D'] + deform_xyz
         rots = params['unnorm_rotations'] + deform_rots
@@ -1194,7 +1227,7 @@ def rgbd_slam(config: dict):
                                                    config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
                                                    plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
-                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=save_idx,gaussian_deformations=config['deforms']['use_deformations'],
+                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=None,gaussian_deformations=config['deforms']['use_deformations'],
                                                    use_grn = config['GRN']['use_grn'],deformation_type = config['deforms']['deform_type'])
                 save_idx = save_idx+1
 
