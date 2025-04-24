@@ -21,9 +21,76 @@ from utils.recon_helpers import setup_camera
 from utils.slam_helpers import get_depth_and_silhouette
 from utils.slam_external import build_rotation
 
+
 from time import time
 w2cs = []
 
+
+def deform_gaussians(params, time, deform_grad, N=5,deformation_type = 'gaussian'):
+    """
+    Calculate deformations using the N closest basis functions based on |time - bias|.
+
+    Args:
+        params (dict): Dictionary containing deformation parameters.
+        time (torch.Tensor): Current time step.
+        deform_grad (bool): Whether to calculate gradients for deformations.
+        N (int): Number of closest basis functions to consider.
+
+    Returns:
+        xyz (torch.Tensor): Updated 3D positions.
+        rots (torch.Tensor): Updated rotations.
+        scales (torch.Tensor): Updated scales.
+    """
+    if deformation_type =='gaussian':
+        if deform_grad:
+            weights = params['deform_weights']
+            stds = params['deform_stds']
+            biases = params['deform_biases']
+        else:
+            weights = params['deform_weights'].detach()
+            stds = params['deform_stds'].detach()
+            biases = params['deform_biases'].detach()
+
+        # Calculate the absolute difference between time and biases
+        time_diff = torch.abs(time - biases)
+
+        # Get the indices of the N smallest time differences
+        _, top_indices = torch.topk(-time_diff, N, dim=1)  # Negative for smallest values
+
+        # Create a mask to select only the top N basis functions
+        mask = torch.zeros_like(time_diff, dtype=torch.float)
+        mask.scatter_(1, top_indices, 1.0).detach()
+
+        # Register a gradient hook to zero out gradients for irrelevant basis functions
+        if deform_grad:
+            def zero_out_irrelevant_gradients(grad):
+                return grad * mask
+
+            weights.register_hook(zero_out_irrelevant_gradients)
+            biases.register_hook(zero_out_irrelevant_gradients)
+            stds.register_hook(zero_out_irrelevant_gradients)
+
+        # Calculate deformations
+        deform = torch.sum(
+            weights * torch.exp(-1 / (2 * stds**2) * (time - biases)**2), dim=1
+        )  # Nx10 gaussians deformations
+
+        deform_xyz = deform[:, :3]
+        deform_rots = deform[:, 3:7]
+        deform_scales = deform[:, 7:10]
+
+        xyz = params['means3D'] + deform_xyz
+        rots = params['unnorm_rotations'] + deform_rots
+        scales = params['log_scales'] + deform_scales
+
+    
+    elif deformation_type == 'simple':
+        with torch.no_grad():
+            xyz = params['means3D'][...,time]
+            rots = params['unnorm_rotations'][...,time]
+            scales = params['log_scales'][...,time]
+    # print(deformation_type)
+    return xyz, rots, scales
 
 def load_camera(cfg, scene_path):
     all_params = dict(np.load(scene_path, allow_pickle=True))
@@ -40,7 +107,7 @@ def load_camera(cfg, scene_path):
     return w2c, k
 
 
-def load_scene_data(scene_path, first_frame_w2c, intrinsics):
+def load_scene_data(scene_path, first_frame_w2c, intrinsics, time_idx,deformation_type = None):
     # Load Scene Data
     all_params = dict(np.load(scene_path, allow_pickle=True))
     all_params = {k: torch.tensor(all_params[k]).cuda().float() for k in all_params.keys()}
@@ -69,19 +136,24 @@ def load_scene_data(scene_path, first_frame_w2c, intrinsics):
         rel_w2c[:3, 3] = cam_tran
         all_w2cs.append(rel_w2c.cpu().numpy())
 
-    transformed_pts = params['means3D']
+
+    local_means,local_rots,local_scales = deform_gaussians(params,time_idx,False,deformation_type=deformation_type)
+    transformed_pts = local_means
 
     rendervar = {
         'means3D': transformed_pts,
-        'rotations': torch.nn.functional.normalize(params['unnorm_rotations']),
+        'rotations': torch.nn.functional.normalize(local_rots),
         'opacities': torch.sigmoid(params['logit_opacities']),
         'means2D': torch.zeros_like(params['means3D'], device="cuda")
     }
     if "feature_rest" in params:
         rendervar['scales'] = torch.exp(params['log_scales'])
         rendervar['shs'] = torch.cat((params['rgb_colors'].reshape(params['rgb_colors'].shape[0], 3, -1).transpose(1, 2), params['feature_rest'].reshape(params['rgb_colors'].shape[0], 3, -1).transpose(1, 2)), dim=1)
-    else:
+    elif params['log_scales'].shape[1] == 1:
         rendervar['scales'] = torch.exp(torch.tile(params['log_scales'], (1, 3)))
+        rendervar['colors_precomp'] = params['rgb_colors']
+    else:
+        rendervar['scales'] = local_scales
         rendervar['colors_precomp'] = params['rgb_colors']
     depth_rendervar = {
         'means3D': transformed_pts,
@@ -172,11 +244,12 @@ def rgbd2pcd(color, depth, w2c, intrinsics, cfg):
     return pts, cols
 
 
-def visualize(scene_path, cfg):
+def visualize(scene_path, cfg,experiment):
     # Load Scene Data
+    time_idx = 0
+    deformation_type = experiment.config['deforms']['deform_type']
     w2c, k = load_camera(cfg, scene_path)
-
-    scene_data, scene_depth_data, all_w2cs = load_scene_data(scene_path, w2c, k)
+    scene_data, scene_depth_data, all_w2cs = load_scene_data(scene_path, w2c, k,time_idx,deformation_type=deformation_type)
 
     # vis.create_window()
     vis = o3d.visualization.Visualizer()
@@ -250,6 +323,8 @@ def visualize(scene_path, cfg):
     ts = time()
     # Interactive Rendering
     while True:
+        scene_data, scene_depth_data, all_w2cs = load_scene_data(scene_path, w2c, k,time_idx,deformation_type=deformation_type)
+
         cam_params = view_control.convert_to_pinhole_camera_parameters()
         view_k = cam_params.intrinsic.intrinsic_matrix
         k = view_k / cfg['view_scale']
@@ -280,7 +355,7 @@ def visualize(scene_path, cfg):
         if not vis.poll_events():
             break
         vis.update_renderer()
-
+        time_idx+=1
     # Cleanup
     vis.destroy_window()
     del view_control
@@ -311,4 +386,4 @@ if __name__ == "__main__":
     viz_cfg = experiment.config["viz"]
 
     # Visualize Final Reconstruction
-    visualize(scene_path, viz_cfg)
+    visualize(scene_path, viz_cfg,experiment)
