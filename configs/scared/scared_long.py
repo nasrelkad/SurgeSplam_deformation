@@ -76,6 +76,7 @@ config = dict(
         ),
     ),
     mapping=dict(
+        perform_mapping = True,
         num_iters=mapping_iters,
         add_new_gaussians=True,
         sil_thres=0.5, # For Addition of new Gaussians
@@ -150,5 +151,16 @@ config = dict(
         nr_basis = 10,
         use_distributed_biases = True,
         total_timescale = 100
+    ),
+    GRN = dict(
+        use_grn = True,
+        model_path = 'GRN/models/GRN_v1.pth'
+
+        # grn_layers = 2,
+        # grn_hidden_dim = 128,
+        # grn_out_dim = 3,
+        # grn_input_dim = 3,
+        # grn_num_heads = 4,
+        # grn_use_norm = True,
     )          
 )
