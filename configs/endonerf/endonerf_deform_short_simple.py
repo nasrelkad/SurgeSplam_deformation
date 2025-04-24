@@ -64,13 +64,13 @@ config = dict(
             deform = 0.5
         ),
         lrs=dict(
-            means3D=0.001,
+            means3D=0.005,
             rgb_colors=0.0,
-            unnorm_rotations=0.001,
+            unnorm_rotations=0.005,
             logit_opacities=0.0,
-            log_scales=0.001,
-            cam_unnorm_rots=0.0002,
-            cam_trans=0.0005,
+            log_scales=0.005,
+            cam_unnorm_rots=0.00002,
+            cam_trans=0.00005,
         ),
     ),
     mapping=dict(

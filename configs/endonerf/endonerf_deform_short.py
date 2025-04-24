@@ -14,8 +14,8 @@ except KeyError:
 map_every = 1
 keyframe_every = 8
 # mapping_window_size = 24
-tracking_iters = 200
-mapping_iters = 200
+tracking_iters = 25
+mapping_iters = 25
 
 group_name = f"EndoNerf {scene_name}"
 run_name = scene_name
