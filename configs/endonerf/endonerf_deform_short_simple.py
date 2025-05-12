@@ -60,17 +60,17 @@ config = dict(
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
             im=2.0,
-            depth=1.0,
-            deform = 0.5
+            depth=0.0,
+            deform = 0.0
         ),
         lrs=dict(
-            means3D=0.005,
+            means3D=0.00005,
             rgb_colors=0.0,
-            unnorm_rotations=0.005,
+            unnorm_rotations=0.00,
             logit_opacities=0.0,
-            log_scales=0.005,
-            cam_unnorm_rots=0.00002,
-            cam_trans=0.00005,
+            log_scales=0.00,
+            cam_unnorm_rots=0.0000,
+            cam_trans=0.0000,
         ),
     ),
     mapping=dict(
@@ -87,11 +87,11 @@ config = dict(
             deform = 0.5
         ),
         lrs=dict(
-            means3D=0.0001,
-            rgb_colors=0.0025,
-            unnorm_rotations=0.0001,
-            logit_opacities=0.05,
-            log_scales=0.0001,
+            means3D=0.0000,
+            rgb_colors=0.00,
+            unnorm_rotations=0.0000,
+            logit_opacities=0.00,
+            log_scales=0.0000,
             cam_unnorm_rots=0.000,
             cam_trans=0.000,
         ),
