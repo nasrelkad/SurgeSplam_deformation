@@ -608,14 +608,17 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
         mask = mask & presence_sil_mask
     if not use_gt_depth:
         rendered_depth_aligned,predicted_depth_aligned,_,_,_,_ = align_shift_and_scale(depth,curr_data['depth'],mask)
+        # rendered_depth_aligned = depth
+        # predicted_depth_aligned = curr_data['depth']
     
-    if False:
+    if True:
         fig,ax = plt.subplots(2,4)
         ax[0,0].imshow(im.permute(1,2,0).cpu().detach())
         ax[0,0].set_title('Rendered im')
         ax[0,1].imshow(curr_data['im'].permute(1,2,0).cpu().detach())
         ax[0,1].set_title('Input img')
-        ax[1,0].imshow(rendered_depth_aligned.squeeze().cpu().detach())
+        im0 = ax[1,0].imshow(rendered_depth_aligned.squeeze().cpu().detach())
+        plt.colorbar(im0,ax = ax[1,0])
         ax[1,0].set_title('Rendered depth')
         ax[1,1].imshow(predicted_depth_aligned.squeeze().cpu().detach())
         ax[1,1].set_title('Input depth')
@@ -1014,20 +1017,22 @@ def rgbd_slam(config: dict):
             # t_pred = torch.median(output)
             # s_pred = torch.mean(torch.abs(output-t_pred))
             output_norm = (output-output.min())/(output.max()-output.min())
-            pred_disp = (output_norm)*s_gt + t_gt +1 # TODO fix this scaling offset
-            # plt.imshow(output.squeeze().cpu().detach())
-            # plt.title('predicted depth')
-            # plt.colorbar()
-            # plt.show()
-            print(pred_disp.min())
-            depth = 1/pred_disp # Convert disp to depth
-            depth = depth.permute(1,2,0) # CxWxH --> WxHxC to align with rest of the pipeline    
-            print(depth.min())
+            pred_disp = (output_norm)*s_gt + t_gt +1 # TODO fix this scaling offse0t
+            plt.imshow(output.squeeze().cpu().detach())
+            plt.title('predicted depth')
+            plt.colorbar()
+            plt.show()
+            # print(pred_disp.min())
+            # depth = 1/pred_disp # Convert disp to depth
+            # depth = depth.permute(1,2,0)*10 # CxWxH --> WxHxC to align with rest of the pipeline    
+            # print(depth.min())
+            depth = 1/(output_norm+1)
+            depth = depth.permute(1,2,0)*10
 
-        # plt.imshow(depth.squeeze().cpu().detach())
-        # plt.title('predicted depth')
-        # plt.colorbar()
-        # plt.show()
+        plt.imshow(depth.squeeze().cpu().detach())
+        plt.title('predicted depth')
+        plt.colorbar()
+        plt.show()
         color = color.permute(2, 0, 1) / 255
         depth = depth.permute(2, 0, 1)
 
@@ -1172,6 +1177,7 @@ def rgbd_slam(config: dict):
         iter_time_idx = time_idx
         # Initialize Mapping Data for selected frame
         # plt.imshow(depth.squeeze().cpu().detach())
+        # plt.colorbar()
         # plt.show()
         curr_data = {'cam': cam, 'im': color, 'depth': depth, 'id': iter_time_idx, 'intrinsics': intrinsics, 
                      'w2c': first_frame_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
@@ -1227,8 +1233,9 @@ def rgbd_slam(config: dict):
                                                    config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
                                                    plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
-                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=None,gaussian_deformations=config['deforms']['use_deformations'],
+                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=save_idx,gaussian_deformations=config['deforms']['use_deformations'],
                                                    use_grn = config['GRN']['use_grn'],deformation_type = config['deforms']['deform_type'])
+                print(loss)
                 save_idx = save_idx+1
 
                 # Backprop
