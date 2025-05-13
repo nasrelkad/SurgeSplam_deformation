@@ -1547,11 +1547,9 @@ def rgbd_slam(config: dict):
                         print('Failed to evaluate trajectory.')
             
             # timer.lap('Mapping Done.', 4)
-            if time_idx < num_frames-1:
-                # Copy current (deformed) parameters to next time step
-                params['means3D'][..., time_idx+1] = params['means3D'][..., time_idx]
-                params['unnorm_rotations'][..., time_idx+1] = params['unnorm_rotations'][..., time_idx]
-                params['log_scales'][..., time_idx+1] = params['log_scales'][..., time_idx]
+
+
+
             # Add frame to keyframe list
             if ((time_idx == 0) or ((time_idx+1) % config['keyframe_every'] == 0) or \
                         (time_idx == num_frames-2)) and (not torch.isinf(curr_gt_w2c[-1]).any()) and (not torch.isnan(curr_gt_w2c[-1]).any()):
@@ -1567,7 +1565,12 @@ def rgbd_slam(config: dict):
                     # Add to keyframe list
                     keyframe_list.append(curr_keyframe)
                     keyframe_time_indices.append(time_idx)
-        
+                    
+        if time_idx < num_frames-1:
+            # Copy current (deformed) parameters to next time step
+            params['means3D'][..., time_idx+1] = params['means3D'][..., time_idx]
+            params['unnorm_rotations'][..., time_idx+1] = params['unnorm_rotations'][..., time_idx]
+            params['log_scales'][..., time_idx+1] = params['log_scales'][..., time_idx]
         # Checkpoint every iteration
         if time_idx % config["checkpoint_interval"] == 0 and config['save_checkpoints']:
             ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
