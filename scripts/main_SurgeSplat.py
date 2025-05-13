@@ -720,18 +720,28 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     return loss, variables, weighted_losses
 
 
-def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis = 10,use_distributed_biases = False, total_timescale = None,use_deform = True,deform_type = 'gaussian',num_frames = 1):
+def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis = 10,use_distributed_biases = False, total_timescale = None,use_deform = True,deform_type = 'gaussian',num_frames = 1,
+                            random_initialization = False,init_scale = 0.1):
     num_pts = new_pt_cld.shape[0]
     means3D = new_pt_cld[:, :3] # [num_gaussians, 3]
     unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1)) # [num_gaussians, 3]
     logit_opacities = torch.ones((num_pts, 1), dtype=torch.float, device="cuda") * 0.5
-    params = {
-        'means3D': means3D,
-        'rgb_colors': new_pt_cld[:, 3:6],
-        'unnorm_rotations': torch.tensor(unnorm_rots,dtype=torch.float).cuda(),
-        'logit_opacities': logit_opacities,
-        'log_scales': torch.tile(torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 1 if use_simplification else 3)),
-    }
+    if not random_initialization:
+        params = {
+            'means3D': means3D,
+            'rgb_colors': init_pt_cld[:, 3:6],
+            'unnorm_rotations': torch.tensor(unnorm_rots,dtype=torch.float).cuda(),
+            'logit_opacities': logit_opacities,
+            'log_scales': torch.tile(torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 1 if use_simplification else 3)),
+        }
+    else:
+        params = {
+            'means3D': means3D,
+            'rgb_colors': init_pt_cld[:, 3:6],
+            'unnorm_rotations': torch.zeros_like(torch.tensor(unnorm_rots),dtype=torch.float).cuda(),
+            'logit_opacities': logit_opacities,
+            'log_scales': torch.ones_like(torch.tensor(means3D),dtype=torch.float).cuda()*init_scale,
+        }
     # print(f'num pts {num_pts}')
     if use_deform and deform_type == 'gaussian':
         params = initialize_deformations(params,nr_basis = nr_basis,use_distributed_biases=use_distributed_biases,total_timescale = total_timescale)
@@ -751,7 +761,8 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis
 
 def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq_dist_method, use_simplification=True,
                       nr_basis = 10,use_distributed_biases = False,total_timescale = None,use_grn=False,grn_model=None,
-                      use_deform = True,deformation_type = 'gaussian',num_frames = 1):
+                      use_deform = True,deformation_type = 'gaussian',num_frames = 1,
+                      random_initialization=False,init_scale=0.1):
     # Silhouette Rendering
     if use_deform == True:
         local_means,local_rots,local_scales = deform_gaussians(params,time_idx,True,deformation_type =deformation_type)
@@ -796,7 +807,8 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
         new_pt_cld, mean3_sq_dist = get_pointcloud(curr_data['im'], curr_data['depth'], curr_data['intrinsics'], 
                                     curr_w2c, mask=non_presence_mask, compute_mean_sq_dist=True,
                                     mean_sq_dist_method=mean_sq_dist_method)
-        new_params = initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis = nr_basis,use_distributed_biases=use_distributed_biases,total_timescale = total_timescale,use_deform = use_deform,deform_type=deformation_type,num_frames = num_frames)
+        new_params = initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis = nr_basis,use_distributed_biases=use_distributed_biases,total_timescale = total_timescale,use_deform = use_deform,deform_type=deformation_type,
+                                            num_frames = num_frames,random_initialization=random_initialization,init_scale=init_scale)
         if use_grn:
             new_params = grn_initialization(grn_model,new_params,new_pt_cld,mean3_sq_dist,curr_data['im'],curr_data['depth'],non_presence_mask)
 
@@ -834,6 +846,32 @@ def initialize_camera_pose(params, curr_time_idx, forward_prop):
     
     return params
 
+def optimize_initialiation(params,curr_data,num_iters_initialization,variables,iter_time_idx,config):
+    optimizer = initialize_optimizer(params,config['GRN']['random_initialization_lrs'])
+    iter = 0
+    save_idx = 0
+    progress_bar = tqdm(range(num_iters_initialization), desc=f"Initial optimization")
+    while True:
+        loss, variables, losses = get_loss(params, curr_data, variables, iter_time_idx, config['tracking']['loss_weights'],
+                    config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
+                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True,
+                    visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
+                    tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=save_idx,gaussian_deformations=config['deforms']['use_deformations'],
+                    use_grn = config['GRN']['use_grn'],deformation_type = config['deforms']['deform_type'])
+        print(loss)
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+        save_idx +=1
+
+        if iter == num_iters_initialization:
+            break
+        else:   
+            # progress_bar = tqdm(range(num_iters_initialization), desc=f"Tracking Time Step: {time_idx}")
+            progress_bar.update(1)
+            iter+=1
+    progress_bar.close()
+    return params 
 
 def convert_params_to_store(params):
     params_to_store = {}
@@ -1236,33 +1274,8 @@ def rgbd_slam(config: dict):
         # If gaussians are randomly initialized, we need to optimize them enough to be able to perform tracking
         num_iters_initialization = 50
         if time_idx == 0:
-            if config['GRN']['random_initialization']:
-                optimizer = initialize_optimizer(params,config['GRN']['random_initialization_lrs'])
-
-                iter = 0
-                save_idx = 0
-                progress_bar = tqdm(range(num_iters_initialization), desc=f"Initial optimization")
-                while True:
-                    loss, variables, losses = get_loss(params, curr_data, variables, iter_time_idx, config['tracking']['loss_weights'],
-                                config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
-                                config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True,
-                                plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
-                                tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=save_idx,gaussian_deformations=config['deforms']['use_deformations'],
-                                use_grn = config['GRN']['use_grn'],deformation_type = config['deforms']['deform_type'])
-                    print(loss)
-                    loss.backward()
-                    optimizer.step()
-                    optimizer.zero_grad(set_to_none=True)
-                    save_idx +=1
-
-                    if iter == num_iters_initialization:
-                        break
-                    else:   
-                        # progress_bar = tqdm(range(num_iters_initialization), desc=f"Tracking Time Step: {time_idx}")
-                        progress_bar.update(1)
-                        iter+=1
-            progress_bar.close()
-            
+            if config['GRN']['random_initialization']:        
+                params = optimize_initialiation(params,curr_data,num_iters_initialization,variables,iter_time_idx,config)
         # Tracking
         tracking_start_time = time.time()
         save_idx = 0
@@ -1294,7 +1307,7 @@ def rgbd_slam(config: dict):
                                                    config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
                                                    plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
-                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=save_idx,gaussian_deformations=config['deforms']['use_deformations'],
+                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=None,gaussian_deformations=config['deforms']['use_deformations'],
                                                    use_grn = config['GRN']['use_grn'],deformation_type = config['deforms']['deform_type'])
                 # print(loss)
                 save_idx = save_idx+1
@@ -1466,7 +1479,11 @@ def rgbd_slam(config: dict):
                                                         grn_model=grn_model,
                                                         use_deform=config['deforms']['use_deformations'],
                                                         deformation_type=config['deforms']['deform_type'],
-                                                        num_frames = num_frames)
+                                                        num_frames = num_frames,
+                                                        random_initialization=config['GRN']['random_initialization'],
+                                                        init_scale=config['GRN']['init_scale'],)
+                    if config['GRN']['random_initialization']:
+                        params = optimize_initialiation(params,curr_data,num_iters_initialization,variables,iter_time_idx,config)
                     post_num_pts = params['means3D'].shape[0]
                     added_new_gaussians.append(post_num_pts)
                 if not config['distance_keyframe_selection']:
