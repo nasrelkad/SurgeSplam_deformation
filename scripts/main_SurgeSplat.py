@@ -427,7 +427,7 @@ def grn_initialization(model,params,init_pt_cld,mean3_sq_dist,color,depth,mask =
     # We need to apply the GRN inialization to each timestep
     if len(params['unnorm_rotations'].shape) ==3:
         params['unnorm_rotations'] = (rots[mask])[...,None].tile(1,1,params['unnorm_rotations'].shape[2])
-        params['log_scales'] = (scales_norm[mask]*mean3_sq_dist[:,None].tile(1,3))[...,None].tile(1,1,params['log_scales'].shape[2])
+        params['log_scales'] = (scales_norm[mask]*mean3_sq_dist[:,None].tile(1,3)*0.1)[...,None].tile(1,1,params['log_scales'].shape[2])
     else:
         params['unnorm_rotations'] = rots[mask]
         params['log_scales'] = scales_norm[mask]*mean3_sq_dist[:,None].tile(1,3)
@@ -762,6 +762,7 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
     non_presence_sil_mask = (silhouette < sil_thres)
     # Check for new foreground objects by using GT depth
     gt_depth = curr_data['depth'][0, :, :]
+    print(gt_depth.max())
     render_depth = depth_sil[0, :, :]
     depth_error = torch.abs(gt_depth - render_depth) * (gt_depth > 0)
     non_presence_depth_mask = (render_depth > gt_depth) * (depth_error > 20*depth_error.mean())
@@ -996,7 +997,8 @@ def rgbd_slam(config: dict):
                                                                         use_distributed_biases=config['deforms']['use_distributed_biases'],
                                                                         total_timescale=config['deforms']['total_timescale'],
                                                                         use_deforms=config['deforms']['use_deformations'],
-                                                                        deform_type=config['deforms']['deform_type'])    
+                                                                        deform_type=config['deforms']['deform_type'],
+                                                                        use_grn = config['GRN']['use_grn'])    
 
 
     else:
@@ -1016,6 +1018,16 @@ def rgbd_slam(config: dict):
             output = model(color_input)
             # t_pred = torch.median(output)
             # s_pred = torch.mean(torch.abs(output-t_pred))
+            # output_norm = (output-output.min())/(output.max()-output.min())
+            # pred_disp = (output_norm)*s_gt + t_gt +1 # TODO fix this scaling offset
+            # # plt.imshow(output.squeeze().cpu().detach())
+            # # plt.title('predicted depth')
+            # # plt.colorbar()
+            # # plt.show()
+            # print(pred_disp.min())
+            # depth = 1/pred_disp # Convert disp to depth
+            # depth = depth.permute(1,2,0) # CxWxH --> WxHxC to align with rest of the pipeline    
+            # print(depth.min())
             output_norm = (output-output.min())/(output.max()-output.min())
             pred_disp = (output_norm)*s_gt + t_gt +1 # TODO fix this scaling offse0t
             # plt.imshow(output.squeeze().cpu().detach())
@@ -1602,7 +1614,7 @@ def rgbd_slam(config: dict):
     
     # Save Parameters
     save_params(params, output_dir)
-    save_means3D(params['means3D'], output_dir)
+    # save_means3D(params['means3D'], output_dir)
 
         # Evaluate Final Parameters
     dataset = [dataset, eval_dataset, 'C3VD'] if dataset_config["train_or_test"] == 'train' else dataset
