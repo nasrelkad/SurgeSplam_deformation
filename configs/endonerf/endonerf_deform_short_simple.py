@@ -9,7 +9,7 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "cutting_deform_short_simple_9"
+    scene_name = "cutting_deform_short_simple_11"
 
 map_every = 1
 keyframe_every = 8
@@ -74,7 +74,7 @@ config = dict(
         ),
     ),
     mapping=dict(
-        perform_mapping = False,
+        perform_mapping = True,
         num_iters=mapping_iters,
         add_new_gaussians=True,
         sil_thres=0.01, # For Addition of new Gaussians
