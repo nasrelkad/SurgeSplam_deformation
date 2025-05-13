@@ -9,13 +9,13 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "cutting_deform_short_simple"
+    scene_name = "cutting_deform_simple"
 
 map_every = 1
 keyframe_every = 8
 # mapping_window_size = 24
-tracking_iters = 50
-mapping_iters = 1
+tracking_iters = 100
+mapping_iters = 25
 
 group_name = f"EndoNerf {scene_name}"
 run_name = scene_name
@@ -39,7 +39,7 @@ config = dict(
     save_checkpoints=False, # Save Checkpoints
     checkpoint_interval=int(1e10), # Checkpoint Interval
     data=dict(
-        basedir=f"./data/endonerf_cutting_short",
+        basedir=f"./data/endonerf_cutting",
         gradslam_data_cfg="./configs/data/endonerf.yaml",
         sequence=scene_name,
         desired_image_height=336,
@@ -55,26 +55,26 @@ config = dict(
         forward_prop=True, # Forward Propagate Poses
         num_iters=tracking_iters,
         use_sil_for_loss=True,
-        sil_thres=0,
+        sil_thres=0.1,
         use_l1=True,
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
             im=2.0,
-            depth=1,
+            depth=0,
             deform = 0
         ),
         lrs=dict(
-            means3D=0.005,
+            means3D=0.05,
             rgb_colors=0.0,
-            unnorm_rotations=0.005,
+            unnorm_rotations=0.05,
             logit_opacities=0.0,
-            log_scales=0.005,
+            log_scales=0.05,
             cam_unnorm_rots=0.00002,
             cam_trans=0.00005,
         ),
     ),
     mapping=dict(
-        perform_mapping = False,
+        perform_mapping = True,
         num_iters=mapping_iters,
         add_new_gaussians=True,
         sil_thres=0.01, # For Addition of new Gaussians
