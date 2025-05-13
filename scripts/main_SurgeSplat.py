@@ -338,18 +338,27 @@ def initialize_simple_deformations(params, num_frames):
 
     return params
 
-def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification=True,use_deforms = True,deform_type = 'gaussian',nr_basis = 10,use_distributed_biases = False,total_timescale = None,cam = None):
+def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification=True,use_deforms = True,deform_type = 'gaussian',nr_basis = 10,use_distributed_biases = False,total_timescale = None,cam = None,random_initialization = False,init_scale = 0.1):
     num_pts = init_pt_cld.shape[0]
     means3D = init_pt_cld[:, :3] # [num_gaussians, 3]
     unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1)) # [num_gaussians, 3]
     logit_opacities = torch.zeros((num_pts, 1), dtype=torch.float, device="cuda")
-    params = {
-        'means3D': means3D,
-        'rgb_colors': init_pt_cld[:, 3:6],
-        'unnorm_rotations': torch.tensor(unnorm_rots,dtype=torch.float).cuda(),
-        'logit_opacities': logit_opacities,
-        'log_scales': torch.tile(torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 1 if use_simplification else 3)),
-    }
+    if not random_initialization:
+        params = {
+            'means3D': means3D,
+            'rgb_colors': init_pt_cld[:, 3:6],
+            'unnorm_rotations': torch.tensor(unnorm_rots,dtype=torch.float).cuda(),
+            'logit_opacities': logit_opacities,
+            'log_scales': torch.tile(torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 1 if use_simplification else 3)),
+        }
+    else:
+        params = {
+            'means3D': means3D,
+            'rgb_colors': init_pt_cld[:, 3:6],
+            'unnorm_rotations': torch.zeros_like(torch.tensor(unnorm_rots),dtype=torch.float).cuda(),
+            'logit_opacities': logit_opacities,
+            'log_scales': torch.ones_like(torch.tensor(means3D),dtype=torch.float).cuda()*init_scale,
+        }
 
     
 
@@ -444,7 +453,8 @@ def grn_initialization(model,params,init_pt_cld,mean3_sq_dist,color,depth,mask =
     return params
 
 def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_radius_depth_ratio, mean_sq_dist_method, densify_dataset=None, use_simplification=True,use_gt_depth = True,
-                              use_deforms=True,deform_type='gaussian',nr_basis = 10,use_distributed_biases = False,total_timescale=None,use_grn=False,grn_model=None):
+                              use_deforms=True,deform_type='gaussian',nr_basis = 10,use_distributed_biases = False,total_timescale=None,use_grn=False,grn_model=None,
+                              random_initialization=False,init_scale=0.1):
     # Get RGB-D Data & Camera Parameters
     # color, depth, intrinsics, pose = dataset[0]
 
@@ -481,7 +491,7 @@ def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_rad
     # Initialize Parameters
 
   
-    params, variables = initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification,use_deforms=use_deforms,deform_type=deform_type,nr_basis = nr_basis,use_distributed_biases=use_distributed_biases,total_timescale=total_timescale,cam = cam)
+    params, variables = initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification,use_deforms=use_deforms,deform_type=deform_type,nr_basis = nr_basis,use_distributed_biases=use_distributed_biases,total_timescale=total_timescale,cam = cam,random_initialization=random_initialization,init_scale=init_scale)
 
     
     
@@ -611,7 +621,7 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
         # rendered_depth_aligned = depth
         # predicted_depth_aligned = curr_data['depth']
     
-    if False:
+    if True:
         fig,ax = plt.subplots(2,4)
         ax[0,0].imshow(im.permute(1,2,0).cpu().detach())
         ax[0,0].set_title('Rendered im')
@@ -1061,7 +1071,9 @@ def rgbd_slam(config: dict):
                                                                             use_grn=config['GRN']['use_grn'],
                                                                             grn_model=grn_model,
                                                                             use_deforms=config['deforms']['use_deformations'],
-                                                                            deform_type=config['deforms']['deform_type'])        
+                                                                            deform_type=config['deforms']['deform_type'],
+                                                                            random_initialization=config['GRN']['random_initialization'],
+                                                                            init_scale=config['GRN']['init_scale'],)        
         
     
     # local_means,local_rots,local_scales = deform_gaussians(params,0,False,5,'simple')
@@ -1565,12 +1577,13 @@ def rgbd_slam(config: dict):
                     # Add to keyframe list
                     keyframe_list.append(curr_keyframe)
                     keyframe_time_indices.append(time_idx)
-                    
+
         if time_idx < num_frames-1:
+            with torch.no_grad():
             # Copy current (deformed) parameters to next time step
-            params['means3D'][..., time_idx+1] = params['means3D'][..., time_idx]
-            params['unnorm_rotations'][..., time_idx+1] = params['unnorm_rotations'][..., time_idx]
-            params['log_scales'][..., time_idx+1] = params['log_scales'][..., time_idx]
+                params['means3D'][..., time_idx+1] = params['means3D'][..., time_idx]
+                params['unnorm_rotations'][..., time_idx+1] = params['unnorm_rotations'][..., time_idx]
+                params['log_scales'][..., time_idx+1] = params['log_scales'][..., time_idx]
         # Checkpoint every iteration
         if time_idx % config["checkpoint_interval"] == 0 and config['save_checkpoints']:
             ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
