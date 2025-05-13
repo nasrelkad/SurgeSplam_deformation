@@ -9,7 +9,7 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "cutting_deform_short_simple_11"
+    scene_name = "cutting_deform_short_simple_13"
 
 map_every = 1
 keyframe_every = 8
@@ -150,8 +150,8 @@ config = dict(
         total_timescale = 50
     ),
     GRN = dict(
-        use_grn = False,
-        random_initialization = True,
+        use_grn = True,
+        random_initialization = False,
         init_scale = -2.5,
         model_path = 'GRN/models/GRN_v1.pth',
         random_initialization_lrs = dict(

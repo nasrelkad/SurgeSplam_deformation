@@ -436,7 +436,7 @@ def grn_initialization(model,params,init_pt_cld,mean3_sq_dist,color,depth,mask =
     # We need to apply the GRN inialization to each timestep
     if len(params['unnorm_rotations'].shape) ==3:
         params['unnorm_rotations'] = (rots[mask])[...,None].tile(1,1,params['unnorm_rotations'].shape[2])
-        params['log_scales'] = (scales_norm[mask]*mean3_sq_dist[:,None].tile(1,3)*0.1)[...,None].tile(1,1,params['log_scales'].shape[2])
+        params['log_scales'] = (scales_norm[mask]*mean3_sq_dist[:,None].tile(1,3))[...,None].tile(1,1,params['log_scales'].shape[2])
     else:
         params['unnorm_rotations'] = rots[mask]
         params['log_scales'] = scales_norm[mask]*mean3_sq_dist[:,None].tile(1,3)
@@ -729,7 +729,7 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis
     if not random_initialization:
         params = {
             'means3D': means3D,
-            'rgb_colors': init_pt_cld[:, 3:6],
+            'rgb_colors': new_pt_cld[:, 3:6],
             'unnorm_rotations': torch.tensor(unnorm_rots,dtype=torch.float).cuda(),
             'logit_opacities': logit_opacities,
             'log_scales': torch.tile(torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 1 if use_simplification else 3)),
@@ -737,7 +737,7 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis
     else:
         params = {
             'means3D': means3D,
-            'rgb_colors': init_pt_cld[:, 3:6],
+            'rgb_colors': new_pt_cld[:, 3:6],
             'unnorm_rotations': torch.zeros_like(torch.tensor(unnorm_rots),dtype=torch.float).cuda(),
             'logit_opacities': logit_opacities,
             'log_scales': torch.ones_like(torch.tensor(means3D),dtype=torch.float).cuda()*init_scale,
@@ -804,7 +804,7 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
         non_presence_mask = non_presence_mask & valid_depth_mask.reshape(-1)
         valid_color_mask = energy_mask(curr_data['im']).squeeze()
         non_presence_mask = non_presence_mask & valid_color_mask.reshape(-1)        
-        new_pt_cld, mean3_sq_dist = get_pointcloud(curr_data['im'], curr_data['depth'], curr_data['intrinsics'], 
+        new_pt_cld, mean3_sq_dist = get_pointcloud(curr_data['im'], curr_data['depth']*10, curr_data['intrinsics'], 
                                     curr_w2c, mask=non_presence_mask, compute_mean_sq_dist=True,
                                     mean_sq_dist_method=mean_sq_dist_method)
         new_params = initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis = nr_basis,use_distributed_biases=use_distributed_biases,total_timescale = total_timescale,use_deform = use_deform,deform_type=deformation_type,
@@ -846,11 +846,19 @@ def initialize_camera_pose(params, curr_time_idx, forward_prop):
     
     return params
 
-def optimize_initialiation(params,curr_data,num_iters_initialization,variables,iter_time_idx,config):
+def optimize_initialization(params,curr_data,num_iters_initialization,variables,iter_time_idx,config):
     optimizer = initialize_optimizer(params,config['GRN']['random_initialization_lrs'])
     iter = 0
     save_idx = 0
+    print(f"opacity is leaf: {params['logit_opacities'].is_leaf}")
+    print(f"rgb is leaf: {params['rgb_colors'].is_leaf}")
+    print(f"means is leaf: {params['means3D'].is_leaf}")
+    print(f"rotations is leaf: {params['unnorm_rotations'].is_leaf}")
+    print(f"scales is leaf: {params['log_scales'].is_leaf}")
+
+
     progress_bar = tqdm(range(num_iters_initialization), desc=f"Initial optimization")
+
     while True:
         loss, variables, losses = get_loss(params, curr_data, variables, iter_time_idx, config['tracking']['loss_weights'],
                     config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
@@ -1275,7 +1283,7 @@ def rgbd_slam(config: dict):
         num_iters_initialization = 50
         if time_idx == 0:
             if config['GRN']['random_initialization']:        
-                params = optimize_initialiation(params,curr_data,num_iters_initialization,variables,iter_time_idx,config)
+                params = optimize_initialization(params,curr_data,num_iters_initialization,variables,iter_time_idx,config)
         # Tracking
         tracking_start_time = time.time()
         save_idx = 0
@@ -1483,7 +1491,7 @@ def rgbd_slam(config: dict):
                                                         random_initialization=config['GRN']['random_initialization'],
                                                         init_scale=config['GRN']['init_scale'],)
                     if config['GRN']['random_initialization']:
-                        params = optimize_initialiation(params,curr_data,num_iters_initialization,variables,iter_time_idx,config)
+                        params = optimize_initialization(params,curr_data,num_iters_initialization,variables,iter_time_idx,config)
                     post_num_pts = params['means3D'].shape[0]
                     added_new_gaussians.append(post_num_pts)
                 if not config['distance_keyframe_selection']:
