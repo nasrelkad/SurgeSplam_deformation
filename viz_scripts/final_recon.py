@@ -354,8 +354,13 @@ def visualize(scene_path, cfg,experiment):
 
         if not vis.poll_events():
             break
+            # time_idx = 0
         vis.update_renderer()
-        time_idx+=1
+        if time_idx >= len(all_w2cs) - 1:
+            time_idx = 0
+        else:
+            time_idx+=1
+        
     # Cleanup
     vis.destroy_window()
     del view_control

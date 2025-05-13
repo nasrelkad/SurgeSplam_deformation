@@ -1176,9 +1176,12 @@ def rgbd_slam(config: dict):
         # Optimize only current time step for tracking
         iter_time_idx = time_idx
         # Initialize Mapping Data for selected frame
-        # plt.imshow(depth.squeeze().cpu().detach())
-        # plt.colorbar()
+        plt.imshow(depth.squeeze().cpu().detach())
+        plt.title('input depth')
+        plt.colorbar()
         # plt.show()
+        plt.savefig(f'./scripts/plots/input_depth/{time_idx}.png')
+        plt.close()
         curr_data = {'cam': cam, 'im': color, 'depth': depth, 'id': iter_time_idx, 'intrinsics': intrinsics, 
                      'w2c': first_frame_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
 
@@ -1353,9 +1356,9 @@ def rgbd_slam(config: dict):
             # # ax[0,0].set_title('Rendered im')
             # ax[0,1].imshow(curr_data['im'].permute(1,2,0).cpu().detach())
             # ax[0,1].set_title('Input img')
-            plt.imshow(rendered_depth[0,:,:].squeeze().cpu().detach())
-            plt.colorbar()
-            plt.show()
+            # plt.imshow(rendered_depth[0,:,:].squeeze().cpu().detach())
+            # plt.colorbar()
+            # plt.show()
 
             # ax[1,0].set_title('Rendered depth')
             # ax0 = ax[1,1].imshow(curr_data['depth'].squeeze().cpu().detach())
@@ -1370,9 +1373,9 @@ def rgbd_slam(config: dict):
             # plt.show()
             _,_,t_render, s_render, t_invar, s_invar = align_shift_and_scale(rendered_depth[0,:,:].unsqueeze(0),invariant_depth,mask.unsqueeze(0))
             curr_data['depth'] = ((invariant_depth-t_invar)/s_invar)*s_render + t_render
-            plt.imshow(curr_data['depth'].squeeze().cpu().detach())
-            plt.colorbar()
-            plt.show()
+            # plt.imshow(curr_data['depth'].squeeze().cpu().detach())
+            # plt.colorbar()
+            # plt.show()
     
         if config['mapping']['perform_mapping']:
             # Densification & KeyFrame-based Mapping
