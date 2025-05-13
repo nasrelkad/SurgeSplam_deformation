@@ -611,7 +611,7 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
         # rendered_depth_aligned = depth
         # predicted_depth_aligned = curr_data['depth']
     
-    if True:
+    if False:
         fig,ax = plt.subplots(2,4)
         ax[0,0].imshow(im.permute(1,2,0).cpu().detach())
         ax[0,0].set_title('Rendered im')
@@ -1018,10 +1018,10 @@ def rgbd_slam(config: dict):
             # s_pred = torch.mean(torch.abs(output-t_pred))
             output_norm = (output-output.min())/(output.max()-output.min())
             pred_disp = (output_norm)*s_gt + t_gt +1 # TODO fix this scaling offse0t
-            plt.imshow(output.squeeze().cpu().detach())
-            plt.title('predicted depth')
-            plt.colorbar()
-            plt.show()
+            # plt.imshow(output.squeeze().cpu().detach())
+            # plt.title('predicted depth')
+            # plt.colorbar()
+            # plt.show()
             # print(pred_disp.min())
             # depth = 1/pred_disp # Convert disp to depth
             # depth = depth.permute(1,2,0)*10 # CxWxH --> WxHxC to align with rest of the pipeline    
@@ -1029,10 +1029,10 @@ def rgbd_slam(config: dict):
             depth = 1/(output_norm+1)
             depth = depth.permute(1,2,0)*10
 
-        plt.imshow(depth.squeeze().cpu().detach())
-        plt.title('predicted depth')
-        plt.colorbar()
-        plt.show()
+        # plt.imshow(depth.squeeze().cpu().detach())
+        # plt.title('predicted depth')
+        # plt.colorbar()
+        # plt.show()
         color = color.permute(2, 0, 1) / 255
         depth = depth.permute(2, 0, 1)
 
@@ -1233,9 +1233,9 @@ def rgbd_slam(config: dict):
                                                    config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
                                                    plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
-                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=save_idx,gaussian_deformations=config['deforms']['use_deformations'],
+                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=None,gaussian_deformations=config['deforms']['use_deformations'],
                                                    use_grn = config['GRN']['use_grn'],deformation_type = config['deforms']['deform_type'])
-                print(loss)
+                # print(loss)
                 save_idx = save_idx+1
 
                 # Backprop
@@ -1349,15 +1349,18 @@ def rgbd_slam(config: dict):
             mask = rendered_depth[1,:,:] > config['tracking']['sil_thres']
 
             # fig,ax = plt.subplots(2,4)
-            # ax[0,0].imshow(im.permute(1,2,0).cpu().detach())
-            # ax[0,0].set_title('Rendered im')
+            # # ax[0,0].imshow(im.permute(1,2,0).cpu().detach())
+            # # ax[0,0].set_title('Rendered im')
             # ax[0,1].imshow(curr_data['im'].permute(1,2,0).cpu().detach())
             # ax[0,1].set_title('Input img')
-            # plt.imshow(rendered_depth[0,:,:].squeeze().cpu().detach())
-            # plt.show()
+            plt.imshow(rendered_depth[0,:,:].squeeze().cpu().detach())
+            plt.colorbar()
+            plt.show()
+
             # ax[1,0].set_title('Rendered depth')
-            # ax[1,1].imshow(curr_data['depth'].squeeze().cpu().detach())
+            # ax0 = ax[1,1].imshow(curr_data['depth'].squeeze().cpu().detach())
             # ax[1,1].set_title('Input depth')
+            # plt.colorbar(ax0,ax=ax[1,1])
             # # ax[0,2].imshow(nan_mask.squeeze().cpu().detach())
             # # ax[0,2].set_title('Nan mask')
             # # ax[0,3].imshow(bg_mask.squeeze().cpu().detach())
@@ -1367,7 +1370,9 @@ def rgbd_slam(config: dict):
             # plt.show()
             _,_,t_render, s_render, t_invar, s_invar = align_shift_and_scale(rendered_depth[0,:,:].unsqueeze(0),invariant_depth,mask.unsqueeze(0))
             curr_data['depth'] = ((invariant_depth-t_invar)/s_invar)*s_render + t_render
-
+            plt.imshow(curr_data['depth'].squeeze().cpu().detach())
+            plt.colorbar()
+            plt.show()
     
         if config['mapping']['perform_mapping']:
             # Densification & KeyFrame-based Mapping
