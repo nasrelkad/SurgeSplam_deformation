@@ -151,6 +151,7 @@ config = dict(
     ),
     GRN = dict(
         use_grn = True,
+        random_initialization = False,
         model_path = 'GRN/models/GRN_v1.pth'
         # grn_hidden_dim = 128,
         # grn_out_dim = 3,
