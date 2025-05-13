@@ -621,7 +621,7 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
         # rendered_depth_aligned = depth
         # predicted_depth_aligned = curr_data['depth']
     
-    if True:
+    if False:
         fig,ax = plt.subplots(2,4)
         ax[0,0].imshow(im.permute(1,2,0).cpu().detach())
         ax[0,0].set_title('Rendered im')
@@ -772,7 +772,7 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
     non_presence_sil_mask = (silhouette < sil_thres)
     # Check for new foreground objects by using GT depth
     gt_depth = curr_data['depth'][0, :, :]
-    print(gt_depth.max())
+    
     render_depth = depth_sil[0, :, :]
     depth_error = torch.abs(gt_depth - render_depth) * (gt_depth > 0)
     non_presence_depth_mask = (render_depth > gt_depth) * (depth_error > 20*depth_error.mean())
@@ -1164,6 +1164,11 @@ def rgbd_slam(config: dict):
     
     # timer.lap("all the config")
     added_new_gaussians = []
+
+
+
+
+
     # Iterate over Scan
     for time_idx in tqdm(range(checkpoint_time_idx, num_frames)): 
         
@@ -1200,12 +1205,12 @@ def rgbd_slam(config: dict):
         # Optimize only current time step for tracking
         iter_time_idx = time_idx
         # Initialize Mapping Data for selected frame
-        plt.imshow(depth.squeeze().cpu().detach())
-        plt.title('input depth')
-        plt.colorbar()
-        # plt.show()
-        plt.savefig(f'./scripts/plots/input_depth/{time_idx}.png')
-        plt.close()
+        # plt.imshow(depth.squeeze().cpu().detach())
+        # plt.title('input depth')
+        # plt.colorbar()
+        # # plt.show()
+        # plt.savefig(f'./scripts/plots/input_depth/{time_idx}.png')
+        # plt.close()
         curr_data = {'cam': cam, 'im': color, 'depth': depth, 'id': iter_time_idx, 'intrinsics': intrinsics, 
                      'w2c': first_frame_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
 
@@ -1228,7 +1233,36 @@ def rgbd_slam(config: dict):
             params = initialize_camera_pose(params, time_idx, forward_prop=config['tracking']['forward_prop'])
 
         # timer.lap("initialized data", 1)
+        # If gaussians are randomly initialized, we need to optimize them enough to be able to perform tracking
+        num_iters_initialization = 50
+        if time_idx == 0:
+            if config['GRN']['random_initialization']:
+                optimizer = initialize_optimizer(params,config['GRN']['random_initialization_lrs'])
 
+                iter = 0
+                save_idx = 0
+                progress_bar = tqdm(range(num_iters_initialization), desc=f"Initial optimization")
+                while True:
+                    loss, variables, losses = get_loss(params, curr_data, variables, iter_time_idx, config['tracking']['loss_weights'],
+                                config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
+                                config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True,
+                                plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
+                                tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=save_idx,gaussian_deformations=config['deforms']['use_deformations'],
+                                use_grn = config['GRN']['use_grn'],deformation_type = config['deforms']['deform_type'])
+                    print(loss)
+                    loss.backward()
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+                    save_idx +=1
+
+                    if iter == num_iters_initialization:
+                        break
+                    else:   
+                        # progress_bar = tqdm(range(num_iters_initialization), desc=f"Tracking Time Step: {time_idx}")
+                        progress_bar.update(1)
+                        iter+=1
+            progress_bar.close()
+            
         # Tracking
         tracking_start_time = time.time()
         save_idx = 0
@@ -1260,7 +1294,7 @@ def rgbd_slam(config: dict):
                                                    config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
                                                    plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
-                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=None,gaussian_deformations=config['deforms']['use_deformations'],
+                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=save_idx,gaussian_deformations=config['deforms']['use_deformations'],
                                                    use_grn = config['GRN']['use_grn'],deformation_type = config['deforms']['deform_type'])
                 # print(loss)
                 save_idx = save_idx+1
