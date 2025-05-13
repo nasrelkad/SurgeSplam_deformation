@@ -9,7 +9,7 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "cutting_deform_short_simple"
+    scene_name = "cutting_deform_short_simple_8"
 
 map_every = 1
 keyframe_every = 8
@@ -55,26 +55,26 @@ config = dict(
         forward_prop=True, # Forward Propagate Poses
         num_iters=tracking_iters,
         use_sil_for_loss=True,
-        sil_thres=0,
+        sil_thres=0.1,
         use_l1=True,
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
             im=2.0,
-            depth=1,
+            depth=0.2,
             deform = 0
         ),
         lrs=dict(
-            means3D=0.005,
+            means3D=0.01,
             rgb_colors=0.0,
-            unnorm_rotations=0.005,
+            unnorm_rotations=0.01,
             logit_opacities=0.0,
-            log_scales=0.005,
+            log_scales=0.01,
             cam_unnorm_rots=0.00002,
             cam_trans=0.00005,
         ),
     ),
     mapping=dict(
-        perform_mapping = False,
+        perform_mapping = True,
         num_iters=mapping_iters,
         add_new_gaussians=True,
         sil_thres=0.01, # For Addition of new Gaussians
@@ -82,7 +82,7 @@ config = dict(
         use_sil_for_loss=False,
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
-            im=2.0,
+            im=1.0,
             depth=1.0,
             deform = 0.5
         ),
