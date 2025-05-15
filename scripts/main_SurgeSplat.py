@@ -1043,7 +1043,9 @@ def rgbd_slam(config: dict):
     )
     num_frames = dataset_config["num_frames"]
     if num_frames == -1:
-        num_frames = len(dataset)
+        num_frames = dataset.end
+        # print(dataset.end)
+
 
     if dataset_config["train_or_test"] == 'train': # kind of ill implementation here. train_or_test should be 'all' or 'train'. If 'test', you view test set as full dataset.
         eval_dataset = get_dataset(
@@ -1255,6 +1257,18 @@ def rgbd_slam(config: dict):
     # Iterate over Scan
     for time_idx in tqdm(range(checkpoint_time_idx, num_frames)): 
         
+        # If we are in one of the eval frames, copy the current parameters to the next timestep and continue with the next timestep (no optimization takes place in these frames)
+        if time_idx in dataset.eval_idx:
+            with torch.no_grad():
+            # Copy current (deformed) parameters to next time step
+                params['means3D'][..., time_idx+1] = params['means3D'][..., time_idx]
+                params['unnorm_rotations'][..., time_idx+1] = params['unnorm_rotations'][..., time_idx]
+                params['log_scales'][..., time_idx+1] = params['log_scales'][..., time_idx]
+                params['logit_opacities'][..., time_idx+1] = params['logit_opacities'][..., time_idx]
+                params['rgb_colors'][..., time_idx+1] = params['rgb_colors'][..., time_idx]
+                params['cam_unnorm_rots'][...,time_idx+1] = params['cam_unnorm_rots'][...,time_idx]
+                params['cam_trans'][...,time_idx+1] = params['cam_trans'][...,time_idx]
+            continue
         # timer.lap("iterating over frame "+str(time_idx), 0)
         
         print() # always show global iteration
@@ -1686,6 +1700,8 @@ def rgbd_slam(config: dict):
                 params['log_scales'][..., time_idx+1] = params['log_scales'][..., time_idx]
                 params['logit_opacities'][..., time_idx+1] = params['logit_opacities'][..., time_idx]
                 params['rgb_colors'][..., time_idx+1] = params['rgb_colors'][..., time_idx]
+                params['cam_unnorm_rots'][...,time_idx+1] = params['cam_unnorm_rots'][...,time_idx]
+                params['cam_trans'][...,time_idx+1] = params['cam_trans'][...,time_idx]
         # Checkpoint every iteration
         if time_idx % config["checkpoint_interval"] == 0 and config['save_checkpoints']:
             ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
@@ -1742,7 +1758,7 @@ def rgbd_slam(config: dict):
     dataset = [dataset, eval_dataset, 'C3VD'] if dataset_config["train_or_test"] == 'train' else dataset
     with torch.no_grad():
         eval_save(dataset, params, eval_dir, sil_thres=config['mapping']['sil_thres'],
-                mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'])
+                mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],use_grn = config['GRN']['use_grn'])
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
