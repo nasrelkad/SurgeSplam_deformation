@@ -9,7 +9,7 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "pulling_deform_simple_1"
+    scene_name = "pulling_deform_simple_3"
 
 map_every = 1
 keyframe_every = 8
@@ -48,7 +48,7 @@ config = dict(
         end=-1,
         stride=1,
         num_frames=-1,
-        train_or_test="train",
+        train_or_test="all",
     ),
     tracking=dict(
         use_gt_poses=False, # Use GT Poses for Tracking
@@ -64,12 +64,12 @@ config = dict(
             deform = 0
         ),
         lrs=dict(
-            means3D=0.001,
+            means3D=0.02,
             rgb_colors=0.0,
-            unnorm_rotations=0.0001,
+            unnorm_rotations=0.001,
             logit_opacities=0.0,
             log_scales=0.0000,
-            cam_unnorm_rots=0.00002,
+            cam_unnorm_rots=0.0002,
             cam_trans=0.00005,
         ),
     ),
@@ -77,7 +77,7 @@ config = dict(
         perform_mapping = True,
         num_iters=mapping_iters,
         add_new_gaussians=True,
-        sil_thres=0.01, # For Addition of new Gaussians
+        sil_thres=0.1, # For Addition of new Gaussians
         use_l1=True,
         use_sil_for_loss=True,
         ignore_outlier_depth_loss=False,
