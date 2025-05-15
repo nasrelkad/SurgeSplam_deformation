@@ -17,7 +17,7 @@ keyframe_every = 8
 tracking_iters = 25
 mapping_iters = 25
 
-group_name = "SCARED"
+group_name = "SCARED_1"
 run_name = scene_name
 
 config = dict(
@@ -48,65 +48,61 @@ config = dict(
         end=-1,
         stride=1,
         num_frames=-1,
-        train_or_test="train",
+        train_or_test="all",
     ),
     tracking=dict(
         use_gt_poses=False, # Use GT Poses for Tracking
         forward_prop=True, # Forward Propagate Poses
         num_iters=tracking_iters,
         use_sil_for_loss=True,
-        sil_thres=0.99,
+        sil_thres=0.7,
         use_l1=True,
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
-            im=0.5,
-            depth=1.0,
+            im=2.0,
+            depth=0.5,
+            deform = 0
         ),
         lrs=dict(
-            means3D=0.0,
+            means3D=0.02,
             rgb_colors=0.0,
-            unnorm_rotations=0.0,
+            unnorm_rotations=0.001,
             logit_opacities=0.0,
-            log_scales=0.0,
-            cam_unnorm_rots=0.002,
-            cam_trans=0.005,
-            deform_weights = 0.001,
-            deform_stds = 0.001,
-            deform_biases = 0.001,
+            log_scales=0.0000,
+            cam_unnorm_rots=0.0002,
+            cam_trans=0.00005,
         ),
     ),
     mapping=dict(
         perform_mapping = True,
         num_iters=mapping_iters,
         add_new_gaussians=True,
-        sil_thres=0.5, # For Addition of new Gaussians
+        sil_thres=0.1, # For Addition of new Gaussians
         use_l1=True,
-        use_sil_for_loss=False,
+        use_sil_for_loss=True,
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
             im=1.0,
             depth=1.0,
+            deform = 0.5
         ),
         lrs=dict(
-            means3D=0.0001,
-            rgb_colors=0.0025,
-            unnorm_rotations=0.001,
-            logit_opacities=0.05,
-            log_scales=0.001,
+            means3D=0.0000,
+            rgb_colors=0.000,
+            unnorm_rotations=0.0000,
+            logit_opacities=0.00,
+            log_scales=0.0000,
             cam_unnorm_rots=0.000,
             cam_trans=0.000,
-            deform_weights = 0.00,
-            deform_stds = 0.00,
-            deform_biases = 0.00,
         ),
-        prune_gaussians=True, # Prune Gaussians during Mapping
+        prune_gaussians=False, # Prune Gaussians during Mapping
         pruning_dict=dict( # Needs to be updated based on the number of mapping iterations
             start_after=0,
             remove_big_after=0,
             stop_after=20,
             prune_every=20,
-            removal_opacity_threshold=0.005,
-            final_removal_opacity_threshold=0.005,
+            removal_opacity_threshold=0.05,
+            final_removal_opacity_threshold=0.05,
             reset_opacities=False,
             reset_opacities_every=int(1e10), # Doesn't consider iter 0
         ),
@@ -137,7 +133,7 @@ config = dict(
     ),
     depth = dict(
         use_gt_depth = False,
-        model_path = '/media/thesis_ssd/code/EndoGSLAM/EndoGSLAM/models/SurgeDepth/SurgeDepthStudent_V5.pth',
+        model_path = 'models/SurgeDepth/SurgeDepthStudent_V5.pth',
         model_size = 'vitb',
         normalization_means = [0.46888983, 0.29536288, 0.28712815], 
         normalization_stds = [0.24689102 ,0.21034359, 0.21188641],
@@ -147,20 +143,33 @@ config = dict(
         scale_gt =   0.01995653659105301    ,
     ), 
     deforms = dict(
-        use_deformations = False,
-        nr_basis = 10,
+        use_deformations = True,
+        deform_type = 'simple',
+        nr_basis = 50,
         use_distributed_biases = True,
-        total_timescale = 100
+        total_timescale = 50
     ),
     GRN = dict(
         use_grn = True,
-        model_path = 'GRN/models/GRN_v1.pth'
-
-        # grn_layers = 2,
+        random_initialization = False,
+        init_scale = -2.5,
+        num_iters_initialization = 50,
+        num_iters_initialization_added_gaussians = 10,
+        sil_thres = 0.01,
+        model_path = 'GRN/models/GRN_v1.pth',
+        random_initialization_lrs = dict(
+            means3D=0.0005,
+            rgb_colors=0.0005,
+            unnorm_rotations=0.0005,
+            logit_opacities=0.0005,
+            log_scales=0.0005,
+            cam_unnorm_rots=0.000,
+            cam_trans=0.000,
+        ),
         # grn_hidden_dim = 128,
         # grn_out_dim = 3,
         # grn_input_dim = 3,
         # grn_num_heads = 4,
         # grn_use_norm = True,
-    )        
+    )         
 )
