@@ -155,6 +155,7 @@ config = dict(
         init_scale = -2.5,
         num_iters_initialization = 50,
         num_iters_initialization_added_gaussians = 10,
+        sil_thres = 0.01,
         model_path = 'GRN/models/GRN_v1.pth',
         random_initialization_lrs = dict(
             means3D=0.0005,
