@@ -219,7 +219,7 @@ def load_scene_data(scene_path, first_frame_w2c, intrinsics, time_idx,deformatio
         rendervar['scales'] = torch.exp(torch.tile(params['log_scales'], (1, 3)))
         rendervar['colors_precomp'] = local_colors
     else:
-        rendervar['scales'] = torch.exp(local_scales)
+        rendervar['scales'] = local_scales
         rendervar['colors_precomp'] = local_colors
     depth_rendervar = {
         'means3D': transformed_pts,
