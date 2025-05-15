@@ -898,7 +898,7 @@ def optimize_initialization(params,curr_data,num_iters_initialization,variables,
 
     while True:
         loss, variables, losses = get_loss(params, curr_data, variables, iter_time_idx, config['tracking']['loss_weights'],
-                    config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
+                    config['tracking']['use_sil_for_loss'], config['GRN']['sil_thres'],
                     config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True,
                     visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
                     tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=None,gaussian_deformations=config['deforms']['use_deformations'],
