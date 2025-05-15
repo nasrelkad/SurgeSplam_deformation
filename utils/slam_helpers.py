@@ -116,24 +116,24 @@ def matrix_to_quaternion(matrix: torch.Tensor) -> torch.Tensor:
 #     return rendervar
 
 
-def transformed_params2rendervar(params, transformed_pts,local_rots,local_scales):
+def transformed_params2rendervar(params, transformed_pts,local_rots,local_scales,local_opacities,local_colors):
     rendervar = {
         'means3D': transformed_pts,
         'rotations': F.normalize(local_rots),
-        'opacities': torch.sigmoid(params['logit_opacities']),
+        'opacities': torch.sigmoid(local_opacities),
         # 'scales': torch.exp(torch.tile(params['log_scales'], (1, 3))),
         'means2D': torch.zeros_like(transformed_pts, requires_grad=True, device="cuda") + 0
     }
     if local_scales.shape[1] == 1:
-        rendervar['colors_precomp'] = params['rgb_colors']
+        rendervar['colors_precomp'] = local_colors
         rendervar['scales'] = torch.exp(torch.tile(local_scales, (1, 3)))
         # print('using uniform scales')
     else:
         try: 
-            rendervar['shs'] = torch.cat((params['rgb_colors'].reshape(params['rgb_colors'].shape[0], 3, -1).transpose(1, 2), params['feature_rest'].reshape(params['rgb_colors'].shape[0], 3, -1).transpose(1, 2)), dim=1)
+            rendervar['shs'] = torch.cat((local_colors.reshape(local_colors.shape[0], 3, -1).transpose(1, 2), params['feature_rest'].reshape(local_colors.shape[0], 3, -1).transpose(1, 2)), dim=1)
             rendervar['scales'] = torch.exp(local_scales)
         except: 
-            rendervar['colors_precomp'] = params['rgb_colors']
+            rendervar['colors_precomp'] = local_colors
             rendervar['scales'] = torch.exp(local_scales)
     return rendervar
 
@@ -212,12 +212,12 @@ def get_depth_and_silhouette(pts_3D, w2c):
 #     return rendervar
 
 
-def transformed_params2depthplussilhouette(params, w2c, transformed_pts,local_rots,local_scales):
+def transformed_params2depthplussilhouette(params, w2c, transformed_pts,local_rots,local_scales,local_opacities):
     rendervar = {
         'means3D': transformed_pts,
         'colors_precomp': get_depth_and_silhouette(transformed_pts, w2c),
         'rotations': F.normalize(local_rots),
-        'opacities': torch.sigmoid(params['logit_opacities']),
+        'opacities': torch.sigmoid(local_opacities),
         # 'scales': torch.exp(torch.tile(params['log_scales'], (1, 3))),
         'means2D': torch.zeros_like(transformed_pts, requires_grad=True, device="cuda") + 0
     }
@@ -307,24 +307,24 @@ def transform_to_frame_eval(params, local_means,camrt=None, rel_w2c=None):
 
 
 
-def transformed_GRNparams2rendervar(params, transformed_pts,local_rots,local_scales):
+def transformed_GRNparams2rendervar(params, transformed_pts,local_rots,local_scales,local_opacities,local_colors):
     rendervar = {
         'means3D': transformed_pts,
         'rotations': F.normalize(local_rots),
-        'opacities': torch.sigmoid(params['logit_opacities']),
+        'opacities': torch.sigmoid(local_opacities),
         # 'scales': torch.exp(torch.tile(params['log_scales'], (1, 3))),
         'means2D': torch.zeros_like(transformed_pts, requires_grad=True, device="cuda") + 0
     }
     if params['log_scales'].shape[1] == 1:
-        rendervar['colors_precomp'] = params['rgb_colors']
+        rendervar['colors_precomp'] = local_colors
         rendervar['scales'] = torch.tile(local_scales, (1, 3))
         # print('using uniform scales')
     else:
         try: 
-            rendervar['shs'] = torch.cat((params['rgb_colors'].reshape(params['rgb_colors'].shape[0], 3, -1).transpose(1, 2), params['feature_rest'].reshape(params['rgb_colors'].shape[0], 3, -1).transpose(1, 2)), dim=1)
+            rendervar['shs'] = torch.cat((local_colors.reshape(local_colors.shape[0], 3, -1).transpose(1, 2), params['feature_rest'].reshape(local_colors.shape[0], 3, -1).transpose(1, 2)), dim=1)
             rendervar['scales'] = local_scales
         except: 
-            rendervar['colors_precomp'] = params['rgb_colors']
+            rendervar['colors_precomp'] = local_colors
             rendervar['scales'] = local_scales
     return rendervar
 
@@ -343,12 +343,12 @@ def transformed_GRNparams2rendervar(params, transformed_pts,local_rots,local_sca
 #         rendervar['scales'] = params['log_scales']
 #     return rendervar
 
-def transformed_GRNparams2depthplussilhouette(params, w2c, transformed_pts,local_rots,local_scales):
+def transformed_GRNparams2depthplussilhouette(params, w2c, transformed_pts,local_rots,local_scales,local_opacities):
     rendervar = {
         'means3D': transformed_pts,
         'colors_precomp': get_depth_and_silhouette(transformed_pts, w2c),
         'rotations': F.normalize(local_rots),
-        'opacities': torch.sigmoid(params['logit_opacities']),
+        'opacities': torch.sigmoid(local_opacities),
         # 'scales': torch.exp(torch.tile(params['log_scales'], (1, 3))),
         'means2D': torch.zeros_like(transformed_pts, requires_grad=True, device="cuda") + 0
     }
