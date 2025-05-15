@@ -9,7 +9,7 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "cutting_deform_simple_1"
+    scene_name = "cutting_deform_short_simple_20"
 
 map_every = 1
 keyframe_every = 8
@@ -39,7 +39,7 @@ config = dict(
     save_checkpoints=False, # Save Checkpoints
     checkpoint_interval=int(1e10), # Checkpoint Interval
     data=dict(
-        basedir=f"./data/endonerf_cutting",
+        basedir=f"./data/endonerf_cutting_short",
         gradslam_data_cfg="./configs/data/endonerf.yaml",
         sequence=scene_name,
         desired_image_height=336,
@@ -48,14 +48,14 @@ config = dict(
         end=-1,
         stride=1,
         num_frames=-1,
-        train_or_test="all",
+        train_or_test="train",
     ),
     tracking=dict(
         use_gt_poses=False, # Use GT Poses for Tracking
         forward_prop=True, # Forward Propagate Poses
         num_iters=tracking_iters,
         use_sil_for_loss=True,
-        sil_thres=0.7,
+        sil_thres=0.1,
         use_l1=True,
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
@@ -64,22 +64,22 @@ config = dict(
             deform = 0
         ),
         lrs=dict(
-            means3D=0.02,
+            means3D=0.01,
             rgb_colors=0.0,
-            unnorm_rotations=0.001,
+            unnorm_rotations=0.01,
             logit_opacities=0.0,
-            log_scales=0.0000,
-            cam_unnorm_rots=0.0002,
+            log_scales=0.01,
+            cam_unnorm_rots=0.00002,
             cam_trans=0.00005,
         ),
     ),
     mapping=dict(
         perform_mapping = True,
         num_iters=mapping_iters,
-        add_new_gaussians=True,
-        sil_thres=0.1, # For Addition of new Gaussians
+        add_new_gaussians=False,
+        sil_thres=0.01, # For Addition of new Gaussians
         use_l1=True,
-        use_sil_for_loss=True,
+        use_sil_for_loss=False,
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
             im=1.0,
@@ -155,14 +155,13 @@ config = dict(
         init_scale = -2.5,
         num_iters_initialization = 50,
         num_iters_initialization_added_gaussians = 10,
-        sil_thres = 0.01,
         model_path = 'GRN/models/GRN_v1.pth',
         random_initialization_lrs = dict(
-            means3D=0.0005,
-            rgb_colors=0.0005,
-            unnorm_rotations=0.0005,
-            logit_opacities=0.0005,
-            log_scales=0.0005,
+            means3D=0.005,
+            rgb_colors=0.005,
+            unnorm_rotations=0.005,
+            logit_opacities=0.005,
+            log_scales=0.005,
             cam_unnorm_rots=0.000,
             cam_trans=0.000,
         ),

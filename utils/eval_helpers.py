@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 from datasets.gradslam_datasets.geometryutils import relative_transformation
 from utils.recon_helpers import setup_camera, energy_mask
 from utils.slam_external import build_rotation,calc_psnr
-from utils.slam_helpers import transform_to_frame, transform_to_frame_eval, transformed_params2rendervar, transformed_params2depthplussilhouette
+from utils.slam_helpers import transform_to_frame, transform_to_frame_eval, transformed_params2rendervar, transformed_params2depthplussilhouette,transformed_GRNparams2rendervar,transformed_GRNparams2depthplussilhouette
 
 
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
@@ -214,30 +214,134 @@ def report_progress(params, data, i, progress_bar, iter_time_idx, sil_thres, eve
             progress_bar.update(every_i)
         
 
-def deform_gaussians(params,time,deform_grad):
+# def deform_gaussians(params,time,deform_grad):
 
-    if deform_grad:
-        weights = params['deform_weights']
-        stds = params['deform_stds']
-        biases = params['deform_biases']
-    else:
-        weights = params['deform_weights'].detach()
-        stds = params['deform_stds'].detach()
-        biases = params['deform_biases'].detach()
+#     if deform_grad:
+#         weights = params['deform_weights']
+#         stds = params['deform_stds']
+#         biases = params['deform_biases']
+#     else:
+#         weights = params['deform_weights'].detach()
+#         stds = params['deform_stds'].detach()
+#         biases = params['deform_biases'].detach()
 
-    deform = torch.sum(weights*torch.exp(-1/(2*stds**2)*(time-biases)**2),1) # Nx10 gaussians deformations
-    deform_xyz = deform[:,:3]
-    deform_rots = deform[:,3:7]
-    deform_scales = deform[:,7:10]
+#     deform = torch.sum(weights*torch.exp(-1/(2*stds**2)*(time-biases)**2),1) # Nx10 gaussians deformations
+#     deform_xyz = deform[:,:3]
+#     deform_rots = deform[:,3:7]
+#     deform_scales = deform[:,7:10]
 
-    xyz = params['means3D']+deform_xyz
-    rots = params['unnorm_rotations']+deform_rots
-    scales = params['log_scales']+deform_scales
+#     xyz = params['means3D']+deform_xyz
+#     rots = params['unnorm_rotations']+deform_rots
+#     scales = params['log_scales']+deform_scales
 
-    return xyz,rots,scales
+#     return xyz,rots,scales
+
+
+def deform_gaussians(params, time, deform_grad, N=5,deformation_type = 'gaussian'):
+    """
+    Calculate deformations using the N closest basis functions based on |time - bias|.
+
+    Args:
+        params (dict): Dictionary containing deformation parameters.
+        time (torch.Tensor): Current time step.
+        deform_grad (bool): Whether to calculate gradients for deformations.
+        N (int): Number of closest basis functions to consider.
+
+    Returns:
+        xyz (torch.Tensor): Updated 3D positions.
+        rots (torch.Tensor): Updated rotations.
+        scales (torch.Tensor): Updated scales.
+    """
+    if deformation_type =='gaussian':
+        if True:
+            if deform_grad:
+                weights = params['deform_weights']
+                stds = params['deform_stds']
+                biases = params['deform_biases']
+            else:
+                weights = params['deform_weights'].detach()
+                stds = params['deform_stds'].detach()
+                biases = params['deform_biases'].detach()
+
+            # Calculate the absolute difference between time and biases
+            time_diff = torch.abs(time - biases)
+
+            # Get the indices of the N smallest time differences
+            _, top_indices = torch.topk(-time_diff, N, dim=1)  # Negative for smallest values
+
+            # Create a mask to select only the top N basis functions
+            mask = torch.zeros_like(time_diff, dtype=torch.float)
+            mask.scatter_(1, top_indices, 1.0)
+
+            # Apply the mask to weights and biases
+            masked_weights = weights * mask
+            masked_biases = biases * mask
+
+            # Calculate deformations
+            deform = torch.sum(
+                masked_weights * torch.exp(-1 / (2 * stds**2) * (time - masked_biases)**2), dim=1
+            )  # Nx10 gaussians deformations
+
+            deform_xyz = deform[:, :3]
+            deform_rots = deform[:, 3:7]
+            deform_scales = deform[:, 7:10]
+        else:
+            if deform_grad:
+                weights = params['deform_weights']
+                stds = params['deform_stds']
+                biases = params['deform_biases']
+            else:
+                weights = params['deform_weights'].detach()
+                stds = params['deform_stds'].detach()
+                biases = params['deform_biases'].detach()
+
+            # Calculate the absolute difference between time and biases
+            time_diff = torch.abs(time - biases)
+
+            # Get the indices of the N smallest time differences
+            _, top_indices = torch.topk(-time_diff, N, dim=1)  # Negative for smallest values
+
+            # Create a mask to select only the top N basis functions
+            mask = torch.zeros_like(time_diff, dtype=torch.float)
+            mask.scatter_(1, top_indices, 1.0).detach()
+
+            # Register a gradient hook to zero out gradients for irrelevant basis functions
+            if deform_grad:
+                def zero_out_irrelevant_gradients(grad):
+                    return grad * mask
+
+                weights.register_hook(zero_out_irrelevant_gradients)
+                biases.register_hook(zero_out_irrelevant_gradients)
+                stds.register_hook(zero_out_irrelevant_gradients)
+
+            # Calculate deformations
+            deform = torch.sum(
+                weights * torch.exp(-1 / (2 * stds**2) * (time - biases)**2), dim=1
+            )  # Nx10 gaussians deformations
+
+            deform_xyz = deform[:, :3]
+            deform_rots = deform[:, 3:7]
+            deform_scales = deform[:, 7:10]
+
+        xyz = params['means3D'] + deform_xyz
+        rots = params['unnorm_rotations'] + deform_rots
+        scales = params['log_scales'] + deform_scales
+        opacities = params['logit_opacities']
+        colors = params['rgb_colors']
+
+
+    elif deformation_type == 'simple':
+        # with torch.no_grad():
+        xyz = params['means3D'][...,time]
+        rots = params['unnorm_rotations'][...,time]
+        scales = params['log_scales'][...,time]
+        opacities = params['logit_opacities'][...,time]
+        colors = params['rgb_colors'][...,time]
+
+    return xyz, rots, scales,opacities, colors
 
 def eval_save(dataset, final_params, eval_dir, sil_thres, 
-         mapping_iters, add_new_gaussians, save_renders=True):
+         mapping_iters, add_new_gaussians, save_renders=True,use_grn = True):
     # timer = Timer()
     # timer.start()
     split = False
@@ -305,6 +409,7 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
         
     for total_time_idx in tqdm(range(num_frames)):
         dataset_type, dataset, time_idx = get_idx(total_time_idx)
+        print(time_idx)
          # Get RGB-D Data & Camera Parameters
         color, depth, intrinsics, pose = dataset[time_idx]
         intrinsics = intrinsics[:3, :3]
@@ -323,7 +428,7 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
             cam = setup_camera(color.shape[2], color.shape[1], intrinsics.cpu().numpy(), first_frame_w2c.detach().cpu().numpy())
 
         # Get current frame Gaussians
-        local_means,local_rots,local_scales = deform_gaussians(final_params,total_time_idx,False)
+        local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(final_params,total_time_idx,False,deformation_type = 'simple')
         if dataset_type == 'train':
             cam_rot = F.normalize(final_params['cam_unnorm_rots'][..., time_idx].detach())
             cam_tran = final_params['cam_trans'][..., time_idx].detach()
@@ -337,93 +442,103 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
         # Define current frame data
         curr_data = {'cam': cam, 'im': color, 'depth': depth, 'id': time_idx, 'intrinsics': intrinsics, 'w2c': first_frame_w2c}
 
-        visall = False # NOTE: for debug
-        if not visall and dataset_type == 'train':
-            continue
-        
-        # Initialize Render Variables
-        rendervar = transformed_params2rendervar(final_params, transformed_pts,local_rots,local_scales)
-        depth_sil_rendervar = transformed_params2depthplussilhouette(final_params, curr_data['w2c'],
-                                                                     transformed_pts,local_rots,local_scales)
+        # visall = False # NOTE: for debug
+        # if not visall and dataset_type == 'train':
+        #     continue
+        if time_idx in dataset.eval_idx:
+            # # Initialize Render Variables
+            # rendervar = transformed_params2rendervar(final_params, transformed_pts,local_rots,local_scales)
+            # depth_sil_rendervar = transformed_params2depthplussilhouette(final_params, curr_data['w2c'],
+            #                                                              transformed_pts,local_rots,local_scales)
+            if use_grn:
+                rendervar = transformed_GRNparams2rendervar(final_params, transformed_pts,local_rots,local_scales,local_opacities,local_colors)
 
-        # Render Depth & Silhouette
-        depth_sil, _, _ = Renderer(raster_settings=curr_data['cam'])(**depth_sil_rendervar)
-        rastered_depth = depth_sil[0, :, :].unsqueeze(0)
-        
-        # if rastered_depth.max() > 1.0:
-        #     rastered_depth = rastered_depth / 100.0
-        
-        # Mask invalid depth in GT
-        valid_depth_mask = (curr_data['depth'] > 0) & (curr_data['depth'] < 1e10)
-        rastered_depth_viz = rastered_depth.detach()
-        rastered_depth = rastered_depth * valid_depth_mask
-        silhouette = depth_sil[1, :, :]
-        presence_sil_mask = (silhouette > sil_thres)
-        
-        
-        # Render RGB and Calculate PSNR
-        # timer.lap('rest part', stage=0)
-        # for _ in range(100):
-        #     im, _, _= Renderer(raster_settings=curr_data['cam'])(**rendervar)
-        # timer.lap('render part', stage=1)
-        im, _, _= Renderer(raster_settings=curr_data['cam'])(**rendervar)
-        # if mapping_iters==0 and not add_new_gaussians:
-        #     weighted_im = im * presence_sil_mask * valid_depth_mask
-        #     weighted_gt_im = curr_data['im'] * presence_sil_mask * valid_depth_mask
-        # else:
-        weighted_im = im * valid_depth_mask
-        weighted_gt_im = curr_data['im'] * valid_depth_mask
-        psnr = calc_psnr(weighted_im, weighted_gt_im).mean()
-        # ssim = ms_ssim(weighted_im.unsqueeze(0).cpu(), weighted_gt_im.unsqueeze(0).cpu(), 
-        #                 data_range=1.0, size_average=True)
-        # lpips_score = loss_fn_alex(torch.clamp(weighted_im.unsqueeze(0), 0.0, 1.0),
-        #                             torch.clamp(weighted_gt_im.unsqueeze(0), 0.0, 1.0)).item()
+                depth_sil_rendervar = transformed_GRNparams2depthplussilhouette(final_params, curr_data['w2c'],
+                                                                            transformed_pts,local_rots,local_scales,local_opacities)
+            else:
+                rendervar = transformed_params2rendervar(final_params, transformed_pts,local_rots,local_scales,local_opacities,local_colors)
 
-        # psnr_list.append(psnr.cpu().numpy())
-        # ssim_list.append(ssim.cpu().numpy())
-        # lpips_list.append(lpips_score)
+                depth_sil_rendervar = transformed_params2depthplussilhouette(final_params, curr_data['w2c'],
+                                                                            transformed_pts,local_rots,local_scales,local_opacities)
 
-        # Compute Depth RMSE
-        # if mapping_iters==0 and not add_new_gaussians:
-        #     diff_depth_rmse = torch.sqrt((((rastered_depth - curr_data['depth']) * presence_sil_mask) ** 2))
-        #     diff_depth_rmse = diff_depth_rmse * valid_depth_mask
-        #     rmse = diff_depth_rmse.sum() / valid_depth_mask.sum()
-        #     diff_depth_l1 = torch.abs((rastered_depth - curr_data['depth']) * presence_sil_mask)
-        #     diff_depth_l1 = diff_depth_l1 * valid_depth_mask
-        #     depth_l1 = diff_depth_l1.sum() / valid_depth_mask.sum()
-        # else:
-        # diff_depth_rmse = torch.sqrt((((rastered_depth - curr_data['depth'])) ** 2))
-        # diff_depth_rmse = diff_depth_rmse * valid_depth_mask
-        # rmse = diff_depth_rmse.sum() / valid_depth_mask.sum()
-        diff_depth_l1 = torch.abs((rastered_depth - curr_data['depth']))
-        diff_depth_l1 = diff_depth_l1 * valid_depth_mask
-        depth_l1 = diff_depth_l1.sum() / valid_depth_mask.sum()
-        # rmse_list.append(rmse.cpu().numpy())
-        # l1_list.append(depth_l1.cpu().numpy())
+            # Render Depth & Silhouette
+            depth_sil, _, _ = Renderer(raster_settings=curr_data['cam'])(**depth_sil_rendervar)
+            rastered_depth = depth_sil[0, :, :].unsqueeze(0)
+            
+            # if rastered_depth.max() > 1.0:
+            #     rastered_depth = rastered_depth / 100.0
+            
+            # Mask invalid depth in GT
+            valid_depth_mask = (curr_data['depth'] > 0) & (curr_data['depth'] < 1e10)
+            rastered_depth_viz = rastered_depth.detach()
+            rastered_depth = rastered_depth * valid_depth_mask
+            silhouette = depth_sil[1, :, :]
+            presence_sil_mask = (silhouette > sil_thres)
+            
+            
+            # Render RGB and Calculate PSNR
+            # timer.lap('rest part', stage=0)
+            # for _ in range(100):
+            #     im, _, _= Renderer(raster_settings=curr_data['cam'])(**rendervar)
+            # timer.lap('render part', stage=1)
+            im, _, _= Renderer(raster_settings=curr_data['cam'])(**rendervar)
+            # if mapping_iters==0 and not add_new_gaussians:
+            #     weighted_im = im * presence_sil_mask * valid_depth_mask
+            #     weighted_gt_im = curr_data['im'] * presence_sil_mask * valid_depth_mask
+            # else:
+            weighted_im = im * valid_depth_mask
+            weighted_gt_im = curr_data['im'] * valid_depth_mask
+            psnr = calc_psnr(weighted_im, weighted_gt_im).mean()
+            # ssim = ms_ssim(weighted_im.unsqueeze(0).cpu(), weighted_gt_im.unsqueeze(0).cpu(), 
+            #                 data_range=1.0, size_average=True)
+            # lpips_score = loss_fn_alex(torch.clamp(weighted_im.unsqueeze(0), 0.0, 1.0),
+            #                             torch.clamp(weighted_gt_im.unsqueeze(0), 0.0, 1.0)).item()
 
-        if save_renders:
-            # Save Rendered RGB and Depth
-            viz_render_im = torch.clamp(im, 0, 1)
-            viz_render_im = viz_render_im.detach().cpu().permute(1, 2, 0).numpy()
-            vmin = 0
-            vmax = 6
-            viz_render_depth = rastered_depth_viz[0].detach().cpu().numpy()
-            normalized_depth = np.clip((viz_render_depth - vmin) / (vmax - vmin), 0, 1)
-            # depth_colormap = cv2.applyColorMap((normalized_depth * 255).astype(np.uint8), cv2.COLORMAP_JET)
-            save_im = np.clip(viz_render_im*255, 0, 255).astype(np.uint8)
-            cv2.imwrite(os.path.join(render_rgb_dir, "color_{:04d}.png".format(total_time_idx)), cv2.cvtColor(save_im, cv2.COLOR_RGB2BGR))
-            # Image.fromarray(np.uint8(viz_render_depth*10/2.55), 'L').save(os.path.join(render_depth_dir, "depth_{:04d}.tiff".format(total_time_idx)))
-            save_depth = np.clip(viz_render_depth*655.35, 0, 65535)
-            Image.fromarray(np.uint16(save_depth)).save(os.path.join(render_depth_dir, "depth_{:04d}.tiff".format(total_time_idx)))
-            # cv2.imwrite(os.path.join(render_depth_dir, "depth_{:04d}.tiff".format(total_time_idx)), viz_render_depth*100)
-        
-        # Plot the Ground Truth and Rasterized RGB & Depth, along with Silhouette
-        fig_title = "Time Step: {}".format(total_time_idx)
-        plot_name = "%04d" % total_time_idx
-        presence_sil_mask = presence_sil_mask.detach().cpu().numpy()
-        plot_rgbd_silhouette(color, depth, im, rastered_depth_viz, presence_sil_mask, diff_depth_l1,
-                                 psnr, depth_l1, fig_title, plot_dir, 
-                                 plot_name=plot_name, save_plot=True)
+            # psnr_list.append(psnr.cpu().numpy())
+            # ssim_list.append(ssim.cpu().numpy())
+            # lpips_list.append(lpips_score)
+
+            # Compute Depth RMSE
+            # if mapping_iters==0 and not add_new_gaussians:
+            #     diff_depth_rmse = torch.sqrt((((rastered_depth - curr_data['depth']) * presence_sil_mask) ** 2))
+            #     diff_depth_rmse = diff_depth_rmse * valid_depth_mask
+            #     rmse = diff_depth_rmse.sum() / valid_depth_mask.sum()
+            #     diff_depth_l1 = torch.abs((rastered_depth - curr_data['depth']) * presence_sil_mask)
+            #     diff_depth_l1 = diff_depth_l1 * valid_depth_mask
+            #     depth_l1 = diff_depth_l1.sum() / valid_depth_mask.sum()
+            # else:
+            # diff_depth_rmse = torch.sqrt((((rastered_depth - curr_data['depth'])) ** 2))
+            # diff_depth_rmse = diff_depth_rmse * valid_depth_mask
+            # rmse = diff_depth_rmse.sum() / valid_depth_mask.sum()
+            diff_depth_l1 = torch.abs((rastered_depth - curr_data['depth']))
+            diff_depth_l1 = diff_depth_l1 * valid_depth_mask
+            depth_l1 = diff_depth_l1.sum() / valid_depth_mask.sum()
+            # rmse_list.append(rmse.cpu().numpy())
+            # l1_list.append(depth_l1.cpu().numpy())
+
+            if save_renders:
+                # Save Rendered RGB and Depth
+                viz_render_im = torch.clamp(im, 0, 1)
+                viz_render_im = viz_render_im.detach().cpu().permute(1, 2, 0).numpy()
+                vmin = 0
+                vmax = 6
+                viz_render_depth = rastered_depth_viz[0].detach().cpu().numpy()
+                normalized_depth = np.clip((viz_render_depth - vmin) / (vmax - vmin), 0, 1)
+                # depth_colormap = cv2.applyColorMap((normalized_depth * 255).astype(np.uint8), cv2.COLORMAP_JET)
+                save_im = np.clip(viz_render_im*255, 0, 255).astype(np.uint8)
+                cv2.imwrite(os.path.join(render_rgb_dir, "color_{:04d}.png".format(total_time_idx)), cv2.cvtColor(save_im, cv2.COLOR_RGB2BGR))
+                # Image.fromarray(np.uint8(viz_render_depth*10/2.55), 'L').save(os.path.join(render_depth_dir, "depth_{:04d}.tiff".format(total_time_idx)))
+                save_depth = np.clip(viz_render_depth*655.35, 0, 65535)
+                Image.fromarray(np.uint16(save_depth)).save(os.path.join(render_depth_dir, "depth_{:04d}.tiff".format(total_time_idx)))
+                # cv2.imwrite(os.path.join(render_depth_dir, "depth_{:04d}.tiff".format(total_time_idx)), viz_render_depth*100)
+            
+            # Plot the Ground Truth and Rasterized RGB & Depth, along with Silhouette
+            fig_title = "Time Step: {}".format(total_time_idx)
+            plot_name = "%04d" % total_time_idx
+            presence_sil_mask = presence_sil_mask.detach().cpu().numpy()
+            plot_rgbd_silhouette(color, depth, im, rastered_depth_viz, presence_sil_mask, diff_depth_l1,
+                                    psnr, depth_l1, fig_title, plot_dir, 
+                                    plot_name=plot_name, save_plot=True)
 
     # Get the final camera trajectory
     num_frames = final_params['cam_unnorm_rots'].shape[-1]
