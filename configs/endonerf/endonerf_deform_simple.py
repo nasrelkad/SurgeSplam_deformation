@@ -9,13 +9,13 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "cutting_deform_simple"
+    scene_name = "cutting_deform_simple_1"
 
 map_every = 1
 keyframe_every = 8
 # mapping_window_size = 24
-tracking_iters = 100
-mapping_iters = 25
+tracking_iters = 50
+mapping_iters = 1
 
 group_name = f"EndoNerf {scene_name}"
 run_name = scene_name
@@ -55,20 +55,20 @@ config = dict(
         forward_prop=True, # Forward Propagate Poses
         num_iters=tracking_iters,
         use_sil_for_loss=True,
-        sil_thres=0.1,
+        sil_thres=0.7,
         use_l1=True,
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
             im=2.0,
-            depth=0,
+            depth=0.5,
             deform = 0
         ),
         lrs=dict(
-            means3D=0.05,
+            means3D=0.001,
             rgb_colors=0.0,
-            unnorm_rotations=0.05,
+            unnorm_rotations=0.0001,
             logit_opacities=0.0,
-            log_scales=0.05,
+            log_scales=0.0000,
             cam_unnorm_rots=0.00002,
             cam_trans=0.00005,
         ),
@@ -79,10 +79,10 @@ config = dict(
         add_new_gaussians=True,
         sil_thres=0.01, # For Addition of new Gaussians
         use_l1=True,
-        use_sil_for_loss=False,
+        use_sil_for_loss=True,
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
-            im=2.0,
+            im=1.0,
             depth=1.0,
             deform = 0.5
         ),
@@ -151,7 +151,20 @@ config = dict(
     ),
     GRN = dict(
         use_grn = True,
-        model_path = 'GRN/models/GRN_v1.pth'
+        random_initialization = False,
+        init_scale = -2.5,
+        num_iters_initialization = 50,
+        num_iters_initialization_added_gaussians = 10,
+        model_path = 'GRN/models/GRN_v1.pth',
+        random_initialization_lrs = dict(
+            means3D=0.0005,
+            rgb_colors=0.0005,
+            unnorm_rotations=0.0005,
+            logit_opacities=0.0005,
+            log_scales=0.0005,
+            cam_unnorm_rots=0.000,
+            cam_trans=0.000,
+        ),
         # grn_hidden_dim = 128,
         # grn_out_dim = 3,
         # grn_input_dim = 3,
