@@ -9,7 +9,7 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "cutting_deform_simple_1"
+    scene_name = "cutting_deform_simple_2"
 
 map_every = 1
 keyframe_every = 8

@@ -9,7 +9,7 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "cutting_deform_short_simple_20"
+    scene_name = "cutting_deform_short_simple_21"
 
 map_every = 1
 keyframe_every = 8
@@ -48,7 +48,7 @@ config = dict(
         end=-1,
         stride=1,
         num_frames=-1,
-        train_or_test="train",
+        train_or_test="all",
     ),
     tracking=dict(
         use_gt_poses=False, # Use GT Poses for Tracking
@@ -61,7 +61,7 @@ config = dict(
         loss_weights=dict(
             im=2.0,
             depth=0.5,
-            deform = 0
+            deform = 0.5
         ),
         lrs=dict(
             means3D=0.001,
@@ -158,7 +158,7 @@ config = dict(
         model_path = 'GRN/models/GRN_v1.pth',
         random_initialization_lrs = dict(
             means3D=0.0005,
-            rgb_colors=0.0005,
+            rgb_colors=0.000,
             unnorm_rotations=0.0005,
             logit_opacities=0.0005,
             log_scales=0.0005,
