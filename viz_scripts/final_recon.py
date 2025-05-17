@@ -149,12 +149,12 @@ def deform_gaussians(params, time, deform_grad, N=5,deformation_type = 'gaussian
 
 
     elif deformation_type == 'simple':
-        # with torch.no_grad():
-        xyz = params['means3D'][...,time]
-        rots = params['unnorm_rotations'][...,time]
-        scales = params['log_scales'][...,time]
-        opacities = params['logit_opacities'][...,time]
-        colors = params['rgb_colors'][...,time]
+        with torch.no_grad():
+            xyz = params['means3D'][time]
+            rots = params['unnorm_rotations'][time]
+            scales = params['log_scales'][time]
+            opacities = params['logit_opacities'][time]
+            colors = params['rgb_colors'][time]
 
     return xyz, rots, scales,opacities, colors
 
@@ -176,21 +176,34 @@ def load_camera(cfg, scene_path):
 def load_scene_data(scene_path, first_frame_w2c, intrinsics, time_idx,deformation_type = None):
     # Load Scene Data
     all_params = dict(np.load(scene_path, allow_pickle=True))
-    all_params = {k: torch.tensor(all_params[k]).cuda().float() for k in all_params.keys()}
     intrinsics = torch.tensor(intrinsics).cuda().float()
     first_frame_w2c = torch.tensor(first_frame_w2c).cuda().float()
+    try:
+        all_params = {k: torch.tensor(all_params[k]).cuda().float() for k in all_params.keys()}
 
-    keys = [k for k in all_params.keys() if
-            k not in ['org_width', 'org_height', 'w2c', 'intrinsics', 
-                      'gt_w2c_all_frames', 'cam_unnorm_rots',
-                      'cam_trans', 'keyframe_time_indices']]
 
-    params = all_params
-    for k in keys:
-        if not isinstance(all_params[k], torch.Tensor):
-            params[k] = torch.tensor(all_params[k]).cuda().float()
-        else:
-            params[k] = all_params[k].cuda().float()
+        keys = [k for k in all_params.keys() if
+                k not in ['org_width', 'org_height', 'w2c', 'intrinsics', 
+                        'gt_w2c_all_frames', 'cam_unnorm_rots',
+                        'cam_trans', 'keyframe_time_indices']]
+
+        params = all_params
+        for k in keys:
+            if not isinstance(all_params[k], torch.Tensor):
+                params[k] = torch.tensor(all_params[k]).cuda().float()
+            else:
+                params[k] = all_params[k].cuda().float()
+    except:
+        # keys = [k for k in all_params.keys() if
+        #         k not in ['org_width', 'org_height', 'w2c', 'intrinsics', 
+        #                 'gt_w2c_all_frames', 'cam_unnorm_rots',
+        #                 'cam_trans', 'keyframe_time_indices']]
+        params={}
+        for key in all_params.keys():
+            try:
+                params[key] = torch.tensor(all_params[key]).cuda()
+            except:
+                params[key] = [torch.tensor(all_params[key][i]).cuda() for i in range(all_params[key].shape[0])]
 
     all_w2cs = []
     num_t = params['cam_unnorm_rots'].shape[-1]
@@ -201,6 +214,7 @@ def load_scene_data(scene_path, first_frame_w2c, intrinsics, time_idx,deformatio
         rel_w2c[:3, :3] = build_rotation(cam_rot)
         rel_w2c[:3, 3] = cam_tran
         all_w2cs.append(rel_w2c.cpu().numpy())
+        
 
 
     local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(params,time_idx,False,deformation_type=deformation_type)
@@ -210,13 +224,13 @@ def load_scene_data(scene_path, first_frame_w2c, intrinsics, time_idx,deformatio
         'means3D': transformed_pts,
         'rotations': torch.nn.functional.normalize(local_rots),
         'opacities': torch.sigmoid(local_opacities),
-        'means2D': torch.zeros_like(params['means3D'], device="cuda")
+        'means2D': torch.zeros_like(local_means, device="cuda")
     }
     if "feature_rest" in params:
-        rendervar['scales'] = torch.exp(params['log_scales'])
+        rendervar['scales'] = torch.exp(local_scales)
         rendervar['shs'] = torch.cat((local_colors.reshape(local_colors.shape[0], 3, -1).transpose(1, 2), params['feature_rest'].reshape(local_colors.shape[0], 3, -1).transpose(1, 2)), dim=1)
-    elif params['log_scales'].shape[1] == 1:
-        rendervar['scales'] = torch.exp(torch.tile(params['log_scales'], (1, 3)))
+    elif local_scales.shape[1] == 1:
+        rendervar['scales'] = torch.exp(torch.tile(local_scales, (1, 3)))
         rendervar['colors_precomp'] = local_colors
     else:
         rendervar['scales'] = local_scales
@@ -224,13 +238,43 @@ def load_scene_data(scene_path, first_frame_w2c, intrinsics, time_idx,deformatio
     depth_rendervar = {
         'means3D': transformed_pts,
         'colors_precomp': get_depth_and_silhouette(transformed_pts, first_frame_w2c),
-        'rotations': torch.nn.functional.normalize(params['unnorm_rotations']),
-        'opacities': torch.sigmoid(params['logit_opacities']),
-        'scales': torch.exp(torch.tile(params['log_scales'], (1, 3))),
-        'means2D': torch.zeros_like(params['means3D'], device="cuda")
+        'rotations': torch.nn.functional.normalize(local_rots),
+        'opacities': torch.sigmoid(local_opacities),
+        'scales': torch.exp(torch.tile(local_scales, (1, 3))),
+        'means2D': torch.zeros_like(local_means, device="cuda")
     }
-    return rendervar, depth_rendervar, all_w2cs
+    return rendervar, depth_rendervar, all_w2cs, params
 
+
+def deform_and_render(params,time_idx,deformation_type,w2c):
+    w2c = torch.tensor(w2c).cuda().float()
+    local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(params,time_idx,False,deformation_type=deformation_type)
+    transformed_pts = local_means
+
+    rendervar = {
+        'means3D': transformed_pts,
+        'rotations': torch.nn.functional.normalize(local_rots),
+        'opacities': torch.sigmoid(local_opacities),
+        'means2D': torch.zeros_like(local_means, device="cuda")
+    }
+    if "feature_rest" in params:
+        rendervar['scales'] = torch.exp(local_scales)
+        rendervar['shs'] = torch.cat((local_colors.reshape(local_colors.shape[0], 3, -1).transpose(1, 2), params['feature_rest'].reshape(local_colors.shape[0], 3, -1).transpose(1, 2)), dim=1)
+    elif local_scales.shape[1] == 1:
+        rendervar['scales'] = torch.exp(torch.tile(local_scales, (1, 3)))
+        rendervar['colors_precomp'] = local_colors
+    else:
+        rendervar['scales'] = local_scales
+        rendervar['colors_precomp'] = local_colors
+    depth_rendervar = {
+        'means3D': transformed_pts,
+        'colors_precomp': get_depth_and_silhouette(transformed_pts, w2c),
+        'rotations': torch.nn.functional.normalize(local_rots),
+        'opacities': torch.sigmoid(local_opacities),
+        'scales': torch.exp(torch.tile(local_scales, (1, 3))),
+        'means2D': torch.zeros_like(local_means, device="cuda")
+    }
+    return rendervar, depth_rendervar, params
 
 def make_lineset(all_pts, all_cols, num_lines):
     linesets = []
@@ -315,7 +359,7 @@ def visualize(scene_path, cfg,experiment):
     time_idx = 0
     deformation_type = experiment.config['deforms']['deform_type']
     w2c, k = load_camera(cfg, scene_path)
-    scene_data, scene_depth_data, all_w2cs = load_scene_data(scene_path, w2c, k,time_idx,deformation_type=deformation_type)
+    scene_data, scene_depth_data, all_w2cs,params = load_scene_data(scene_path, w2c, k,time_idx,deformation_type=deformation_type)
 
     # vis.create_window()
     vis = o3d.visualization.Visualizer()
@@ -389,7 +433,8 @@ def visualize(scene_path, cfg,experiment):
     ts = time()
     # Interactive Rendering
     while True:
-        scene_data, scene_depth_data, all_w2cs = load_scene_data(scene_path, w2c, k,time_idx,deformation_type=deformation_type)
+        # scene_data, scene_depth_data, all_w2cs = load_scene_data(scene_path, w2c, k,time_idx,deformation_type=deformation_type)
+        scene_data,scene_depth_data, params = deform_and_render(params,time_idx,deformation_type,all_w2cs[time_idx])
 
         cam_params = view_control.convert_to_pinhole_camera_parameters()
         view_k = cam_params.intrinsic.intrinsic_matrix

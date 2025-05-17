@@ -33,6 +33,7 @@ from utils.slam_helpers import (
     transformed_params2rendervar, transformed_params2depthplussilhouette,
     transform_to_frame, l1_loss_v1, matrix_to_quaternion,
     transformed_GRNparams2depthplussilhouette,transformed_GRNparams2rendervar,
+    add_new_gaussians,grn_initialization,deform_gaussians,initialize_deformations,initialize_new_params,grn_initialization,
 )
 from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, densify
 from utils.vis_utils import plot_video
@@ -116,36 +117,36 @@ def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True,
         return point_cld
 
 
-def initialize_deformations(params,nr_basis,use_distributed_biases,total_timescale= None):
-    """Function to initialize deformation parameters
+# def initialize_deformations(params,nr_basis,use_distributed_biases,total_timescale= None):
+#     """Function to initialize deformation parameters
 
-    Args:
-        params (dict): dict containing all the gaussian parameters
-        nr_basis (int): nr of basis functions to generate for each gaussian attribute
-        total_timescale (int): the total timescale of the deformation model, used to evenly distribute biases across timespan
+#     Args:
+#         params (dict): dict containing all the gaussian parameters
+#         nr_basis (int): nr of basis functions to generate for each gaussian attribute
+#         total_timescale (int): the total timescale of the deformation model, used to evenly distribute biases across timespan
 
-    Returns:
-        params (dict): Updated params dict with the gaussian deformation parameters
-    """
-    # Means3D, unnorm rotations and log_scales should receive deformation params
-    N = params['means3D'].shape[0]
-    weights = torch.randn([N,nr_basis,10],requires_grad = True,device = 'cuda')*0.0 # We have N x nr_basis x 10 (xyz,scales,rots) weights
-    stds = torch.ones([N,nr_basis,10],requires_grad = True,device = 'cuda')/0.1 # We have N x nr_basis x 10 (xyz,scales,rots) weights
-    if not use_distributed_biases:
-        biases = torch.randn([N,nr_basis,10],requires_grad = True,device = 'cuda')*0.0 # We have N x nr_basis x 10 (xyz,scales,rots) weights
+#     Returns:
+#         params (dict): Updated params dict with the gaussian deformation parameters
+#     """
+#     # Means3D, unnorm rotations and log_scales should receive deformation params
+#     N = params['means3D'].shape[0]
+#     weights = torch.randn([N,nr_basis,10],requires_grad = True,device = 'cuda')*0.0 # We have N x nr_basis x 10 (xyz,scales,rots) weights
+#     stds = torch.ones([N,nr_basis,10],requires_grad = True,device = 'cuda')/0.1 # We have N x nr_basis x 10 (xyz,scales,rots) weights
+#     if not use_distributed_biases:
+#         biases = torch.randn([N,nr_basis,10],requires_grad = True,device = 'cuda')*0.0 # We have N x nr_basis x 10 (xyz,scales,rots) weights
     
     
-    else:
-        interval = torch.ceil(torch.tensor(total_timescale/nr_basis)) # For biases, we want to evenly distribute them across the timespan, so we have nr_basis biases at an interval of total_timescale/nr_basis
-        arange = torch.arange(0,total_timescale,interval).unsqueeze(0).unsqueeze(-1)
-        biases = torch.tile(arange,(N,1,10)) # Repeat the distributed biases to generate basis functions for each parameter
+#     else:
+#         interval = torch.ceil(torch.tensor(total_timescale/nr_basis)) # For biases, we want to evenly distribute them across the timespan, so we have nr_basis biases at an interval of total_timescale/nr_basis
+#         arange = torch.arange(0,total_timescale,interval).unsqueeze(0).unsqueeze(-1)
+#         biases = torch.tile(arange,(N,1,10)) # Repeat the distributed biases to generate basis functions for each parameter
 
-    params['deform_weights'] = weights
-    params['deform_stds'] = stds
-    params['deform_biases'] = biases
+#     params['deform_weights'] = weights
+#     params['deform_stds'] = stds
+#     params['deform_biases'] = biases
 
 
-    return params
+#     return params
 
 # def deform_gaussians(params,time,deform_grad):
 
@@ -226,108 +227,108 @@ def initialize_deformations(params,nr_basis,use_distributed_biases,total_timesca
 #     return xyz, rots, scales
 
 
-def deform_gaussians(params, time, deform_grad, N=5,deformation_type = 'gaussian'):
-    """
-    Calculate deformations using the N closest basis functions based on |time - bias|.
+# def deform_gaussians(params, time, deform_grad, N=5,deformation_type = 'gaussian'):
+#     """
+#     Calculate deformations using the N closest basis functions based on |time - bias|.
 
-    Args:
-        params (dict): Dictionary containing deformation parameters.
-        time (torch.Tensor): Current time step.
-        deform_grad (bool): Whether to calculate gradients for deformations.
-        N (int): Number of closest basis functions to consider.
+#     Args:
+#         params (dict): Dictionary containing deformation parameters.
+#         time (torch.Tensor): Current time step.
+#         deform_grad (bool): Whether to calculate gradients for deformations.
+#         N (int): Number of closest basis functions to consider.
 
-    Returns:
-        xyz (torch.Tensor): Updated 3D positions.
-        rots (torch.Tensor): Updated rotations.
-        scales (torch.Tensor): Updated scales.
-    """
-    if deformation_type =='gaussian':
-        if True:
-            if deform_grad:
-                weights = params['deform_weights']
-                stds = params['deform_stds']
-                biases = params['deform_biases']
-            else:
-                weights = params['deform_weights'].detach()
-                stds = params['deform_stds'].detach()
-                biases = params['deform_biases'].detach()
+#     Returns:
+#         xyz (torch.Tensor): Updated 3D positions.
+#         rots (torch.Tensor): Updated rotations.
+#         scales (torch.Tensor): Updated scales.
+#     """
+#     if deformation_type =='gaussian':
+#         if True:
+#             if deform_grad:
+#                 weights = params['deform_weights']
+#                 stds = params['deform_stds']
+#                 biases = params['deform_biases']
+#             else:
+#                 weights = params['deform_weights'].detach()
+#                 stds = params['deform_stds'].detach()
+#                 biases = params['deform_biases'].detach()
 
-            # Calculate the absolute difference between time and biases
-            time_diff = torch.abs(time - biases)
+#             # Calculate the absolute difference between time and biases
+#             time_diff = torch.abs(time - biases)
 
-            # Get the indices of the N smallest time differences
-            _, top_indices = torch.topk(-time_diff, N, dim=1)  # Negative for smallest values
+#             # Get the indices of the N smallest time differences
+#             _, top_indices = torch.topk(-time_diff, N, dim=1)  # Negative for smallest values
 
-            # Create a mask to select only the top N basis functions
-            mask = torch.zeros_like(time_diff, dtype=torch.float)
-            mask.scatter_(1, top_indices, 1.0)
+#             # Create a mask to select only the top N basis functions
+#             mask = torch.zeros_like(time_diff, dtype=torch.float)
+#             mask.scatter_(1, top_indices, 1.0)
 
-            # Apply the mask to weights and biases
-            masked_weights = weights * mask
-            masked_biases = biases * mask
+#             # Apply the mask to weights and biases
+#             masked_weights = weights * mask
+#             masked_biases = biases * mask
 
-            # Calculate deformations
-            deform = torch.sum(
-                masked_weights * torch.exp(-1 / (2 * stds**2) * (time - masked_biases)**2), dim=1
-            )  # Nx10 gaussians deformations
+#             # Calculate deformations
+#             deform = torch.sum(
+#                 masked_weights * torch.exp(-1 / (2 * stds**2) * (time - masked_biases)**2), dim=1
+#             )  # Nx10 gaussians deformations
 
-            deform_xyz = deform[:, :3]
-            deform_rots = deform[:, 3:7]
-            deform_scales = deform[:, 7:10]
-        else:
-            if deform_grad:
-                weights = params['deform_weights']
-                stds = params['deform_stds']
-                biases = params['deform_biases']
-            else:
-                weights = params['deform_weights'].detach()
-                stds = params['deform_stds'].detach()
-                biases = params['deform_biases'].detach()
+#             deform_xyz = deform[:, :3]
+#             deform_rots = deform[:, 3:7]
+#             deform_scales = deform[:, 7:10]
+#         else:
+#             if deform_grad:
+#                 weights = params['deform_weights']
+#                 stds = params['deform_stds']
+#                 biases = params['deform_biases']
+#             else:
+#                 weights = params['deform_weights'].detach()
+#                 stds = params['deform_stds'].detach()
+#                 biases = params['deform_biases'].detach()
 
-            # Calculate the absolute difference between time and biases
-            time_diff = torch.abs(time - biases)
+#             # Calculate the absolute difference between time and biases
+#             time_diff = torch.abs(time - biases)
 
-            # Get the indices of the N smallest time differences
-            _, top_indices = torch.topk(-time_diff, N, dim=1)  # Negative for smallest values
+#             # Get the indices of the N smallest time differences
+#             _, top_indices = torch.topk(-time_diff, N, dim=1)  # Negative for smallest values
 
-            # Create a mask to select only the top N basis functions
-            mask = torch.zeros_like(time_diff, dtype=torch.float)
-            mask.scatter_(1, top_indices, 1.0).detach()
+#             # Create a mask to select only the top N basis functions
+#             mask = torch.zeros_like(time_diff, dtype=torch.float)
+#             mask.scatter_(1, top_indices, 1.0).detach()
 
-            # Register a gradient hook to zero out gradients for irrelevant basis functions
-            if deform_grad:
-                def zero_out_irrelevant_gradients(grad):
-                    return grad * mask
+#             # Register a gradient hook to zero out gradients for irrelevant basis functions
+#             if deform_grad:
+#                 def zero_out_irrelevant_gradients(grad):
+#                     return grad * mask
 
-                weights.register_hook(zero_out_irrelevant_gradients)
-                biases.register_hook(zero_out_irrelevant_gradients)
-                stds.register_hook(zero_out_irrelevant_gradients)
+#                 weights.register_hook(zero_out_irrelevant_gradients)
+#                 biases.register_hook(zero_out_irrelevant_gradients)
+#                 stds.register_hook(zero_out_irrelevant_gradients)
 
-            # Calculate deformations
-            deform = torch.sum(
-                weights * torch.exp(-1 / (2 * stds**2) * (time - biases)**2), dim=1
-            )  # Nx10 gaussians deformations
+#             # Calculate deformations
+#             deform = torch.sum(
+#                 weights * torch.exp(-1 / (2 * stds**2) * (time - biases)**2), dim=1
+#             )  # Nx10 gaussians deformations
 
-            deform_xyz = deform[:, :3]
-            deform_rots = deform[:, 3:7]
-            deform_scales = deform[:, 7:10]
+#             deform_xyz = deform[:, :3]
+#             deform_rots = deform[:, 3:7]
+#             deform_scales = deform[:, 7:10]
 
-        xyz = params['means3D'] + deform_xyz
-        rots = params['unnorm_rotations'] + deform_rots
-        scales = params['log_scales'] + deform_scales
-        opacities = params['logit_opacities']
-        colors = params['rgb_colors']
+#         xyz = params['means3D'] + deform_xyz
+#         rots = params['unnorm_rotations'] + deform_rots
+#         scales = params['log_scales'] + deform_scales
+#         opacities = params['logit_opacities']
+#         colors = params['rgb_colors']
 
 
-    elif deformation_type == 'simple':
-        # with torch.no_grad():
-        xyz = params['means3D'][...,time]
-        rots = params['unnorm_rotations'][...,time]
-        scales = params['log_scales'][...,time]
-        opacities = params['logit_opacities'][...,time]
-        colors = params['rgb_colors'][...,time]
+#     elif deformation_type == 'simple':
+#         # with torch.no_grad():
+#         xyz = params['means3D']
+#         rots = params['unnorm_rotations']
+#         scales = params['log_scales']
+#         opacities = params['logit_opacities']
+#         colors = params['rgb_colors']
 
-    return xyz, rots, scales,opacities, colors
+#     return xyz, rots, scales,opacities, colors
 
 
 def initialize_simple_deformations(params, num_frames):
@@ -375,9 +376,6 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification
     if use_deforms:
         if deform_type == 'gaussian':
             params = initialize_deformations(params,nr_basis,use_distributed_biases=use_distributed_biases,total_timescale = total_timescale)
-        elif deform_type == 'simple':
-            params = initialize_simple_deformations(params,num_frames)
-            
 
  
     # Initialize a single gaussian trajectory to model the camera poses relative to the first frame
@@ -385,6 +383,9 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification
     cam_rots = np.tile(cam_rots[:, :, None], (1, 1, num_frames))
     params['cam_unnorm_rots'] = cam_rots
     params['cam_trans'] = np.zeros((1, 3, num_frames))
+
+
+        
     for k, v in params.items():
         # Check if value is already a torch tensor
         if not isinstance(v, torch.Tensor):
@@ -396,8 +397,13 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification
                  'means2D_gradient_accum': torch.zeros(params['means3D'].shape[0]).cuda().float(),
                  'denom': torch.zeros(params['means3D'].shape[0]).cuda().float(),
                  'timestep': torch.zeros(params['means3D'].shape[0]).cuda().float()}
-
-    return params, variables
+    # If we use simple deformations, we want a list of all parameters for easier optimization
+    if use_deforms:
+        if deform_type =='simple':
+            param_list = [params for _ in range(num_frames)]
+        else:
+            param_list = params
+    return param_list, variables
 
 
 def initialize_optimizer(params, lrs_dict):
@@ -408,57 +414,57 @@ def initialize_optimizer(params, lrs_dict):
     return torch.optim.Adam(param_groups, lr=0.0, eps=1e-15)
 
 
-def grn_initialization(model,params,init_pt_cld,mean3_sq_dist,color,depth,mask = None,cam= None):
+# def grn_initialization(model,params,init_pt_cld,mean3_sq_dist,color,depth,mask = None,cam= None):
 
-    normalize = torchvision.transforms.Normalize([0.46888983, 0.29536288, 0.28712815],[0.24689102 ,0.21034359, 0.21188641])
-    inv_normalize = torchvision.transforms.Normalize([-0.46888983/0.24689102,-0.29536288/0.21034359,-0.28712815/0.21188641],[1/0.24689102,1/0.21034359,1/0.21188641]) #Take the inverse of the normalization
+#     normalize = torchvision.transforms.Normalize([0.46888983, 0.29536288, 0.28712815],[0.24689102 ,0.21034359, 0.21188641])
+#     inv_normalize = torchvision.transforms.Normalize([-0.46888983/0.24689102,-0.29536288/0.21034359,-0.28712815/0.21188641],[1/0.24689102,1/0.21034359,1/0.21188641]) #Take the inverse of the normalization
 
-    color = normalize(color).detach()
-    scale = torch.max(depth).detach()
-    depth = (depth/scale).detach()
+#     color = normalize(color).detach()
+#     scale = torch.max(depth).detach()
+#     depth = (depth/scale).detach()
 
-    input = torch.cat((color,depth),axis = 0).unsqueeze(0).detach()
-    if mask == None:
-        mask = depth > 0
-        mask = mask.tile(1,3,1,1)
-        mask = mask[0,0,:,:].reshape(-1)
+#     input = torch.cat((color,depth),axis = 0).unsqueeze(0).detach()
+#     if mask == None:
+#         mask = depth > 0
+#         mask = mask.tile(1,3,1,1)
+#         mask = mask[0,0,:,:].reshape(-1)
         
 
-    output = model(input).detach()
-    # print(output)
-    cols = torch.permute(output[0], (1, 2, 0)).reshape(-1, 8) # (C, H, W) -> (H, W, C) -> (H * W, C)
-    rots = cols[:,:4]
+#     output = model(input).detach()
+#     # print(output)
+#     cols = torch.permute(output[0], (1, 2, 0)).reshape(-1, 8) # (C, H, W) -> (H, W, C) -> (H * W, C)
+#     rots = cols[:,:4]
 
-    scales_norm = cols[:,4:7]
-    opacities = cols[:,7][:,None]
+#     scales_norm = cols[:,4:7]
+#     opacities = cols[:,7][:,None]
 
-    # local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(params,0,False,5,'simple')
-    # rendervar = transformed_GRNparams2rendervar(params,local_means,local_rots,local_scales,local_opacities,local_colors)   
+#     # local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(params,0,False,5,'simple')
+#     # rendervar = transformed_GRNparams2rendervar(params,local_means,local_rots,local_scales,local_opacities,local_colors)   
 
-    # im,radius,_ = Renderer(raster_settings=cam)(**rendervar)
-    # plt.imshow(im.permute(1,2,0).cpu().detach())  
-    # plt.title('Before grn_init')         
-    # plt.show() 
-    # If we use simple deformations, rotations and scales will have shape [C x Num_gaussians x num_frames],
-    # We need to apply the GRN inialization to each timestep
-    if len(params['unnorm_rotations'].shape) ==3:
-        params['unnorm_rotations'] = (rots[mask])[...,None].tile(1,1,params['unnorm_rotations'].shape[2])
-        params['log_scales'] = (scales_norm[mask]*mean3_sq_dist[:,None].tile(1,3))[...,None].tile(1,1,params['log_scales'].shape[2])
-        params['logit_opacities'] = (opacities[mask])[...,None].tile(1,1,params['logit_opacities'].shape[2])
-    else:
-        params['unnorm_rotations'] = rots[mask]
-        params['log_scales'] = scales_norm[mask]*mean3_sq_dist[:,None].tile(1,3)
-        params['logit_opacities'] = opacities[mask]
+#     # im,radius,_ = Renderer(raster_settings=cam)(**rendervar)
+#     # plt.imshow(im.permute(1,2,0).cpu().detach())  
+#     # plt.title('Before grn_init')         
+#     # plt.show() 
+#     # If we use simple deformations, rotations and scales will have shape [C x Num_gaussians x num_frames],
+#     # We need to apply the GRN inialization to each timestep
+#     if len(params['unnorm_rotations'].shape) ==3:
+#         params['unnorm_rotations'] = (rots[mask])[...,None].tile(1,1,params['unnorm_rotations'].shape[2])
+#         params['log_scales'] = (scales_norm[mask]*mean3_sq_dist[:,None].tile(1,3))[...,None].tile(1,1,params['log_scales'].shape[2])
+#         params['logit_opacities'] = (opacities[mask])[...,None].tile(1,1,params['logit_opacities'].shape[2])
+#     else:
+#         params['unnorm_rotations'] = rots[mask]
+#         params['log_scales'] = scales_norm[mask]*mean3_sq_dist[:,None].tile(1,3)
+#         params['logit_opacities'] = opacities[mask]
     
 
-    # local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(params,0,False,5,'simple')
-    # rendervar = transformed_GRNparams2rendervar(params,local_means,local_rots,local_scales,local_opacities,local_colors)    
+#     # local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(params,0,False,5,'simple')
+#     # rendervar = transformed_GRNparams2rendervar(params,local_means,local_rots,local_scales,local_opacities,local_colors)    
 
-    # im,radius,_ = Renderer(raster_settings=cam)(**rendervar)
-    # plt.imshow(im.permute(1,2,0).cpu().detach())  
-    # plt.title('After grn_init')         
-    # plt.show() 
-    return params
+#     # im,radius,_ = Renderer(raster_settings=cam)(**rendervar)
+#     # plt.imshow(im.permute(1,2,0).cpu().detach())  
+#     # plt.title('After grn_init')         
+#     # plt.show() 
+#     return params
 
 def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_radius_depth_ratio, mean_sq_dist_method, densify_dataset=None, use_simplification=True,use_gt_depth = True,
                               use_deforms=True,deform_type='gaussian',nr_basis = 10,use_distributed_biases = False,total_timescale=None,use_grn=False,grn_model=None,
@@ -499,21 +505,27 @@ def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_rad
     # Initialize Parameters
 
   
-    params, variables = initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification,use_deforms=use_deforms,deform_type=deform_type,nr_basis = nr_basis,use_distributed_biases=use_distributed_biases,total_timescale=total_timescale,cam = cam,random_initialization=random_initialization,init_scale=init_scale)
+    params_list, variables = initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification,use_deforms=use_deforms,deform_type=deform_type,nr_basis = nr_basis,use_distributed_biases=use_distributed_biases,total_timescale=total_timescale,cam = cam,random_initialization=random_initialization,init_scale=init_scale)
 
     
     
     
     if use_grn:
-        params = grn_initialization(grn_model,params,init_pt_cld,mean3_sq_dist,color,depth,cam = cam)
+        if isinstance(params_list,list):
+            params = grn_initialization(grn_model,params_list[0],init_pt_cld,mean3_sq_dist,color,depth,cam = cam)
+            params_list = [params for _ in range(num_frames)]
+        else:
+            params = grn_initialization(grn_model,params_list,init_pt_cld,mean3_sq_dist,color,depth,cam = cam)
+            params_list = params
+
 
     # Initialize an estimate of scene radius for Gaussian-Splatting Densification
     variables['scene_radius'] = torch.max(depth)/scene_radius_depth_ratio # NOTE: change_here
 
     if densify_dataset is not None:
-        return params, variables, intrinsics, w2c, cam, densify_intrinsics, densify_cam
+        return params_list, variables, intrinsics, w2c, cam, densify_intrinsics, densify_cam
     else:
-        return params, variables, intrinsics, w2c, cam
+        return params_list, variables, intrinsics, w2c, cam
     
 def align_shift_and_scale(gt_disp, pred_disp,mask):
     ssum = torch.sum(mask, (1, 2))
@@ -536,7 +548,7 @@ def align_shift_and_scale(gt_disp, pred_disp,mask):
     gt_disp_aligned = gt_disp_aligned.view(gt_disp.shape[0],gt_disp.shape[1],gt_disp.shape[2])
     return  gt_disp_aligned, pred_disp_aligned,t_gt, s_gt, t_pred, s_pred
 
-def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_for_loss, 
+def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_weights, use_sil_for_loss, 
              sil_thres, use_l1,ignore_outlier_depth_loss, tracking=False, 
              mapping=False, do_ba=False, plot_dir=None, visualize_tracking_loss=False, tracking_iteration=None,use_gt_depth = True,gaussian_deformations = True,save_idx=0,
              use_grn = False,deformation_type = 'gaussian'):
@@ -597,7 +609,10 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     # online_render(curr_data, iter_time_idx, rendervar, dev_use_controller=False)
         
     # RGB Rendering
-    rendervar['means2D'].retain_grad()
+    try:
+        rendervar['means2D'].retain_grad()
+    except:
+        pass
     im, radius, _ = Renderer(raster_settings=curr_data['cam'])(**rendervar)
     variables['means2D'] = rendervar['means2D'] # Gradient only accum from colour render for densification
     # plt.imshow(im.permute(1,2,0).cpu().detach())
@@ -718,7 +733,8 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     if tracking and gaussian_deformations and deformation_type == 'gaussian':
         losses['deform'] = torch.sum(torch.square(params['means3D']-local_means))/params['means3D'].shape[0]
     elif tracking and gaussian_deformations and deformation_type == 'simple': 
-        losses['deform'] = torch.sum(torch.square(params['means3D'][...,0]-local_means))/params['means3D'].shape[0]
+        nr_initial_gauss = params_initial['means3D'].shape[0]
+        losses['deform'] = torch.sum(torch.square(params_initial['means3D']-local_means[:nr_initial_gauss]))/nr_initial_gauss
 
 
     weighted_losses = {k: v * loss_weights[k] for k, v in losses.items()}
@@ -732,134 +748,134 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     return loss, variables, weighted_losses
 
 
-def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis = 10,use_distributed_biases = False, total_timescale = None,use_deform = True,deform_type = 'gaussian',num_frames = 1,
-                            random_initialization = False,init_scale = 0.1):
-    num_pts = new_pt_cld.shape[0]
-    means3D = new_pt_cld[:, :3] # [num_gaussians, 3]
-    unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1)) # [num_gaussians, 3]
-    logit_opacities = torch.ones((num_pts, 1), dtype=torch.float, device="cuda") * 0.5
-    if not random_initialization:
-        params = {
-            'means3D': means3D,
-            'rgb_colors': new_pt_cld[:, 3:6],
-            'unnorm_rotations': torch.tensor(unnorm_rots,dtype=torch.float).cuda(),
-            'logit_opacities': logit_opacities,
-            'log_scales': torch.tile(torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 1 if use_simplification else 3)),
-        }
-    else:
-        params = {
-            'means3D': means3D,
-            'rgb_colors': new_pt_cld[:, 3:6],
-            'unnorm_rotations': torch.zeros_like(torch.tensor(unnorm_rots),dtype=torch.float).cuda(),
-            'logit_opacities': logit_opacities,
-            'log_scales': torch.ones_like(torch.tensor(means3D),dtype=torch.float).cuda()*init_scale,
-        }
-    # print(f'num pts {num_pts}')
-    if use_deform and deform_type == 'gaussian':
-        params = initialize_deformations(params,nr_basis = nr_basis,use_distributed_biases=use_distributed_biases,total_timescale = total_timescale)
-    elif use_deform and deform_type == 'simple':
-        params = initialize_simple_deformations(params,num_frames)
-    if not use_simplification:
-        params['feature_rest'] = torch.zeros(num_pts, 45) # set SH degree 3 fixed
-    for k, v in params.items():
-        # Check if value is already a torch tensor
-        if not isinstance(v, torch.Tensor):
-            params[k] = torch.nn.Parameter(torch.tensor(v).cuda().float().contiguous().requires_grad_(True))
-        else:
-            params[k] = torch.nn.Parameter(v.cuda().float().contiguous().requires_grad_(True))
+# def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis = 10,use_distributed_biases = False, total_timescale = None,use_deform = True,deform_type = 'gaussian',num_frames = 1,
+#                             random_initialization = False,init_scale = 0.1):
+#     num_pts = new_pt_cld.shape[0]
+#     means3D = new_pt_cld[:, :3] # [num_gaussians, 3]
+#     unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1)) # [num_gaussians, 3]
+#     logit_opacities = torch.ones((num_pts, 1), dtype=torch.float, device="cuda") * 0.5
+#     if not random_initialization:
+#         params = {
+#             'means3D': means3D,
+#             'rgb_colors': new_pt_cld[:, 3:6],
+#             'unnorm_rotations': torch.tensor(unnorm_rots,dtype=torch.float).cuda(),
+#             'logit_opacities': logit_opacities,
+#             'log_scales': torch.tile(torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 1 if use_simplification else 3)),
+#         }
+#     else:
+#         params = {
+#             'means3D': means3D,
+#             'rgb_colors': new_pt_cld[:, 3:6],
+#             'unnorm_rotations': torch.zeros_like(torch.tensor(unnorm_rots),dtype=torch.float).cuda(),
+#             'logit_opacities': logit_opacities,
+#             'log_scales': torch.ones_like(torch.tensor(means3D),dtype=torch.float).cuda()*init_scale,
+#         }
+#     # print(f'num pts {num_pts}')
+#     if use_deform and deform_type == 'gaussian':
+#         params = initialize_deformations(params,nr_basis = nr_basis,use_distributed_biases=use_distributed_biases,total_timescale = total_timescale)
+#     # elif use_deform and deform_type == 'simple':
+#     #     params = initialize_simple_deformations(params,num_frames)
+#     if not use_simplification:
+#         params['feature_rest'] = torch.zeros(num_pts, 45) # set SH degree 3 fixed
+#     for k, v in params.items():
+#         # Check if value is already a torch tensor
+#         if not isinstance(v, torch.Tensor):
+#             params[k] = torch.nn.Parameter(torch.tensor(v).cuda().float().contiguous().requires_grad_(True))
+#         else:
+#             params[k] = torch.nn.Parameter(v.cuda().float().contiguous().requires_grad_(True))
 
-    return params
+#     return params
 
 
-def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq_dist_method, use_simplification=True,
-                      nr_basis = 10,use_distributed_biases = False,total_timescale = None,use_grn=False,grn_model=None,
-                      use_deform = True,deformation_type = 'gaussian',num_frames = 1,
-                      random_initialization=False,init_scale=0.1,cam = None):
-    # Silhouette Rendering
-    if use_deform == True:
-        local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(params,time_idx,True,deformation_type =deformation_type)
-    else:
-        local_means = params['means3D']
-        local_rots = params['unnorm_rotations']
-        local_scales = params['log_scales']
-        local_opacities = params['logit_opacities']
-        local_colors = params['rgb_colors']
+# def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq_dist_method, use_simplification=True,
+#                       nr_basis = 10,use_distributed_biases = False,total_timescale = None,use_grn=False,grn_model=None,
+#                       use_deform = True,deformation_type = 'gaussian',num_frames = 1,
+#                       random_initialization=False,init_scale=0.1,cam = None):
+#     # Silhouette Rendering
+#     if use_deform == True:
+#         local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(params,time_idx,True,deformation_type =deformation_type)
+#     else:
+#         local_means = params['means3D']
+#         local_rots = params['unnorm_rotations']
+#         local_scales = params['log_scales']
+#         local_opacities = params['logit_opacities']
+#         local_colors = params['rgb_colors']
     
-    transformed_pts = transform_to_frame(local_means,params, time_idx, gaussians_grad=False, camera_grad=False)
-    if not use_grn:
-        depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
-                                                                    transformed_pts,local_rots,local_scales,local_opacities)
-    else:
-        depth_sil_rendervar = transformed_GRNparams2depthplussilhouette(params, curr_data['w2c'],
-                                                                    transformed_pts,local_rots,local_scales,local_opacities)
-    depth_sil, _, _ = Renderer(raster_settings=curr_data['cam'])(**depth_sil_rendervar)
-    silhouette = depth_sil[1, :, :]
-    non_presence_sil_mask = (silhouette < sil_thres)
-    # Check for new foreground objects by using GT depth
-    gt_depth = curr_data['depth'][0, :, :]
-    gt_depth = (gt_depth-gt_depth.min())/(gt_depth.max()-gt_depth.min())*10+0.01
+#     transformed_pts = transform_to_frame(local_means,params, time_idx, gaussians_grad=False, camera_grad=False)
+#     if not use_grn:
+#         depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
+#                                                                     transformed_pts,local_rots,local_scales,local_opacities)
+#     else:
+#         depth_sil_rendervar = transformed_GRNparams2depthplussilhouette(params, curr_data['w2c'],
+#                                                                     transformed_pts,local_rots,local_scales,local_opacities)
+#     depth_sil, _, _ = Renderer(raster_settings=curr_data['cam'])(**depth_sil_rendervar)
+#     silhouette = depth_sil[1, :, :]
+#     non_presence_sil_mask = (silhouette < sil_thres)
+#     # Check for new foreground objects by using GT depth
+#     gt_depth = curr_data['depth'][0, :, :]
+#     gt_depth = (gt_depth-gt_depth.min())/(gt_depth.max()-gt_depth.min())*10+0.01
     
 
 
-    render_depth = depth_sil[0, :, :]
-    depth_error = torch.abs(gt_depth - render_depth) * (gt_depth > 0)
-    non_presence_depth_mask = (render_depth > gt_depth) * (depth_error > 20*depth_error.mean())
-    # Determine non-presence mask
-    non_presence_mask = non_presence_sil_mask | non_presence_depth_mask
-    # Flatten mask
-    non_presence_mask = non_presence_mask.reshape(-1)
+#     render_depth = depth_sil[0, :, :]
+#     depth_error = torch.abs(gt_depth - render_depth) * (gt_depth > 0)
+#     non_presence_depth_mask = (render_depth > gt_depth) * (depth_error > 20*depth_error.mean())
+#     # Determine non-presence mask
+#     non_presence_mask = non_presence_sil_mask | non_presence_depth_mask
+#     # Flatten mask
+#     non_presence_mask = non_presence_mask.reshape(-1)
 
-    # Get the new frame Gaussians based on the Silhouette
-    if torch.sum(non_presence_mask) > 0:
+#     # Get the new frame Gaussians based on the Silhouette
+#     if torch.sum(non_presence_mask) > 0:
 
 
-        # depth_diff = torch.abs(gt_depth - depth_sil[0, :, :])
-        # fig,ax = plt.subplots(1,3)
-        # im0 = ax[0].imshow(gt_depth.squeeze().cpu().detach())
-        # ax[0].set_title('GT depth')
-        # im1 = ax[1].imshow(depth_sil[0].squeeze().cpu().detach())
-        # ax[1].set_title('Rendered depth')
-        # im2 = ax[2].imshow(depth_diff.squeeze().cpu().detach())
-        # ax[2].set_title('Depth diff')
-        # plt.colorbar(im0,ax = ax[0])
-        # plt.colorbar(im1,ax = ax[1])
-        # plt.colorbar(im2,ax = ax[2])
-        # plt.show()
-        # Get the new pointcloud in the world frame
-        curr_cam_rot = torch.nn.functional.normalize(params['cam_unnorm_rots'][..., time_idx].detach())
-        curr_cam_tran = params['cam_trans'][..., time_idx].detach()
-        curr_w2c = torch.eye(4).cuda().float()
-        curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
-        curr_w2c[:3, 3] = curr_cam_tran
-        valid_depth_mask = (curr_data['depth'][0, :, :] > 0) & (curr_data['depth'][0, :, :] < 1e10)
-        non_presence_mask = non_presence_mask & valid_depth_mask.reshape(-1)
-        valid_color_mask = energy_mask(curr_data['im']).squeeze()
-        non_presence_mask = non_presence_mask & valid_color_mask.reshape(-1)        
-        new_pt_cld, mean3_sq_dist = get_pointcloud(curr_data['im'], curr_data['depth'], curr_data['intrinsics'], 
-                                    curr_w2c, mask=non_presence_mask, compute_mean_sq_dist=True,
-                                    mean_sq_dist_method=mean_sq_dist_method)
-        new_params = initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis = nr_basis,use_distributed_biases=use_distributed_biases,total_timescale = total_timescale,use_deform = use_deform,deform_type=deformation_type,
-                                            num_frames = num_frames,random_initialization=random_initialization,init_scale=init_scale)
-        if use_grn:
-            new_params = grn_initialization(grn_model,new_params,new_pt_cld,mean3_sq_dist,curr_data['im'],curr_data['depth'],non_presence_mask,cam = cam)
+#         # depth_diff = torch.abs(gt_depth - depth_sil[0, :, :])
+#         # fig,ax = plt.subplots(1,3)
+#         # im0 = ax[0].imshow(gt_depth.squeeze().cpu().detach())
+#         # ax[0].set_title('GT depth')
+#         # im1 = ax[1].imshow(depth_sil[0].squeeze().cpu().detach())
+#         # ax[1].set_title('Rendered depth')
+#         # im2 = ax[2].imshow(depth_diff.squeeze().cpu().detach())
+#         # ax[2].set_title('Depth diff')
+#         # plt.colorbar(im0,ax = ax[0])
+#         # plt.colorbar(im1,ax = ax[1])
+#         # plt.colorbar(im2,ax = ax[2])
+#         # plt.show()
+#         # Get the new pointcloud in the world frame
+#         curr_cam_rot = torch.nn.functional.normalize(params['cam_unnorm_rots'][..., time_idx].detach())
+#         curr_cam_tran = params['cam_trans'][..., time_idx].detach()
+#         curr_w2c = torch.eye(4).cuda().float()
+#         curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
+#         curr_w2c[:3, 3] = curr_cam_tran
+#         valid_depth_mask = (curr_data['depth'][0, :, :] > 0) & (curr_data['depth'][0, :, :] < 1e10)
+#         non_presence_mask = non_presence_mask & valid_depth_mask.reshape(-1)
+#         valid_color_mask = energy_mask(curr_data['im']).squeeze()
+#         non_presence_mask = non_presence_mask & valid_color_mask.reshape(-1)        
+#         new_pt_cld, mean3_sq_dist = get_pointcloud(curr_data['im'], curr_data['depth'], curr_data['intrinsics'], 
+#                                     curr_w2c, mask=non_presence_mask, compute_mean_sq_dist=True,
+#                                     mean_sq_dist_method=mean_sq_dist_method)
+#         new_params = initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis = nr_basis,use_distributed_biases=use_distributed_biases,total_timescale = total_timescale,use_deform = use_deform,deform_type=deformation_type,
+#                                             num_frames = num_frames,random_initialization=random_initialization,init_scale=init_scale)
+#         if use_grn:
+#             new_params = grn_initialization(grn_model,new_params,new_pt_cld,mean3_sq_dist,curr_data['im'],curr_data['depth'],non_presence_mask,cam = cam)
 
-        # Adding new params happens to all timesteps due to construction of tensors, but they only need to be added to current and future timesteps,
-        # Therefore means,scales and rotations are set to 0 for previous timesteps
-        mask = torch.ones((1,1,new_params['means3D'].shape[-1]),device="cuda")
-        mask[0,0,time_idx-1:] = 0
-
-        for k, v in new_params.items():
-            if k == 'logit_opacities':
-                params[k] = torch.nn.Parameter(torch.cat((params[k], v*mask), dim=0).requires_grad_(True))
-            else:
-                params[k] = torch.nn.Parameter(torch.cat((params[k], v), dim=0).requires_grad_(True))
-        num_pts = params['means3D'].shape[0]
-        variables['means2D_gradient_accum'] = torch.zeros(num_pts, device="cuda").float()
-        variables['denom'] = torch.zeros(num_pts, device="cuda").float()
-        variables['max_2D_radius'] = torch.zeros(num_pts, device="cuda").float()
-        new_timestep = time_idx*torch.ones(new_pt_cld.shape[0],device="cuda").float()
-        variables['timestep'] = torch.cat((variables['timestep'], new_timestep),dim=0)
-    return params, variables
+#         # # Adding new params happens to all timesteps due to construction of tensors, but they only need to be added to current and future timesteps,
+#         # # Therefore means,scales and rotations are set to 0 for previous timesteps
+#         # mask = torch.ones((1,1,new_params['means3D'].shape[-1]),device="cuda")
+#         # mask[0,0,time_idx-1:] = 0
+#         params_iter = params
+#         for k, v in new_params.items():
+#             # if k == 'logit_opacities':
+#             #     params[k] = torch.nn.Parameter(torch.cat((params[k], v), dim=0).requires_grad_(True))
+#             # else:
+#             params_iter[k] = torch.nn.Parameter(torch.cat((params_iter[k], v), dim=0).requires_grad_(True))
+#         num_pts = params_iter['means3D'].shape[0]
+#         variables['means2D_gradient_accum'] = torch.zeros(num_pts, device="cuda").float()
+#         variables['denom'] = torch.zeros(num_pts, device="cuda").float()
+#         variables['max_2D_radius'] = torch.zeros(num_pts, device="cuda").float()
+#         new_timestep = time_idx*torch.ones(new_pt_cld.shape[0],device="cuda").float()
+#         variables['timestep'] = torch.cat((variables['timestep'], new_timestep),dim=0)
+#     return params_iter, variables
 
 
 def initialize_camera_pose(params, curr_time_idx, forward_prop):
@@ -883,7 +899,7 @@ def initialize_camera_pose(params, curr_time_idx, forward_prop):
     
     return params
 
-def optimize_initialization(params,curr_data,num_iters_initialization,variables,iter_time_idx,config):
+def optimize_initialization(params,params_init,curr_data,num_iters_initialization,variables,iter_time_idx,config):
     optimizer = initialize_optimizer(params,config['GRN']['random_initialization_lrs'])
     iter = 0
     save_idx = 0
@@ -897,8 +913,8 @@ def optimize_initialization(params,curr_data,num_iters_initialization,variables,
     progress_bar = tqdm(range(num_iters_initialization), desc=f"Initial optimization")
 
     while True:
-        loss, variables, losses = get_loss(params, curr_data, variables, iter_time_idx, config['tracking']['loss_weights'],
-                    config['tracking']['use_sil_for_loss'], config['GRN']['sil_thres'],
+        loss, variables, losses = get_loss(params, params_init,curr_data, variables, iter_time_idx, config['tracking']['loss_weights'],
+                    config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
                     config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True,
                     visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
                     tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=None,gaussian_deformations=config['deforms']['use_deformations'],
@@ -1044,8 +1060,6 @@ def rgbd_slam(config: dict):
     num_frames = dataset_config["num_frames"]
     if num_frames == -1:
         num_frames = dataset.end
-        # print(dataset.end)
-
 
     if dataset_config["train_or_test"] == 'train': # kind of ill implementation here. train_or_test should be 'all' or 'train'. If 'test', you view test set as full dataset.
         eval_dataset = get_dataset(
@@ -1256,21 +1270,31 @@ def rgbd_slam(config: dict):
 
     # Iterate over Scan
     for time_idx in tqdm(range(checkpoint_time_idx, num_frames)): 
-        
-        # If we are in one of the eval frames, copy the current parameters to the next timestep and continue with the next timestep (no optimization takes place in these frames)
         if time_idx in dataset.eval_idx:
             with torch.no_grad():
             # Copy current (deformed) parameters to next time step
-                params['means3D'][..., time_idx+1] = params['means3D'][..., time_idx]
-                params['unnorm_rotations'][..., time_idx+1] = params['unnorm_rotations'][..., time_idx]
-                params['log_scales'][..., time_idx+1] = params['log_scales'][..., time_idx]
-                params['logit_opacities'][..., time_idx+1] = params['logit_opacities'][..., time_idx]
-                params['rgb_colors'][..., time_idx+1] = params['rgb_colors'][..., time_idx]
-                params['cam_unnorm_rots'][...,time_idx+1] = params['cam_unnorm_rots'][...,time_idx]
-                params['cam_trans'][...,time_idx+1] = params['cam_trans'][...,time_idx]
-            continue
+                # params['means3D'][..., time_idx+1] = params['means3D'][..., time_idx]
+                # params['unnorm_rotations'][..., time_idx+1] = params['unnorm_rotations'][..., time_idx]
+                # params['log_scales'][..., time_idx+1] = params['log_scales'][..., time_idx]
+                # params['logit_opacities'][..., time_idx+1] = params['logit_opacities'][..., time_idx]
+                # params['rgb_colors'][..., time_idx+1] = params['rgb_colors'][..., time_idx]
+                params_iter = params[time_idx]
+
+                # params[time_idx+1] = params[time_idx]
+                params_iter['cam_unnorm_rots'][...,time_idx] = params_iter['cam_unnorm_rots'][...,time_idx-1]
+                params_iter['cam_trans'][...,time_idx] = params_iter['cam_trans'][...,time_idx-1]
+                params[time_idx+1] = params_iter
+            continue    
+        if isinstance(params,list):
+            params_iter = params[time_idx]
+            params_init = params[0]
+        else:
+            params_iter = params
+            params_init = params
         # timer.lap("iterating over frame "+str(time_idx), 0)
-        
+    
+
+
         print() # always show global iteration
         # Load RGBD frames incrementally instead of all frames
         color, gt_depth, _, gt_pose = dataset[time_idx]
@@ -1327,31 +1351,31 @@ def rgbd_slam(config: dict):
         
         # Initialize the camera pose for the current frame
         if time_idx > 0:
-            params = initialize_camera_pose(params, time_idx, forward_prop=config['tracking']['forward_prop'])
+            params_iter = initialize_camera_pose(params_iter, time_idx, forward_prop=config['tracking']['forward_prop'])
 
         # timer.lap("initialized data", 1)
         # If gaussians are randomly initialized, we need to optimize them enough to be able to perform tracking
         num_iters_initialization = config['GRN']['num_iters_initialization']
         if time_idx == 0:
             if config['GRN']['random_initialization']:        
-                params = optimize_initialization(params,curr_data,num_iters_initialization,variables,iter_time_idx,config)
+                params_iter = optimize_initialization(params_iter, params_init,curr_data,num_iters_initialization,variables,iter_time_idx,config)
         # Tracking
         tracking_start_time = time.time()
         save_idx = 0
         if time_idx > 0 and not config['tracking']['use_gt_poses']:
             # Reset Optimizer & Learning Rates for tracking
-            optimizer = initialize_optimizer(params, config['tracking']['lrs'])
+            optimizer = initialize_optimizer(params_iter, config['tracking']['lrs'])
             # Keep Track of Best Candidate Rotation & Translation
-            candidate_cam_unnorm_rot = params['cam_unnorm_rots'][..., time_idx].detach().clone()
-            candidate_cam_tran = params['cam_trans'][..., time_idx].detach().clone()
+            candidate_cam_unnorm_rot = params_iter['cam_unnorm_rots'][..., time_idx].detach().clone()
+            candidate_cam_tran = params_iter['cam_trans'][..., time_idx].detach().clone()
             if config['deforms']['use_deformations'] and config['deforms']['deform_type'] == 'gaussian':
-                candidate_deform_biases = params['deform_biases']
-                candidate_deform_weights = params['deform_weights']
-                candidate_deform_stds = params['deform_stds']
+                candidate_deform_biases = params_iter['deform_biases']
+                candidate_deform_weights = params_iter['deform_weights']
+                candidate_deform_stds = params_iter['deform_stds']
             elif config['deforms']['use_deformations'] and config['deforms']['deform_type'] == 'simple':
-                candidate_means3D = params['means3D'][...,time_idx].detach().clone()
-                candidate_unnorm_rots = params['unnorm_rotations'][...,time_idx].detach().clone()
-                candidate_log_scales = params['log_scales'][...,time_idx].detach().clone()
+                candidate_means3D = params_iter['means3D'].detach().clone()
+                candidate_unnorm_rots = params_iter['unnorm_rotations'].detach().clone()
+                candidate_log_scales = params_iter['log_scales'].detach().clone()
             current_min_loss = float(1e20)
             # Tracking Optimization
             iter = 0
@@ -1362,7 +1386,7 @@ def rgbd_slam(config: dict):
             while True:
                 iter_start_time = time.time()
                 # Loss for current frame
-                loss, variables, losses = get_loss(params, tracking_curr_data, variables, iter_time_idx, config['tracking']['loss_weights'],
+                loss, variables, losses = get_loss(params_iter,params_init, tracking_curr_data, variables, iter_time_idx, config['tracking']['loss_weights'],
                                                    config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
                                                    plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
@@ -1391,19 +1415,19 @@ def rgbd_slam(config: dict):
                     # params['deform_stds'].remove_hook()
                     if loss < current_min_loss:
                         current_min_loss = loss
-                        candidate_cam_unnorm_rot = params['cam_unnorm_rots'][..., time_idx].detach().clone()
-                        candidate_cam_tran = params['cam_trans'][..., time_idx].detach().clone()
+                        candidate_cam_unnorm_rot = params_iter['cam_unnorm_rots'][..., time_idx].detach().clone()
+                        candidate_cam_tran = params_iter['cam_trans'][..., time_idx].detach().clone()
                         if config['deforms']['use_deformations'] and config['deforms']['deform_type'] == 'gaussian':
-                            candidate_deform_biases = params['deform_biases']
-                            candidate_deform_weights = params['deform_weights']
-                            candidate_deform_stds = params['deform_stds']
+                            candidate_deform_biases = params_iter['deform_biases']
+                            candidate_deform_weights = params_iter['deform_weights']
+                            candidate_deform_stds = params_iter['deform_stds']
                         elif config['deforms']['use_deformations'] and config['deforms']['deform_type'] == 'simple':
-                            candidate_means3D = params['means3D'][...,time_idx].detach().clone()
-                            candidate_unnorm_rots = params['unnorm_rotations'][...,time_idx].detach().clone()
-                            candidate_log_scales = params['log_scales'][...,time_idx].detach().clone()
+                            candidate_means3D = params_iter['means3D'].detach().clone()
+                            candidate_unnorm_rots = params_iter['unnorm_rotations'].detach().clone()
+                            candidate_log_scales = params_iter['log_scales'].detach().clone()
                     # Report Progress
                     if config['report_iter_progress']:
-                        report_progress(params, tracking_curr_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True)
+                        report_progress(params_iter, tracking_curr_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True)
                     else:
                         progress_bar.update(1)
                 # Update the runtime numbers
@@ -1425,16 +1449,16 @@ def rgbd_slam(config: dict):
             progress_bar.close()
             # Copy over the best candidate rotation & translation
             with torch.no_grad():
-                params['cam_unnorm_rots'][..., time_idx] = candidate_cam_unnorm_rot
-                params['cam_trans'][..., time_idx] = candidate_cam_tran
+                params_iter['cam_unnorm_rots'][..., time_idx] = candidate_cam_unnorm_rot
+                params_iter['cam_trans'][..., time_idx] = candidate_cam_tran
                 if config['deforms']['use_deformations'] and config['deforms']['deform_type'] == 'gaussian':
-                    params['deform_biases'] = candidate_deform_biases
-                    params['deform_weights'] = candidate_deform_weights
-                    params['deform_stds'] = candidate_deform_stds
+                    params_iter['deform_biases'] = candidate_deform_biases
+                    params_iter['deform_weights'] = candidate_deform_weights
+                    params_iter['deform_stds'] = candidate_deform_stds
                 elif config['deforms']['use_deformations'] and config['deforms']['deform_type'] == 'simple':
-                    params['means3D'][...,time_idx] = candidate_means3D
-                    params['unnorm_rotations'][...,time_idx] = candidate_unnorm_rots
-                    params['log_scales'][...,time_idx] = candidate_log_scales
+                    params_iter['means3D'] = candidate_means3D
+                    params_iter['unnorm_rotations'] = candidate_unnorm_rots
+                    params_iter['log_scales'] = candidate_log_scales
 
         elif time_idx > 0 and config['tracking']['use_gt_poses']:
             with torch.no_grad():
@@ -1460,24 +1484,24 @@ def rgbd_slam(config: dict):
             invariant_depth = curr_data['depth']
             # plt.imshow(invariant_depth.squeeze().cpu().detach())
             if config['deforms']['use_deformations']:
-                local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(params,time_idx,True,deformation_type=config['deforms']['deform_type'])
+                local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(params_iter,time_idx,True,deformation_type=config['deforms']['deform_type'])
             else:
-                local_means = params['means3D']
-                local_rots = params['unnorm_rots']
-                local_scales = params['log_scales']
-                local_opacities = params['logit_opacities']
-                local_colors = params['rgb_colors']
+                local_means = params_iter['means3D']
+                local_rots = params_iter['unnorm_rots']
+                local_scales = params_iter['log_scales']
+                local_opacities = params_iter['logit_opacities']
+                local_colors = params_iter['rgb_colors']
             
             # local_means = params['means3D']
             # local_rots = params['unnorm_rotations']
             # local_scales = params['log_scales']
-            transformed_pts = transform_to_frame(local_means,params, time_idx, gaussians_grad=False, camera_grad=False)
+            transformed_pts = transform_to_frame(local_means,params_iter, time_idx, gaussians_grad=False, camera_grad=False)
             # img_rendervar = transformed_params2rendervar(params,transformed_pts,local_rots,local_scales)
             if config['GRN']['use_grn']:
-                rendervar = transformed_GRNparams2depthplussilhouette(params, curr_data['w2c'],
+                rendervar = transformed_GRNparams2depthplussilhouette(params_iter, curr_data['w2c'],
                                                                      transformed_pts,local_rots,local_scales,local_opacities)
             else:
-                rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
+                rendervar = transformed_params2depthplussilhouette(params_iter, curr_data['w2c'],
                                                                     transformed_pts,local_rots,local_scales,local_opacities)
             rendered_depth,_,_ = Renderer(raster_settings=curr_data['cam'])(**rendervar)
             # im,_,_ = Renderer(raster_settings = curr_data['cam'])(**img_rendervar)
@@ -1530,7 +1554,7 @@ def rgbd_slam(config: dict):
                     # params, variables = remove_floating_gaussians(params, variables, densify_curr_data, time_idx)
                     
                     # Add new Gaussians to the scene based on the Silhouette
-                    params, variables = add_new_gaussians(params, variables, densify_curr_data, 
+                    params_iter, variables = add_new_gaussians(params_iter, variables, densify_curr_data, 
                                                         config['mapping']['sil_thres'], time_idx,
                                                         config['mean_sq_dist_method'], 
                                                         config['gaussian_simplification'],
@@ -1546,7 +1570,7 @@ def rgbd_slam(config: dict):
                                                         init_scale=config['GRN']['init_scale'],cam = cam)
                     # if config['GRN']['random_initialization']:
 
-                    post_num_pts = params['means3D'].shape[0]
+                    post_num_pts = params_iter['means3D'].shape[0]
                     added_new_gaussians.append(post_num_pts)
                 # if not config['distance_keyframe_selection']:
                 #     with torch.no_grad():
@@ -1571,12 +1595,12 @@ def rgbd_slam(config: dict):
                 #         print(f"\nSelected Keyframes at Frame {time_idx}: {selected_time_idx}")
 
                 # # Reset Optimizer & Learning Rates for Full Map Optimization
-                # optimizer = initialize_optimizer(params, config['mapping']['lrs']) 
+                optimizer = initialize_optimizer(params_iter, config['mapping']['lrs']) 
 
                 # # timer.lap("Densification Done at frame "+str(time_idx), 3)
 
                 # # Mapping
-                # mapping_start_time = time.time()
+                mapping_start_time = time.time()
                 # if num_iters_mapping > 0:
                 #     progress_bar = tqdm(range(num_iters_mapping), desc=f"Mapping Time Step: {time_idx}")
                     
@@ -1633,8 +1657,8 @@ def rgbd_slam(config: dict):
                 #     loss.backward()
                 #     with torch.no_grad():
                 #         # Prune Gaussians
-                #         if config['mapping']['prune_gaussians']:
-                #             params, variables = prune_gaussians(params, variables, optimizer, iter, config['mapping']['pruning_dict'])
+                if config['mapping']['prune_gaussians']:
+                    params_iter, variables = prune_gaussians(params_iter, variables, optimizer, time_idx, config['mapping']['pruning_dict'],config['GRN']['use_grn'])
                 #         # Gaussian-Splatting's Gradient-based Densification
                 #         if config['mapping']['use_gaussian_splatting_densification']:
                 #             params, variables = densify(params, variables, optimizer, iter, config['mapping']['densify_dict'])
@@ -1654,22 +1678,22 @@ def rgbd_slam(config: dict):
                 # if num_iters_mapping > 0:
                 #     progress_bar.close()
                 # # Update the runtime numbers
-                # mapping_end_time = time.time()
-                # mapping_frame_time_sum += mapping_end_time - mapping_start_time
-                # mapping_frame_time_count += 1
+                mapping_end_time = time.time()
+                mapping_frame_time_sum += mapping_end_time - mapping_start_time
+                mapping_frame_time_count += 1
                 num_iters_initialization = config['GRN']['num_iters_initialization_added_gaussians']
-                params = optimize_initialization(params,curr_data,num_iters_initialization,variables,iter_time_idx,config)
+                params_iter = optimize_initialization(params_iter,params_init,curr_data,num_iters_initialization,variables,iter_time_idx,config)
                 if time_idx == 0 or (time_idx+1) % config['report_global_progress_every'] == 0:
                     try:
                         # Report Mapping Progress
                         progress_bar = tqdm(range(1), desc=f"Mapping Result Time Step: {time_idx}")
                         with torch.no_grad():
-                            report_progress(params, curr_data, 1, progress_bar, time_idx, sil_thres=config['mapping']['sil_thres'], 
+                            report_progress(params_iter, curr_data, 1, progress_bar, time_idx, sil_thres=config['mapping']['sil_thres'], 
                                             mapping=True, online_time_idx=time_idx)
                         progress_bar.close()
                     except:
                         ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
-                        save_params_ckpt(params, ckpt_output_dir, time_idx)
+                        save_params_ckpt(params_iter, ckpt_output_dir, time_idx)
                         print('Failed to evaluate trajectory.')
             
             # timer.lap('Mapping Done.', 4)
@@ -1681,8 +1705,8 @@ def rgbd_slam(config: dict):
                         (time_idx == num_frames-2)) and (not torch.isinf(curr_gt_w2c[-1]).any()) and (not torch.isnan(curr_gt_w2c[-1]).any()):
                 with torch.no_grad():
                     # Get the current estimated rotation & translation
-                    curr_cam_rot = F.normalize(params['cam_unnorm_rots'][..., time_idx].detach())
-                    curr_cam_tran = params['cam_trans'][..., time_idx].detach()
+                    curr_cam_rot = F.normalize(params_iter['cam_unnorm_rots'][..., time_idx].detach())
+                    curr_cam_tran = params_iter['cam_trans'][..., time_idx].detach()
                     curr_w2c = torch.eye(4).cuda().float()
                     curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
                     curr_w2c[:3, 3] = curr_cam_tran
@@ -1695,21 +1719,49 @@ def rgbd_slam(config: dict):
         if time_idx < num_frames-1:
             with torch.no_grad():
             # Copy current (deformed) parameters to next time step
-                params['means3D'][..., time_idx+1] = params['means3D'][..., time_idx]
-                params['unnorm_rotations'][..., time_idx+1] = params['unnorm_rotations'][..., time_idx]
-                params['log_scales'][..., time_idx+1] = params['log_scales'][..., time_idx]
-                params['logit_opacities'][..., time_idx+1] = params['logit_opacities'][..., time_idx]
-                params['rgb_colors'][..., time_idx+1] = params['rgb_colors'][..., time_idx]
-                params['cam_unnorm_rots'][...,time_idx+1] = params['cam_unnorm_rots'][...,time_idx]
-                params['cam_trans'][...,time_idx+1] = params['cam_trans'][...,time_idx]
+                # params['means3D'][..., time_idx+1] = params['means3D'][..., time_idx]
+                # params['unnorm_rotations'][..., time_idx+1] = params['unnorm_rotations'][..., time_idx]
+                # params['log_scales'][..., time_idx+1] = params['log_scales'][..., time_idx]
+                # params['logit_opacities'][..., time_idx+1] = params['logit_opacities'][..., time_idx]
+                # params['rgb_colors'][..., time_idx+1] = params['rgb_colors'][..., time_idx]
+                params[time_idx+1] = params_iter
+
+                # rendervar = 
         # Checkpoint every iteration
         if time_idx % config["checkpoint_interval"] == 0 and config['save_checkpoints']:
             ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
             save_params_ckpt(params, ckpt_output_dir, time_idx)
             np.save(os.path.join(ckpt_output_dir, f"keyframe_time_indices{time_idx}.npy"), np.array(keyframe_time_indices))
         
-
+    
         torch.cuda.empty_cache()
+
+    for time_idx_plot in range(num_frames):
+        if config['deforms']['use_deformations']:
+            local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(params[time_idx_plot],time_idx_plot,True,deformation_type=config['deforms']['deform_type'])
+        else:
+            local_means = params_iter['means3D']
+            local_rots = params_iter['unnorm_rots']
+            local_scales = params_iter['log_scales']
+            local_opacities = params_iter['logit_opacities']
+            local_colors = params_iter['rgb_colors']
+        
+        # local_means = params['means3D']
+        # local_rots = params['unnorm_rotations']
+        # local_scales = params['log_scales']
+        transformed_pts = transform_to_frame(local_means,params[time_idx_plot], time_idx_plot, gaussians_grad=False, camera_grad=False)
+        # img_rendervar = transformed_params2rendervar(params,transformed_pts,local_rots,local_scales)
+        if config['GRN']['use_grn']:
+            rendervar = transformed_GRNparams2rendervar(params[time_idx_plot], 
+                                                                    transformed_pts,local_rots,local_scales,local_opacities,local_colors)
+        else:
+            rendervar = transformed_params2rendervar([time_idx_plot], 
+                                                                transformed_pts,local_rots,local_scales,local_opacities,local_colors)
+        im,_,_ = Renderer(raster_settings=curr_data['cam'])(**rendervar)
+        ii = time_idx_plot
+        img = Image.fromarray((im.permute(1,2,0).cpu().detach().numpy()*255).astype(np.uint8))
+        os.makedirs(f'./scripts/plots/final',exist_ok=True)
+        img.save(f'./scripts/plots/final/{ii}.png')
 
     # timer.end()
     plt.plot(added_new_gaussians)
@@ -1737,6 +1789,29 @@ def rgbd_slam(config: dict):
         f.write(f"Frame Time: {tracking_frame_time_avg + mapping_frame_time_avg} s\n")
     
 
+    if config['deforms']['deform_type'] == 'simple':
+        params_save = {}
+        # for time_idx in range(len(params)):
+        #     if time_idx == 0:
+        #         params_save['means3D'] = params[time_idx]['means3D'][:,:,None]
+        #         params_save['unnorm_rotations'] = params[time_idx]['unnorm_rotations'][:,:,None]
+        #         params_save['log_scales'] = params[time_idx]['log_scales'][:,:,None]
+        #         params_save['logit_opacities'] = params[time_idx]['logit_opacities'][:,:,None]
+        #         params_save['rgb_colors'] = params[time_idx]['rgb_colors'][:,:,None]
+        #     else:
+        #         params_save['means3D'] = torch.cat((params_save['means3D'], params[time_idx]['means3D'][:,:,None]), dim=2)
+        #         params_save['unnorm_rotations'] = torch.cat((params_save['unnorm_rotations'], params[time_idx]['unnorm_rotations'][:,:,None]), dim=2)
+        #         params_save['log_scales'] = torch.cat((params_save['log_scales'], params[time_idx]['log_scales'][:,:,None]), dim=2)
+        #         params_save['logit_opacities'] = torch.cat((params_save['logit_opacities'], params[time_idx]['logit_opacities'][:,:,None]), dim=2)
+        #         params_save['rgb_colors'] = torch.cat((params_save['rgb_colors'], params[time_idx]['rgb_colors'][:,:,None]), dim=2)
+        params_save['means3D'] = [params[idx]['means3D'] for idx in range(len(params))]
+        params_save['unnorm_rotations'] = [params[idx]['unnorm_rotations'] for idx in range(len(params))]
+        params_save['log_scales'] = [params[idx]['log_scales'] for idx in range(len(params))]
+        params_save['logit_opacities'] = [params[idx]['logit_opacities'] for idx in range(len(params))]
+        params_save['rgb_colors'] = [params[idx]['rgb_colors'] for idx in range(len(params))]
+        params_save['cam_unnorm_rots'] = params[time_idx]['cam_unnorm_rots']
+        params_save['cam_trans'] = params[time_idx]['cam_trans']
+        params = params_save
 
     # Add Camera Parameters to Save them
     params['timestep'] = variables['timestep']
@@ -1758,7 +1833,7 @@ def rgbd_slam(config: dict):
     dataset = [dataset, eval_dataset, 'C3VD'] if dataset_config["train_or_test"] == 'train' else dataset
     with torch.no_grad():
         eval_save(dataset, params, eval_dir, sil_thres=config['mapping']['sil_thres'],
-                mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],use_grn = config['GRN']['use_grn'])
+                mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'])
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
