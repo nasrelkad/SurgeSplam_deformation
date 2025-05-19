@@ -34,6 +34,7 @@ from utils.slam_helpers import (
     transform_to_frame, l1_loss_v1, matrix_to_quaternion,
     transformed_GRNparams2depthplussilhouette,transformed_GRNparams2rendervar,
     add_new_gaussians,grn_initialization,deform_gaussians,initialize_deformations,initialize_new_params,grn_initialization,
+    get_mask
 )
 from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, densify
 from utils.vis_utils import plot_video
@@ -47,6 +48,7 @@ from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 import matplotlib.pyplot as plt
 
 from PIL import Image
+
 
 
 
@@ -466,9 +468,13 @@ def initialize_optimizer(params, lrs_dict):
 #     # plt.show() 
 #     return params
 
+
+  
+
+
 def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_radius_depth_ratio, mean_sq_dist_method, densify_dataset=None, use_simplification=True,use_gt_depth = True,
                               use_deforms=True,deform_type='gaussian',nr_basis = 10,use_distributed_biases = False,total_timescale=None,use_grn=False,grn_model=None,
-                              random_initialization=False,init_scale=0.1):
+                              random_initialization=False,init_scale=0.1,reduce_gaussians= True,reduction_type = 'laplace',reduction_fraction = 0.8):
     # Get RGB-D Data & Camera Parameters
     # color, depth, intrinsics, pose = dataset[0]
 
@@ -494,10 +500,15 @@ def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_rad
         densify_intrinsics = intrinsics
 
     # Get Initial Point Cloud (PyTorch CUDA Tensor)
-
     mask = (depth > 0) & energy_mask(color) # Mask out invalid depth values
     # Image.fromarray(np.uint8(mask[0].detach().cpu().numpy()*255), 'L').save('mask.png')
     mask = mask.reshape(-1)
+    if reduce_gaussians:
+        mask = get_mask(mask,color,reduction_type,reduction_fraction)
+
+
+
+
     init_pt_cld, mean3_sq_dist = get_pointcloud(color, depth, densify_intrinsics, w2c, 
                                                 mask=mask, compute_mean_sq_dist=True, 
                                                 mean_sq_dist_method=mean_sq_dist_method)
@@ -512,10 +523,10 @@ def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_rad
     
     if use_grn:
         if isinstance(params_list,list):
-            params = grn_initialization(grn_model,params_list[0],init_pt_cld,mean3_sq_dist,color,depth,cam = cam)
+            params = grn_initialization(grn_model,params_list[0],init_pt_cld,mean3_sq_dist,color,depth,mask,cam = cam)
             params_list = [params for _ in range(num_frames)]
         else:
-            params = grn_initialization(grn_model,params_list,init_pt_cld,mean3_sq_dist,color,depth,cam = cam)
+            params = grn_initialization(grn_model,params_list,init_pt_cld,mean3_sq_dist,color,depth,mask,cam = cam)
             params_list = params
 
 
@@ -1172,7 +1183,10 @@ def rgbd_slam(config: dict):
                                                                             use_deforms=config['deforms']['use_deformations'],
                                                                             deform_type=config['deforms']['deform_type'],
                                                                             random_initialization=config['GRN']['random_initialization'],
-                                                                            init_scale=config['GRN']['init_scale'],)        
+                                                                            init_scale=config['GRN']['init_scale'],
+                                                                            reduce_gaussians = config['gaussian_reduction']['reduce_gaussians'],
+                                                                            reduction_type = config['gaussian_reduction']['reduction_type'],
+                                                                            reduction_fraction=config['gaussian_reduction']['reduction_fraction'] )        
         
     
     # local_means,local_rots,local_scales = deform_gaussians(params,0,False,5,'simple')
@@ -1390,7 +1404,7 @@ def rgbd_slam(config: dict):
                                                    config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
                                                    plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
-                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=None,gaussian_deformations=config['deforms']['use_deformations'],
+                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=save_idx,gaussian_deformations=config['deforms']['use_deformations'],
                                                    use_grn = config['GRN']['use_grn'],deformation_type = config['deforms']['deform_type'])
                 # print(loss)
                 save_idx = save_idx+1
@@ -1567,8 +1581,10 @@ def rgbd_slam(config: dict):
                                                         deformation_type=config['deforms']['deform_type'],
                                                         num_frames = num_frames,
                                                         random_initialization=config['GRN']['random_initialization'],
-                                                        init_scale=config['GRN']['init_scale'],cam = cam)
-                    # if config['GRN']['random_initialization']:
+                                                        init_scale=config['GRN']['init_scale'],cam = cam,
+                                                        reduce_gaussians = config['gaussian_reduction']['reduce_gaussians'],
+                                                        reduction_type = config['gaussian_reduction']['reduction_type'],
+                                                        reduction_fraction=config['gaussian_reduction']['reduction_fraction'] )                     # if config['GRN']['random_initialization']:
 
                     post_num_pts = params_iter['means3D'].shape[0]
                     added_new_gaussians.append(post_num_pts)
