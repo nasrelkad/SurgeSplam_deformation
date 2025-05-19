@@ -163,7 +163,7 @@ def inverse_sigmoid(x):
     return torch.log(x / (1 - x))
 
 
-def prune_gaussians(params, variables, optimizer, iter, prune_dict):
+def prune_gaussians(params, variables, optimizer, iter, prune_dict,use_grn):
     if iter <= prune_dict['stop_after']:
         if (iter >= prune_dict['start_after']) and (iter % prune_dict['prune_every'] == 0):
             if iter == prune_dict['stop_after']:
@@ -174,8 +174,14 @@ def prune_gaussians(params, variables, optimizer, iter, prune_dict):
             to_remove = (torch.sigmoid(params['logit_opacities']) < remove_threshold).squeeze()
             # Remove Gaussians that are too big
             if iter >= prune_dict['remove_big_after']:
-                big_points_ws = torch.exp(params['log_scales']).max(dim=1).values > 0.1 * variables['scene_radius']
+                if use_grn:
+                    big_points_ws = (params['log_scales']).max(dim=1).values > 0.1 * variables['scene_radius']
+                else:
+                    big_points_ws = torch.exp(params['log_scales']).max(dim=1).values > 0.1 * variables['scene_radius']
+                
                 to_remove = torch.logical_or(to_remove, big_points_ws)
+                if to_remove.sum() > 0:
+                    print(f"Removing {to_remove.sum()} Gaussians with big weights")
             params, variables = remove_points(to_remove, params, variables, optimizer)
             torch.cuda.empty_cache()
         

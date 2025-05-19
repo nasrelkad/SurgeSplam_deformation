@@ -9,12 +9,12 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "pulling_deform_simple_3"
+    scene_name = "pulling_deform_simple_9"
 
 map_every = 1
 keyframe_every = 8
 # mapping_window_size = 24
-tracking_iters = 50
+tracking_iters = 25
 mapping_iters = 1
 
 group_name = f"EndoNerf {scene_name}"
@@ -61,10 +61,10 @@ config = dict(
         loss_weights=dict(
             im=2.0,
             depth=0.5,
-            deform = 0
+            deform = 0.5
         ),
         lrs=dict(
-            means3D=0.02,
+            means3D=0.002,
             rgb_colors=0.0,
             unnorm_rotations=0.001,
             logit_opacities=0.0,
@@ -95,14 +95,14 @@ config = dict(
             cam_unnorm_rots=0.000,
             cam_trans=0.000,
         ),
-        prune_gaussians=False, # Prune Gaussians during Mapping
+        prune_gaussians=True, # Prune Gaussians during Mapping
         pruning_dict=dict( # Needs to be updated based on the number of mapping iterations
             start_after=0,
             remove_big_after=0,
-            stop_after=20,
-            prune_every=20,
-            removal_opacity_threshold=0.05,
-            final_removal_opacity_threshold=0.05,
+            stop_after=10000,
+            prune_every=1,
+            removal_opacity_threshold=0.1,
+            final_removal_opacity_threshold=0.1,
             reset_opacities=False,
             reset_opacities_every=int(1e10), # Doesn't consider iter 0
         ),
@@ -154,14 +154,14 @@ config = dict(
         random_initialization = False,
         init_scale = -2.5,
         num_iters_initialization = 50,
-        num_iters_initialization_added_gaussians = 10,
+        num_iters_initialization_added_gaussians = 5,
         sil_thres = 0.01,
-        model_path = 'GRN/models/GRN_v1.pth',
+        model_path = 'GRN/models/GRN_v2.pth',
         random_initialization_lrs = dict(
             means3D=0.0005,
-            rgb_colors=0.0005,
+            rgb_colors=0.0000,
             unnorm_rotations=0.0005,
-            logit_opacities=0.0005,
+            logit_opacities=0.001,
             log_scales=0.0005,
             cam_unnorm_rots=0.000,
             cam_trans=0.000,
@@ -171,5 +171,11 @@ config = dict(
         # grn_input_dim = 3,
         # grn_num_heads = 4,
         # grn_use_norm = True,
-    )         
+    ),
+    gaussian_reduction = dict(
+        reduce_gaussians = True,
+        reduction_type = 'random',
+        reduction_fraction = 0.5
+    )   
+
 )

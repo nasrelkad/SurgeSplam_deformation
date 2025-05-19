@@ -36,6 +36,7 @@ from torchvision import datasets, transforms
 from torchvision import models as torchvision_models
 import torchvision
 
+
 import random
 
 import wandb
@@ -47,10 +48,10 @@ import zipfile
 
 def get_args_parser():
     parser = argparse.ArgumentParser('GRN',add_help=False)
-    parser.add_argument('--epochs', default=5, type=int, help='Number of epochs of training.')
+    parser.add_argument('--epochs', default=50, type=int, help='Number of epochs of training.')
 
 
-    parser.add_argument('--output_dir', default="logs/GRN_6", type=str, help='Path to save logs and checkpoints.')
+    parser.add_argument('--output_dir', default="logs/GRN_8", type=str, help='Path to save logs and checkpoints.')
     # parser.add_argument('--encoder', default = 'vitb', type = str, help = 'Encoder size of the modele')
     # parser.add_argument('--encoder_path',default='models/checkpoints/dynov2/modified_vitb14_dinov2_size336.pth',type = str, help ='path to the pretrained encoder weights')
     parser.add_argument('--batch_size_per_gpu', default = 1,type = int, help = 'batch size for each GPU')
@@ -73,6 +74,7 @@ def get_args_parser():
     parser.add_argument("--dist_url", default="env://", type=str, help="""url used to set up
         distributed training; see https://pytorch.org/docs/stable/distributed.html""")
     parser.add_argument('--num_accumulation_steps', default = 50, type = int, help = 'nr of batches to use for gradient accumultation')
+    parser.add_argument('--masking_ratio', default = 0.8, type = float, help = 'Ratio of pixels to mask out for training')
     return parser
 
 
@@ -82,17 +84,17 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     global w2cs, w2ci
     # Initialize Loss Dictionary
     losses = {}
-
+    
     if tracking:
         # Get current frame Gaussians, where only the camera pose gets gradient
-        transformed_pts = transform_to_frame(params, iter_time_idx, 
+        transformed_pts = transform_to_frame(params['means3D'],params, iter_time_idx, 
                                              gaussians_grad=False,
                                              camera_grad=True)
 
     elif mapping:
         if do_ba: # Bundle Adjustment
             # Get current frame Gaussians, where both camera pose and Gaussians get gradient
-            transformed_pts = transform_to_frame(params, iter_time_idx,
+            transformed_pts = transform_to_frame(params['means3D'],params, iter_time_idx,
                                                  gaussians_grad=True,
                                                  camera_grad=True)
         else:
@@ -102,26 +104,29 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
                                                  camera_grad=False)
     else:
         # Get current frame Gaussians, where only the Gaussians get gradient
-        transformed_pts = transform_to_frame(params, iter_time_idx,
+        transformed_pts = transform_to_frame(params['means3D'],params, iter_time_idx,
                                              gaussians_grad=True,
                                              camera_grad=False)
     # print(transformed_pts.shape)
     # Initialize Render Variables
     if not GRN_input:
-        rendervar = transformed_params2rendervar(params, transformed_pts)
+        rendervar = transformed_params2rendervar(params, transformed_pts,params['unnorm_rotations'],params['log_scales'],params['logit_opacities'],params['rgb_colors'])
         depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
-                                                                    transformed_pts)
+                                                                    transformed_pts,params['unnorm_rotations'],params['log_scales'],params['logit_opacities'])
     else:
         # raise NotImplementedError('Not implemented yet')
-        rendervar = transformed_GRNparams2rendervar(params,transformed_pts)
+        rendervar = transformed_GRNparams2rendervar(params,transformed_pts,params['unnorm_rotations'],params['log_scales'],params['logit_opacities'],params['rgb_colors'])
         depth_sil_rendervar = transformed_GRNparams2depthplussilhouette(params, curr_data['w2c'],
-                                                            transformed_pts)
+                                                            transformed_pts,params['unnorm_rotations'],params['log_scales'],params['logit_opacities'])
     
     # Visualize the Rendered Images
     # online_render(curr_data, iter_time_idx, rendervar, dev_use_controller=False)
         
     # RGB Rendering
-    rendervar['means2D'].retain_grad()
+    try:
+        rendervar['means2D'].retain_grad()
+    except:
+        pass
     im, radius, _ = Renderer(raster_settings=curr_data['cam'])(**rendervar)
     variables['means2D'] = rendervar['means2D'] # Gradient only accum from colour render for densification
     if plotting:
@@ -175,7 +180,10 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     elif tracking:
         losses['im'] = torch.abs(curr_data['im'] - im).sum()
     else:
-        losses['im'] = 0.8 * l1_loss_v1(im, curr_data['im']) + 0.2 * (1.0 - calc_ssim(im, curr_data['im']))
+        im_loss =  0.8 * l1_loss_v1(im, curr_data['im']) + 0.2 * (1.0 - calc_ssim(im, curr_data['im']))
+        psnr = torch.nn.functional.mse_loss(im, curr_data['im'].squeeze(0))
+        psnr = 10*torch.log10(curr_data['im'].max()/psnr)
+        losses['im'] = im_loss-0.01*psnr
     if plotting:
         plt.imshow(curr_data['im'].permute(1,2,0).cpu().detach())
         plt.show()
@@ -191,7 +199,10 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     weighted_losses['loss'] = loss
 
     return loss, variables, weighted_losses
+# def calc_metrics_plotting(input_im,pred_im,input_depth,pred_depth):
+#     psnr
 
+#     return psnr, l1
 
 def train_surgedepth(args):
     
@@ -229,11 +240,27 @@ def train_surgedepth(args):
     datasets = ['Cholec80_video01_s0001.zip']
 
     dataset = concat_zip_datasets(args.data_path,args.depth_path,datasets=datasets,transform=transforms_train,depth_transform=transform_depth,train_student=False)
-    sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
-    dataset[0]
+    index = int(len(dataset)*0.8)
+    # dataset_train = dataset[:index]
+    # dataset_val = dataset[int(len(dataset)*0.8):]
+
+    dataset_train, dataset_val = torch.utils.data.random_split(dataset,[index,len(dataset)-index])
+
+    sampler = torch.utils.data.DistributedSampler(dataset_train, shuffle=True)
+    # dataset[0]
     data_loader = torch.utils.data.DataLoader(
-        dataset,
+        dataset_train,
         sampler = sampler,
+        batch_size = args.batch_size_per_gpu,
+        num_workers = args.num_workers,
+        pin_memory = False,
+        drop_last = True
+    )
+
+    sampler_val = torch.utils.data.DistributedSampler(dataset_val, shuffle=False)
+    data_loader_val = torch.utils.data.DataLoader(
+        dataset_val,
+        sampler = sampler_val,
         batch_size = args.batch_size_per_gpu,
         num_workers = args.num_workers,
         pin_memory = False,
@@ -286,6 +313,7 @@ def train_surgedepth(args):
     for epoch in range(start_epoch,args.epochs):
         data_loader.sampler.set_epoch(epoch)
         train_stats = train_one_epoch(args,model,data_loader=data_loader, optimizer=optimizer,criterion=criterion,epoch= epoch,render_params=render_params,inv_normalize = inv_normalize)
+        val_stats,images = val_one_epoch(args,model,data_loader=data_loader_val, optimizer=optimizer,criterion=criterion,epoch= epoch,render_params=render_params,inv_normalize = inv_normalize)
 
         save_dict = {'model': model.module.state_dict(),
                      'optimizer':optimizer.state_dict(),
@@ -295,7 +323,11 @@ def train_surgedepth(args):
         }
                
         # val_one_epoch(model,data_loader,criterion,epoch)
-        scheduler_depth.step()
+        # images = [wandb.Image(fig, caption='Top: Gt disparity, bottom: predicted disparity', mode='L')]
+        # stats_log = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+        stats_log = {'train_loss_epoch':train_stats['loss'],'val_loss_epoch':val_stats['loss'],'images_epoch':images[0]}
+        wandb.log(stats_log)
+        # stats_log['images'] = images        scheduler_depth.step()
 
         distributed_utils.save_on_master(save_dict,os.path.join(args.output_dir,'checkpoint.pth'))
         if epoch % args.save_freq ==0:
@@ -378,27 +410,42 @@ def train_one_epoch(args,model,data_loader,optimizer,criterion,epoch,render_para
         mask = depth > 0
         mask = mask.tile(1,3,1,1)
         mask = mask[0,0,:,:].reshape(-1)
+        mask_random = torch.rand(mask.shape).cuda()
+        mask_random = mask_random > args.masking_ratio
+        mask = mask & mask_random
 
         pt_cloud,mean3_sq_dist= get_pointcloud(inv_normalize(color),depth*scale,render_params['intrinsics'],render_params['w2c'],compute_mean_sq_dist=True,mask = mask)
         params,variables = initialize_params(pt_cloud,1,mean3_sq_dist)
 
 
+
+        curr_data = {'cam': render_params['cam'], 'im': inv_normalize(color), 'depth': depth*scale, 'id': 0, 'intrinsics': render_params['intrinsics'], 
+                'w2c': render_params['w2c'], 'iter_gt_w2c_list': render_params['w2c']}
+        loss_weights=dict(
+            im=1.0,
+            depth=1.0,
+        )
+        
+        loss_distance_init, _, _ = get_loss(params, curr_data, variables, 0, loss_weights,
+                                        use_sil_for_loss=True, sil_thres=0,
+                                        use_l1=True,ignore_outlier_depth_loss=True, tracking=False,mapping=True ,
+                                        plot_dir=None, visualize_tracking_loss=False,
+                                        tracking_iteration=0,GRN_input=False,plotting = False)
         output = model(input)
         # print(output)
         cols = torch.permute(output[0], (1, 2, 0)).reshape(-1, 8) # (C, H, W) -> (H, W, C) -> (H * W, C)
         rots = cols[:,:4]
 
-        scales_norm = cols[:,4:7]
+        scales_norm = (cols[:,4:7]-cols[:,4:7].min()) / (cols[:,4:7].max()-cols[:,4:7].min())
         opacities = cols[:,7][:,None]
 
         params['unnorm_rotations'] = rots[mask]
-        params['log_scales'] = scales_norm[mask]*mean3_sq_dist[:,None].tile(1,3)
+        params['log_scales'] = scales_norm[mask]*(torch.sqrt(mean3_sq_dist)[:,None].tile(1,3))
         params['logit_opacities'] = opacities[mask]
 
  
 
-        curr_data = {'cam': render_params['cam'], 'im': inv_normalize(color), 'depth': depth*scale, 'id': 0, 'intrinsics': render_params['intrinsics'], 
-                        'w2c': render_params['w2c'], 'iter_gt_w2c_list': render_params['w2c']}
+
 
         # rendervar = transformed_GRNparams2rendervar(params,params['means3D'])
         # depth_sil_rendervar = transformed_GRNparams2depthplussilhouette(params, curr_data['w2c'],
@@ -415,10 +462,7 @@ def train_one_epoch(args,model,data_loader,optimizer,criterion,epoch,render_para
         # depth_loss = torch.abs(curr_data['depth'] - depth_pred[0,:,:])[mask_loss].sum()/mask_loss.sum()
         # loss = img_loss+5*depth_loss
         # print(loss)
-        loss_weights=dict(
-            im=1.0,
-            depth=0.002,
-        )
+
         loss, _, _ = get_loss(params, curr_data, variables, 0, loss_weights,
                             use_sil_for_loss=True, sil_thres=0,
                             use_l1=True,ignore_outlier_depth_loss=True, tracking=False,mapping=True ,
@@ -428,7 +472,7 @@ def train_one_epoch(args,model,data_loader,optimizer,criterion,epoch,render_para
         loss = loss/args.num_accumulation_steps
         loss.backward()
 
-        if ((it+1)%args.num_accumulation_steps == 0) or (it+1 ==x len(data_loader)):
+        if ((it+1)%args.num_accumulation_steps == 0) or (it+1 == len(data_loader)):
             optimizer.step()
             optimizer.zero_grad()
 
@@ -448,25 +492,52 @@ def train_one_epoch(args,model,data_loader,optimizer,criterion,epoch,render_para
 
         # # ~~~~~~~~~~~~~~~~~~~~~~~~~~~ SOME WANDB LOGGING ~~~~~~~~~~~~~~~~~~~~~~~~~~~
         with torch.no_grad():
-            if it % args.logging_interval ==0: # Log every 10th batch
+            if it  ==len(data_loader)-1: # Log every 10th batch
                 if args.rank ==0:
+                    
+                    
 
-                    rendervar = transformed_GRNparams2rendervar(params,params['means3D'])
-                    depth_sil_rendervar = transformed_GRNparams2depthplussilhouette(params, render_params['w2c'],
-                                                                    params['means3D'])
+
+                    rendervar = transformed_GRNparams2rendervar(params,params['means3D'],params['unnorm_rotations'],params['log_scales'],params['logit_opacities'],params['rgb_colors'])
+                    depth_sil_rendervar = transformed_GRNparams2depthplussilhouette(params, curr_data['w2c'],
+                                                                        params['means3D'],params['unnorm_rotations'],params['log_scales'],params['logit_opacities'])
+
+                    params_dist_plot,variables = initialize_params(pt_cloud,1,mean3_sq_dist)
+                    rendervar_dist = transformed_params2rendervar(params_dist_plot, params_dist_plot['means3D'],params_dist_plot['unnorm_rotations'],params_dist_plot['log_scales'],params_dist_plot['logit_opacities'],params_dist_plot['rgb_colors'])
+                    depth_sil_rendervar_dist = transformed_params2depthplussilhouette(params_dist_plot, curr_data['w2c'],
+                                                                                params_dist_plot['means3D'],params_dist_plot['unnorm_rotations'],params_dist_plot['log_scales'],params_dist_plot['logit_opacities'])
                     # ~~~~~~~~~~~~~~~~~~~~~~~~~~~ render gaussians ~~~~~~~~~~~~~~~~~~~~~~~~~~~
                     im_pred, radius, _ = Renderer(raster_settings=render_params['cam'])(**rendervar)
                     depth_pred,_,_ = Renderer(raster_settings=render_params['cam'])(**depth_sil_rendervar)
-                    fig,ax = plt.subplots(1,4)
+
+
+                    im_pred_dist, radius_dist, _ = Renderer(raster_settings=curr_data['cam'])(**rendervar_dist)
+                    depth_pred_dist,_,_ = Renderer(raster_settings=curr_data['cam'])(**depth_sil_rendervar_dist) 
+
+
+                    psnr_GRN = torch.nn.functional.mse_loss(im_pred, curr_data['im'].squeeze(0))
+                    psnr_GRN = 10*torch.log10(curr_data['im'].max()/psnr_GRN)
+                    psnr_dist = torch.nn.functional.mse_loss(im_pred_dist, curr_data['im'].squeeze(0))
+                    psnr_dist = 10*torch.log10(curr_data['im'].max()/psnr_dist)                    
+                    
+
+                    fig,ax = plt.subplots(1,6,figsize=(20,10))
                     ax[0].imshow(im_pred.permute(1,2,0).cpu().detach())
-                    ax[0].set_title('Rendered Image')
+                    ax[0].set_title('Rendered Image (GRN) PSNR: {:.2f}'.format(psnr_GRN))
                     ax[1].imshow(curr_data['im'].squeeze(0).permute(1,2,0).cpu().detach())
                     ax[1].set_title('Input Image')
-                    ax[2].imshow(depth_pred[0,:,:].cpu().detach())
-                    ax[2].set_title('Rendered Depth')
-                    im = ax[3].imshow(depth.squeeze().cpu().detach())
-                    ax[3].set_title('Input Depth')
-                    plt.colorbar(im,ax = ax[3])
+                    ax[2].imshow(im_pred_dist.permute(1,2,0).cpu().detach())
+                    ax[2].set_title('Rendered Image (Dist) PSNR: {:.2f}'.format(psnr_dist))
+                    im0 =ax[3].imshow(depth_pred[0,:,:].cpu().detach())
+                    ax[3].set_title('Rendered Depth')
+                    im1 =ax[4].imshow(depth_pred_dist[0,:,:].cpu().detach())
+                    ax[4].set_title('Rendered Depth (Dist)')
+                    im2 = ax[5].imshow(depth.squeeze().cpu().detach()*scale.cpu().detach())
+                    ax[5].set_title('Input Depth')
+                    
+                    plt.colorbar(im0,ax = ax[3])
+                    plt.colorbar(im1,ax = ax[4])
+                    plt.colorbar(im2,ax = ax[5])
 
                     # Create images list for logging
                     images = [wandb.Image(fig, caption='Top: Gt disparity, bottom: predicted disparity', mode='L')]
@@ -485,70 +556,202 @@ def train_one_epoch(args,model,data_loader,optimizer,criterion,epoch,render_para
     # print(stats[0])
     return stats
 
-def val_one_epoch(model,data_loader,criterion,epoch):
+
+
+
+def val_one_epoch(args,model,data_loader,optimizer,criterion,epoch,render_params,inv_normalize):
     with torch.no_grad():
-        header = 'Validation epoch: [{}/{}]'.format(epoch, args.epochs)
-        metric_logger_val = distributed_utils.MetricLogger(delimiter="  ")
-        for it, data in enumerate(metric_logger_val.log_every(data_loader, 10, header)):
-            data_student = data[0]
-            data_alignment = data[1]
+        model.eval()
+        header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
+        metric_logger = distributed_utils.MetricLogger(delimiter="  ")
+        for it, data in enumerate(metric_logger.log_every(data_loader, args.logging_interval, header)):
 
-            img = data_student[0].cuda()
-            disp = data_student[1].cuda().squeeze(1)
-            img_alignment = data_alignment[0].cuda()
+            color = data[0].cuda().squeeze(0).detach()
+            depth = 1/(data[1].cuda()+1e-4).squeeze(0).detach()
+            # depth = data[1].cuda().squeeze(0)
 
-
-
-            mask = disp >0                       # Mask out any pixes with depth values of 0
+            scale = torch.max(depth).detach()
+            # scale = 1
 
 
-            for i in range(disp.shape[0]): # According to DAv1 Paper, each depth map is normalized between 0 and 10
-                disp[i,:,:] = (disp[i,:,:]-disp[i,:,:].min())/(disp[i,:,:].max()-disp[i,:,:].min())
+            depth = (depth/scale).detach()
+        
+            input = torch.cat([color,depth],axis = 0).unsqueeze(0).cuda()
+            # print(torch.max(depth))
+            mask = depth > 0
+            mask = mask.tile(1,3,1,1)
+            mask = mask[0,0,:,:].reshape(-1)
+            mask_random = torch.rand(mask.shape).cuda()
+            mask_random = mask_random > args.masking_ratio
+            mask = mask & mask_random
+
+            pt_cloud,mean3_sq_dist= get_pointcloud(inv_normalize(color),depth*scale,render_params['intrinsics'],render_params['w2c'],compute_mean_sq_dist=True,mask = mask)
+            params,variables = initialize_params(pt_cloud,1,mean3_sq_dist)
 
 
 
-            output = model.module(img).squeeze(1)              # Forward pass
+            curr_data = {'cam': render_params['cam'], 'im': inv_normalize(color), 'depth': depth*scale, 'id': 0, 'intrinsics': render_params['intrinsics'], 
+                    'w2c': render_params['w2c'], 'iter_gt_w2c_list': render_params['w2c']}
+            loss_weights=dict(
+                im=1.0,
+                depth=1.0,
+            )
+            
+            loss_distance_init, _, _ = get_loss(params, curr_data, variables, 0, loss_weights,
+                                            use_sil_for_loss=True, sil_thres=0,
+                                            use_l1=True,ignore_outlier_depth_loss=True, tracking=False,mapping=True ,
+                                            plot_dir=None, visualize_tracking_loss=False,
+                                            tracking_iteration=0,GRN_input=True,plotting = False)
+            output = model(input)
+            # print(output)
+            cols = torch.permute(output[0], (1, 2, 0)).reshape(-1, 8) # (C, H, W) -> (H, W, C) -> (H * W, C)
+            rots = cols[:,:4]
+
+            scales_norm = (cols[:,4:7]-cols[:,4:7].min()) / (cols[:,4:7].max()-cols[:,4:7].min())
+            opacities = cols[:,7][:,None]
+
+            params['unnorm_rotations'] = rots[mask]
+            params['log_scales'] = scales_norm[mask]*(torch.sqrt(mean3_sq_dist)[:,None].tile(1,3))
+            params['logit_opacities'] = opacities[mask]
+
+            loss, _, _ = get_loss(params, curr_data, variables, 0, loss_weights,
+                                use_sil_for_loss=True, sil_thres=0,
+                                use_l1=True,ignore_outlier_depth_loss=True, tracking=False,mapping=True ,
+                                plot_dir=None, visualize_tracking_loss=False,
+                                tracking_iteration=0,GRN_input=False,plotting = False)
+
+            torch.cuda.synchronize()
+            metric_logger.update(loss=loss.item())
+            metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+            # if it % args.logging_interval == 0:
+            #     stats_log = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+            #     wandb.log(stats_log)
+
+            # # ~~~~~~~~~~~~~~~~~~~~~~~~~~~ SOME WANDB LOGGING ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+            if it  == len(data_loader)-1: # Log every 10th batch
+                if args.rank ==0:
+                    
+                    
 
 
-            features_pretrained = frozen_encoder.get_intermediate_layers(img,12)
-            features = model.module.pretrained.get_intermediate_layers(img_alignment,12)
-            loss = criterion(output, disp,mask.squeeze(1)).item() + feature_loss(features_pretrained[0],features[0]).item()
-            metric_logger_val.update(loss=loss)
+                    rendervar = transformed_GRNparams2rendervar(params,params['means3D'],params['unnorm_rotations'],params['log_scales'],params['logit_opacities'],params['rgb_colors'])
+                    depth_sil_rendervar = transformed_GRNparams2depthplussilhouette(params, curr_data['w2c'],
+                                                                        params['means3D'],params['unnorm_rotations'],params['log_scales'],params['logit_opacities'])
+
+                    params_dist_plot,variables = initialize_params(pt_cloud,1,mean3_sq_dist)
+                    rendervar_dist = transformed_params2rendervar(params_dist_plot, params_dist_plot['means3D'],params_dist_plot['unnorm_rotations'],params_dist_plot['log_scales'],params_dist_plot['logit_opacities'],params_dist_plot['rgb_colors'])
+                    depth_sil_rendervar_dist = transformed_params2depthplussilhouette(params_dist_plot, curr_data['w2c'],
+                                                                                params_dist_plot['means3D'],params_dist_plot['unnorm_rotations'],params_dist_plot['log_scales'],params_dist_plot['logit_opacities'])
+                    # ~~~~~~~~~~~~~~~~~~~~~~~~~~~ render gaussians ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                    im_pred, radius, _ = Renderer(raster_settings=render_params['cam'])(**rendervar)
+                    depth_pred,_,_ = Renderer(raster_settings=render_params['cam'])(**depth_sil_rendervar)
 
 
-        metric_logger_val.synchronize_between_processes()
-        print("Averaged stats validation:", metric_logger_val)
-
-    stats = {k: meter.global_avg for k, meter in metric_logger_val.meters.items()}
-    if args.rank ==0:
-        if args.wandb_logging:
-            disp_viz = disp.clone() # Cloning the tensor to avoid inplace operations, avoids a memory leak
-            output_viz = output.clone() # Cloning the tensor to avoid inplace operations, avoids a memory leak
-            for i in range(5):
-                # Normalize tensors (out-of-place operations)
-                disp_viz[i,:,:] = (disp[i,:,:] - disp[i,:,:].min()) / (disp[i,:,:].max() - disp[i,:,:].min())
-                output_viz[i,:,:] = (output[i,:,:] - output[i,:,:].min()) / (output[i,:,:].max() - output[i,:,:].min())
-
-            # Ensure tensors are moved to CPU and converted to numpy
-            disp_numpy = disp_viz[:5, :, :].cpu().detach().numpy()  # Move to CPU and then convert
+                    im_pred_dist, radius_dist, _ = Renderer(raster_settings=curr_data['cam'])(**rendervar_dist)
+                    depth_pred_dist,_,_ = Renderer(raster_settings=curr_data['cam'])(**depth_sil_rendervar_dist) 
 
 
-            output_numpy = output_viz[:5, :, :].cpu().detach().numpy()  # Move to CPU and then convert
+                    psnr_GRN = torch.nn.functional.mse_loss(im_pred, curr_data['im'].squeeze(0))
+                    psnr_GRN = 10*torch.log10(curr_data['im'].max()/psnr_GRN)
+                    psnr_dist = torch.nn.functional.mse_loss(im_pred_dist, curr_data['im'].squeeze(0))
+                    psnr_dist = 10*torch.log10(curr_data['im'].max()/psnr_dist)                    
+                    
 
-            # Concatenate and prepare for logging
-            img_wandb = np.concatenate((disp_numpy, output_numpy), 1)  # Shape: 4x2HxW
-            img_wandb = np.expand_dims(img_wandb, axis=3)
-            img_wandb[img_wandb<0.00001] = 0.00001 # Need to clip images to be strictly within [0,1] or wandb outputs only black
-            img_wandb[img_wandb>0.99999] = 0.99999 # Need to clip images to be strictly within [0,1] or wandb outputs only black
+                    fig,ax = plt.subplots(1,6,figsize=(20,10))
+                    ax[0].imshow(im_pred.permute(1,2,0).cpu().detach())
+                    ax[0].set_title('Rendered Image (GRN) PSNR: {:.2f}'.format(psnr_GRN))
+                    ax[1].imshow(curr_data['im'].squeeze(0).permute(1,2,0).cpu().detach())
+                    ax[1].set_title('Input Image')
+                    ax[2].imshow(im_pred_dist.permute(1,2,0).cpu().detach())
+                    ax[2].set_title('Rendered Image (Dist) PSNR: {:.2f}'.format(psnr_dist))
+                    ax[3].imshow(depth_pred[0,:,:].cpu().detach())
+                    ax[3].set_title('Rendered Depth')
+                    ax[4].imshow(depth_pred_dist[0,:,:].cpu().detach())
+                    ax[4].set_title('Rendered Depth (Dist)')
+                    im = ax[5].imshow(depth.squeeze().cpu().detach())
+                    ax[5].set_title('Input Depth scale: {:2f}'.format(scale))
+                    plt.colorbar(im,ax = ax[5])
 
-            # Create images list for logging
-            images = [wandb.Image(img_wandb[i, :, :, :], caption='Top: Gt disparity, bottom: predicted disparity', mode='L') for i in range(5)]
+                    # Create images list for logging
+                    images = [wandb.Image(fig, caption='Top: Gt disparity, bottom: predicted disparity', mode='L')]
+                    # stats_log = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+                    # stats_log['images'] = images
 
-            # Clear variables and free memory
-            del disp, output, disp_numpy, output_numpy, disp_viz,output_viz,img_wandb
-            torch.cuda.empty_cache()
-    else:
-        images = None
+
+                    # wandb.log(stats_log)
+                    plt.close()
+
+
+        # gather the stats from all processes
+        metric_logger.synchronize_between_processes()
+        # print("Averaged stats:", metric_logger)
+        stats = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+    # print(stats[0])
+    return stats,images
+# def val_one_epoch(model,data_loader,criterion,epoch):
+#     with torch.no_grad():
+#         header = 'Validation epoch: [{}/{}]'.format(epoch, args.epochs)
+#         metric_logger_val = distributed_utils.MetricLogger(delimiter="  ")
+#         for it, data in enumerate(metric_logger_val.log_every(data_loader, 10, header)):
+#             data_student = data[0]
+#             data_alignment = data[1]
+
+#             img = data_student[0].cuda()
+#             disp = data_student[1].cuda().squeeze(1)
+#             img_alignment = data_alignment[0].cuda()
+
+
+
+#             mask = disp >0                       # Mask out any pixes with depth values of 0
+
+
+#             for i in range(disp.shape[0]): # According to DAv1 Paper, each depth map is normalized between 0 and 10
+#                 disp[i,:,:] = (disp[i,:,:]-disp[i,:,:].min())/(disp[i,:,:].max()-disp[i,:,:].min())
+
+
+
+#             output = model.module(img).squeeze(1)              # Forward pass
+
+
+#             features_pretrained = frozen_encoder.get_intermediate_layers(img,12)
+#             features = model.module.pretrained.get_intermediate_layers(img_alignment,12)
+#             loss = criterion(output, disp,mask.squeeze(1)).item() + feature_loss(features_pretrained[0],features[0]).item()
+#             metric_logger_val.update(loss=loss)
+
+
+#         metric_logger_val.synchronize_between_processes()
+#         print("Averaged stats validation:", metric_logger_val)
+
+#     stats = {k: meter.global_avg for k, meter in metric_logger_val.meters.items()}
+#     if args.rank ==0:
+#         if args.wandb_logging:
+#             disp_viz = disp.clone() # Cloning the tensor to avoid inplace operations, avoids a memory leak
+#             output_viz = output.clone() # Cloning the tensor to avoid inplace operations, avoids a memory leak
+#             for i in range(5):
+#                 # Normalize tensors (out-of-place operations)
+#                 disp_viz[i,:,:] = (disp[i,:,:] - disp[i,:,:].min()) / (disp[i,:,:].max() - disp[i,:,:].min())
+#                 output_viz[i,:,:] = (output[i,:,:] - output[i,:,:].min()) / (output[i,:,:].max() - output[i,:,:].min())
+
+#             # Ensure tensors are moved to CPU and converted to numpy
+#             disp_numpy = disp_viz[:5, :, :].cpu().detach().numpy()  # Move to CPU and then convert
+
+
+#             output_numpy = output_viz[:5, :, :].cpu().detach().numpy()  # Move to CPU and then convert
+
+#             # Concatenate and prepare for logging
+#             img_wandb = np.concatenate((disp_numpy, output_numpy), 1)  # Shape: 4x2HxW
+#             img_wandb = np.expand_dims(img_wandb, axis=3)
+#             img_wandb[img_wandb<0.00001] = 0.00001 # Need to clip images to be strictly within [0,1] or wandb outputs only black
+#             img_wandb[img_wandb>0.99999] = 0.99999 # Need to clip images to be strictly within [0,1] or wandb outputs only black
+
+#             # Create images list for logging
+#             images = [wandb.Image(img_wandb[i, :, :, :], caption='Top: Gt disparity, bottom: predicted disparity', mode='L') for i in range(5)]
+
+#             # Clear variables and free memory
+#             del disp, output, disp_numpy, output_numpy, disp_viz,output_viz,img_wandb
+#             torch.cuda.empty_cache()
+#     else:
+#         images = None
             
 #   return stats,images
 
