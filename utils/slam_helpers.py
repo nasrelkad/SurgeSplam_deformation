@@ -5,6 +5,7 @@ from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 from utils.recon_helpers import energy_mask
 import torchvision
 import numpy as np
+import cv2
 
 
 def l1_loss_v1(x, y):
@@ -613,9 +614,11 @@ def grn_initialization(model,params,init_pt_cld,mean3_sq_dist,color,depth,mask =
     output = model(input).detach()
     # print(output)
     cols = torch.permute(output[0], (1, 2, 0)).reshape(-1, 8) # (C, H, W) -> (H, W, C) -> (H * W, C)
+    
+
     rots = cols[:,:4]
 
-    scales_norm = cols[:,4:7]
+    scales_norm = (cols[:,4:7]-cols[:,4:7].min()) / (cols[:,4:7].max()-cols[:,4:7].min())
     opacities = cols[:,7][:,None]
 
     # local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(params,0,False,5,'simple')
@@ -629,11 +632,11 @@ def grn_initialization(model,params,init_pt_cld,mean3_sq_dist,color,depth,mask =
     # We need to apply the GRN inialization to each timestep
     if len(params['unnorm_rotations'].shape) ==3:
         params['unnorm_rotations'] = (rots[mask])[...,None].tile(1,1,params['unnorm_rotations'].shape[2])
-        params['log_scales'] = (scales_norm[mask]*mean3_sq_dist[:,None].tile(1,3))[...,None].tile(1,1,params['log_scales'].shape[2])
+        params['log_scales'] = (scales_norm[mask]*(torch.sqrt(mean3_sq_dist)[:,None].tile(1,3)))[...,None].tile(1,1,params['log_scales'].shape[2])
         params['logit_opacities'] = (opacities[mask])[...,None].tile(1,1,params['logit_opacities'].shape[2])
     else:
         params['unnorm_rotations'] = rots[mask]
-        params['log_scales'] = scales_norm[mask]*mean3_sq_dist[:,None].tile(1,3)
+        params['log_scales'] = scales_norm[mask]*(torch.sqrt(mean3_sq_dist)[:,None].tile(1,3))
         params['logit_opacities'] = opacities[mask]
     
 
@@ -648,12 +651,47 @@ def grn_initialization(model,params,init_pt_cld,mean3_sq_dist,color,depth,mask =
 
     return params
 
+def get_mask(mask_input,color,reduction_type = 'random',reduction_fraction = 0.5):
+    if reduction_type == 'random':
+        mask = (torch.randn(mask_input.shape)>reduction_fraction).cuda()
+    else:
+        mask = texture_mask_laplacian(color, num_samples=int(mask_input.sum()*(1-reduction_fraction))).cuda()
+    return mask & mask_input
 
+def texture_mask_laplacian(image_tensor: torch.Tensor, num_samples: int, ksize: int = 3):
+    height = image_tensor.shape[1]
+    width = image_tensor.shape[2]
+    image_grayscale = torchvision.transforms.functional.rgb_to_grayscale(image_tensor)
+    # Convert to NumPy uint8
+    image_np = image_grayscale.squeeze().cpu().numpy()
+    if image_np.max() <= 1.0:
+        image_np = (image_np * 255).astype(np.uint8)
+    else:
+        image_np = image_np.astype(np.uint8)
+
+    # Apply Laplacian to get texture response
+    laplacian = cv2.Laplacian(image_np, ddepth=cv2.CV_32F, ksize=ksize)
+    texture_strength = np.abs(laplacian)
+
+    # Normalize texture map to probability distribution
+    texture_strength += 1e-6  # prevent division by zero
+    prob_map = texture_strength / texture_strength.sum()
+
+    # Flatten and sample
+    flat_indices = np.arange(height * width)
+    sampled_indices = np.random.choice(flat_indices, size=num_samples, replace=False, p=prob_map.flatten())
+
+    # Create mask
+    mask = np.zeros(height * width, dtype=np.uint8)
+    mask[sampled_indices] = 1
+    # mask = mask.reshape(height, width)
+
+    return torch.from_numpy(mask).bool()
 
 def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq_dist_method, use_simplification=True,
                       nr_basis = 10,use_distributed_biases = False,total_timescale = None,use_grn=False,grn_model=None,
                       use_deform = True,deformation_type = 'gaussian',num_frames = 1,
-                      random_initialization=False,init_scale=0.1,cam = None):
+                      random_initialization=False,init_scale=0.1,cam = None, reduce_gaussians = False,reduction_type = 'random',reduction_fraction = 0.5):
     # Silhouette Rendering
     if use_deform == True:
         local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(params,time_idx,True,deformation_type =deformation_type)
@@ -687,6 +725,10 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
     non_presence_mask = non_presence_sil_mask | non_presence_depth_mask
     # Flatten mask
     non_presence_mask = non_presence_mask.reshape(-1)
+    if reduce_gaussians:
+        mask = get_mask(non_presence_mask,color=curr_data['im'],reduction_type = reduction_type,reduction_fraction = reduction_fraction)
+
+        non_presence_mask = non_presence_mask & mask
 
     # Get the new frame Gaussians based on the Silhouette
     if torch.sum(non_presence_mask) > 0:
