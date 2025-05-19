@@ -332,11 +332,11 @@ def deform_gaussians(params, time, deform_grad, N=5,deformation_type = 'gaussian
 
     elif deformation_type == 'simple':
         # with torch.no_grad():
-        xyz = params['means3D'][...,time]
-        rots = params['unnorm_rotations'][...,time]
-        scales = params['log_scales'][...,time]
-        opacities = params['logit_opacities'][...,time]
-        colors = params['rgb_colors'][...,time]
+        xyz = params['means3D'][time]
+        rots = params['unnorm_rotations'][time]
+        scales = params['log_scales'][time]
+        opacities = params['logit_opacities'][time]
+        colors = params['rgb_colors'][time]
 
     return xyz, rots, scales,opacities, colors
 

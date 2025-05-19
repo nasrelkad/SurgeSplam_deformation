@@ -9,7 +9,7 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "cutting_deform_simple_1"
+    scene_name = "cutting_deform_simple_2"
 
 map_every = 1
 keyframe_every = 8
@@ -171,5 +171,10 @@ config = dict(
         # grn_input_dim = 3,
         # grn_num_heads = 4,
         # grn_use_norm = True,
-    )         
+    ),      
+    gaussian_reduction = dict(
+        reduce_gaussians = True,
+        reduction_type = 'random',
+        reduction_fraction = 0.5
+    )          
 )

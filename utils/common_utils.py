@@ -24,6 +24,8 @@ def params2cpu(params):
     for k, v in params.items():
         if isinstance(v, torch.Tensor):
             res[k] = v.detach().cpu().contiguous().numpy()
+        elif isinstance(v, list):
+            res[k] = [x.detach().cpu().contiguous().numpy() if isinstance(x, torch.Tensor) else x for x in v]
         else:
             res[k] = v
     return res

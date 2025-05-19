@@ -170,5 +170,10 @@ config = dict(
         # grn_input_dim = 3,
         # grn_num_heads = 4,
         # grn_use_norm = True,
-    )         
+    ),
+    gaussian_reduction = dict(
+        reduce_gaussians = True,
+        reduction_type = 'random',
+        reduction_fraction = 0.5
+    )                
 )
