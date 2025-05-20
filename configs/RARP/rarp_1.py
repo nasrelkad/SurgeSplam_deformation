@@ -1,7 +1,7 @@
 import os
 
 scenes = [
-    "dataset_5/keyframe_4"
+    'simple'
 ]
 
 primary_device="cuda:0"
@@ -9,15 +9,15 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "dataset_5/keyframe_4"
+    scene_name = "simple_3"
 
 map_every = 1
 keyframe_every = 8
 # mapping_window_size = 24
-tracking_iters = 50
+tracking_iters = 100
 mapping_iters = 1
 
-group_name = "SCARED_LONG_7"
+group_name = f"RARP {scene_name}"
 run_name = scene_name
 
 config = dict(
@@ -39,8 +39,8 @@ config = dict(
     save_checkpoints=False, # Save Checkpoints
     checkpoint_interval=int(1e10), # Checkpoint Interval
     data=dict(
-        basedir=f"./data/SCARED_LONG/{scene_name}",
-        gradslam_data_cfg="./configs/data/scared.yaml",
+        basedir=f"./data/RARP",
+        gradslam_data_cfg="./configs/data/RARP.yaml",
         sequence=scene_name,
         desired_image_height=336,
         desired_image_width=336,
@@ -64,13 +64,13 @@ config = dict(
             deform = 0.5
         ),
         lrs=dict(
-            means3D=0.005,
+            means3D=0.002,
             rgb_colors=0.0,
             unnorm_rotations=0.001,
             logit_opacities=0.0,
-            log_scales=0.0000,
-            cam_unnorm_rots=0.0002,
-            cam_trans=0.00005,
+            log_scales=0.0001,
+            cam_unnorm_rots=0.002,
+            cam_trans=0.0005,
         ),
     ),
     mapping=dict(
@@ -84,7 +84,7 @@ config = dict(
         loss_weights=dict(
             im=1.0,
             depth=1.0,
-            deform = 0.5
+            deform = 1.0
         ),
         lrs=dict(
             means3D=0.0000,
@@ -137,10 +137,10 @@ config = dict(
         model_size = 'vitb',
         normalization_means = [0.46888983, 0.29536288, 0.28712815], 
         normalization_stds = [0.24689102 ,0.21034359, 0.21188641],
-        shift_pred = 3.4345359019963704   ,
-        scale_pred = 0.9459655483121597 ,
-        shift_gt =   0.019956537514519056   ,
-        scale_gt =   0.0021386507684754996    ,
+        shift_pred = 2.0192598978494627   ,
+        scale_pred = 0.5414197885483871 ,
+        shift_gt =   0.016469928791720198   ,
+        scale_gt =   0.0034374421235340256    ,
     ), 
     deforms = dict(
         use_deformations = True,
@@ -154,7 +154,7 @@ config = dict(
         random_initialization = False,
         init_scale = -2.5,
         num_iters_initialization = 50,
-        num_iters_initialization_added_gaussians = 100,
+        num_iters_initialization_added_gaussians = 5,
         sil_thres = 0.0,
         model_path = 'GRN/models/GRN_v2.pth',
         random_initialization_lrs = dict(
@@ -162,7 +162,7 @@ config = dict(
             rgb_colors=0.0000,
             unnorm_rotations=0.0005,
             logit_opacities=0.001,
-            log_scales=0.0005,
+            log_scales=0.00001,
             cam_unnorm_rots=0.000,
             cam_trans=0.000,
         ),

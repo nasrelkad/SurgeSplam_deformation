@@ -9,12 +9,12 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "pulling_deform_simple_9"
+    scene_name = "pulling_deform_simple_17"
 
 map_every = 1
 keyframe_every = 8
 # mapping_window_size = 24
-tracking_iters = 25
+tracking_iters = 100
 mapping_iters = 1
 
 group_name = f"EndoNerf {scene_name}"
@@ -60,11 +60,11 @@ config = dict(
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
             im=2.0,
-            depth=0.5,
+            depth=2.0,
             deform = 0.5
         ),
         lrs=dict(
-            means3D=0.002,
+            means3D=0.005,
             rgb_colors=0.0,
             unnorm_rotations=0.001,
             logit_opacities=0.0,
@@ -137,10 +137,10 @@ config = dict(
         model_size = 'vitb',
         normalization_means = [0.46888983, 0.29536288, 0.28712815], 
         normalization_stds = [0.24689102 ,0.21034359, 0.21188641],
-        shift_pred = 0.9459649324417114   ,
-        scale_pred = 3.434535264968872 ,
-        shift_gt =   0.0021386505104601383   ,
-        scale_gt =   0.01995653659105301    ,
+        shift_pred = 2.0192598978494627   ,
+        scale_pred = 0.5414197885483871 ,
+        shift_gt =   0.016469928791720198   ,
+        scale_gt =   0.0034374421235340256    ,
     ), 
     deforms = dict(
         use_deformations = True,
@@ -150,12 +150,12 @@ config = dict(
         total_timescale = 50
     ),
     GRN = dict(
-        use_grn = True,
+        use_grn = False,
         random_initialization = False,
         init_scale = -2.5,
         num_iters_initialization = 50,
-        num_iters_initialization_added_gaussians = 5,
-        sil_thres = 0.01,
+        num_iters_initialization_added_gaussians = 100,
+        sil_thres = 0.0,
         model_path = 'GRN/models/GRN_v2.pth',
         random_initialization_lrs = dict(
             means3D=0.0005,
@@ -175,7 +175,7 @@ config = dict(
     gaussian_reduction = dict(
         reduce_gaussians = True,
         reduction_type = 'random',
-        reduction_fraction = 0.5
+        reduction_fraction = 0.8
     )   
 
 )
