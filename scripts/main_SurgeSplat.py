@@ -23,7 +23,8 @@ from datasets.gradslam_datasets import (
     EndoSLAMDataset,
     C3VDDataset,
     ScaredDataset,
-    EndoNerfDataset
+    EndoNerfDataset,
+    RARPDataset,
 )
 from utils.common_utils import seed_everything, save_params_ckpt, save_params, save_means3D
 from utils.eval_helpers import report_progress, eval_save
@@ -61,6 +62,8 @@ def get_dataset(config_dict, basedir, sequence, **kwargs):
         return ScaredDataset(config_dict, basedir, sequence, **kwargs)
     elif config_dict["dataset_name"].lower() in ["endonerf"]:
         return EndoNerfDataset(config_dict, basedir, sequence, **kwargs)    
+    elif config_dict["dataset_name"].lower() in ['rarp']:
+        return RARPDataset(config_dict, basedir, sequence, **kwargs)
     else:
         raise ValueError(f"Unknown dataset name {config_dict['dataset_name']}")
 
@@ -745,7 +748,9 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
         losses['deform'] = torch.sum(torch.square(params['means3D']-local_means))/params['means3D'].shape[0]
     elif tracking and gaussian_deformations and deformation_type == 'simple': 
         nr_initial_gauss = params_initial['means3D'].shape[0]
-        losses['deform'] = torch.sum(torch.square(params_initial['means3D']-local_means[:nr_initial_gauss]))/nr_initial_gauss
+        nr_current_gauss = local_means.shape[0]
+        nr_gauss = min(nr_initial_gauss,nr_current_gauss)
+        losses['deform'] = torch.sum(torch.square(params_initial['means3D'][:nr_gauss]-local_means[:nr_gauss]))/nr_gauss
 
 
     weighted_losses = {k: v * loss_weights[k] for k, v in losses.items()}
@@ -1136,6 +1141,7 @@ def rgbd_slam(config: dict):
             t_gt =   config['depth']['shift_gt']
             s_gt =   config['depth']['scale_gt']
             output = model(color_input)
+            output_norm = (output-t_pred) * (s_gt / s_pred) + t_gt
             # t_pred = torch.median(output)
             # s_pred = torch.mean(torch.abs(output-t_pred))
             # output_norm = (output-output.min())/(output.max()-output.min())
@@ -1148,8 +1154,8 @@ def rgbd_slam(config: dict):
             # depth = 1/pred_disp # Convert disp to depth
             # depth = depth.permute(1,2,0) # CxWxH --> WxHxC to align with rest of the pipeline    
             # print(depth.min())
-            output_norm = (output-output.min())/(output.max()-output.min())
-            pred_disp = (output_norm)*s_gt + t_gt +1 # TODO fix this scaling offse0t
+            # output_norm = (output-output.min())/(output.max()-output.min())
+            # pred_disp = (output_norm)*s_gt + t_gt +1 # TODO fix this scaling offse0t
             # plt.imshow(output.squeeze().cpu().detach())
             # plt.title('predicted depth')
             # plt.colorbar()
@@ -1158,13 +1164,13 @@ def rgbd_slam(config: dict):
             # depth = 1/pred_disp # Convert disp to depth
             # depth = depth.permute(1,2,0)*10 # CxWxH --> WxHxC to align with rest of the pipeline    
             # print(depth.min())
-            depth = 1/(output_norm+1)
+            depth = 1/(output_norm)
             depth = depth.permute(1,2,0)*10
 
-        # plt.imshow(depth.squeeze().cpu().detach())
-        # plt.title('predicted depth')
-        # plt.colorbar()
-        # plt.show()
+        plt.imshow(depth.squeeze().cpu().detach())
+        plt.title('predicted depth')
+        plt.colorbar()
+        plt.show()
         color = color.permute(2, 0, 1) / 255
         depth = depth.permute(2, 0, 1)
 
@@ -1236,6 +1242,8 @@ def rgbd_slam(config: dict):
     tracking_frame_time_count = 0
     mapping_frame_time_sum = 0
     mapping_frame_time_count = 0
+    densification_frame_time_sum = 0
+    densification_frame_time_count = 0
 
     # Load Checkpoint
     if config['load_checkpoint']:
@@ -1322,7 +1330,7 @@ def rgbd_slam(config: dict):
             s_pred = config['depth']['scale_pred']
             t_gt =   config['depth']['shift_gt']
             s_gt =   config['depth']['scale_gt']
-            pred_disp = ((model(color_input)-t_pred)/s_pred)*s_gt + t_gt+1 # TODO: Fix this scaling offset
+            pred_disp = ((model(color_input)-t_pred)/s_pred)*s_gt + t_gt # TODO: Fix this scaling offset
             depth = 1/pred_disp # Convert disp to depth
             depth = depth.permute(1,2,0) # CxWxH --> WxHxC to align with rest of the pipeline
             # plt.imshow(depth.squeeze().cpu().detach())
@@ -1404,7 +1412,7 @@ def rgbd_slam(config: dict):
                                                    config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
                                                    plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
-                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=save_idx,gaussian_deformations=config['deforms']['use_deformations'],
+                                                   tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=None,gaussian_deformations=config['deforms']['use_deformations'],
                                                    use_grn = config['GRN']['use_grn'],deformation_type = config['deforms']['deform_type'])
                 # print(loss)
                 save_idx = save_idx+1
@@ -1566,7 +1574,7 @@ def rgbd_slam(config: dict):
 
                     # delete floating gaussians
                     # params, variables = remove_floating_gaussians(params, variables, densify_curr_data, time_idx)
-                    
+                    densification_start_time = time.time()
                     # Add new Gaussians to the scene based on the Silhouette
                     params_iter, variables = add_new_gaussians(params_iter, variables, densify_curr_data, 
                                                         config['mapping']['sil_thres'], time_idx,
@@ -1588,6 +1596,9 @@ def rgbd_slam(config: dict):
 
                     post_num_pts = params_iter['means3D'].shape[0]
                     added_new_gaussians.append(post_num_pts)
+                    densification_end_time = time.time()
+                    densification_frame_time_sum += densification_end_time - densification_start_time
+                    densification_frame_time_count += 1
                 # if not config['distance_keyframe_selection']:
                 #     with torch.no_grad():
                 #         # Get the current estimated rotation & translation
@@ -1694,11 +1705,13 @@ def rgbd_slam(config: dict):
                 # if num_iters_mapping > 0:
                 #     progress_bar.close()
                 # # Update the runtime numbers
+
+                params_iter = optimize_initialization(params_iter,params_init,curr_data,num_iters_initialization,variables,iter_time_idx,config)
+
                 mapping_end_time = time.time()
                 mapping_frame_time_sum += mapping_end_time - mapping_start_time
                 mapping_frame_time_count += 1
                 num_iters_initialization = config['GRN']['num_iters_initialization_added_gaussians']
-                params_iter = optimize_initialization(params_iter,params_init,curr_data,num_iters_initialization,variables,iter_time_idx,config)
                 if time_idx == 0 or (time_idx+1) % config['report_global_progress_every'] == 0:
                     try:
                         # Report Mapping Progress
@@ -1788,21 +1801,25 @@ def rgbd_slam(config: dict):
         tracking_frame_time_count = 1
     if mapping_iter_time_count == 0:
         mapping_iter_time_count = 1
-        mapping_frame_time_count = 1
+        # mapping_frame_time_count = 1
     tracking_iter_time_avg = tracking_iter_time_sum / tracking_iter_time_count
     tracking_frame_time_avg = tracking_frame_time_sum / tracking_frame_time_count
     mapping_iter_time_avg = mapping_iter_time_sum / mapping_iter_time_count
     mapping_frame_time_avg = mapping_frame_time_sum / mapping_frame_time_count
+    densification_frame_time_avg = densification_frame_time_sum / densification_frame_time_count
+    
     print(f"\nAverage Tracking/Iteration Time: {tracking_iter_time_avg*1000} ms")
     print(f"Average Tracking/Frame Time: {tracking_frame_time_avg} s")
     print(f"Average Mapping/Iteration Time: {mapping_iter_time_avg*1000} ms")
     print(f"Average Mapping/Frame Time: {mapping_frame_time_avg} s")
+    print(f"Average Densification Time: {densification_frame_time_avg*1000} ms")
     with open(os.path.join(output_dir, "runtimes.txt"), "w") as f:
         f.write(f"Average Tracking/Iteration Time: {tracking_iter_time_avg*1000} ms\n")
         f.write(f"Average Tracking/Frame Time: {tracking_frame_time_avg} s\n")
         f.write(f"Average Mapping/Iteration Time: {mapping_iter_time_avg*1000} ms\n")
         f.write(f"Average Mapping/Frame Time: {mapping_frame_time_avg} s\n")
-        f.write(f"Frame Time: {tracking_frame_time_avg + mapping_frame_time_avg} s\n")
+        f.write(f"Average Densification Time: {densification_frame_time_avg*1000} ms\n")
+        f.write(f"Frame Time: {tracking_frame_time_avg + mapping_frame_time_avg+densification_frame_time_avg} s\n")
     
 
     if config['deforms']['deform_type'] == 'simple':
