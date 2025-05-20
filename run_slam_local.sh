@@ -7,3 +7,5 @@ python3  scripts/main_SurgeSplat.py configs/endonerf/endonerf_pulling_deform_sim
 # python3  scripts/main_SurgeSplat.py configs/endonerf/endonerf_deform_simple.py 
 
 # python3  scripts/main_SurgeSplat.py configs/scared/scared_long.py
+
+# python3  scripts/main_SurgeSplat.py configs/RARP/rarp_1.py
