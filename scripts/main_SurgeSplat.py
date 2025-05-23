@@ -900,12 +900,6 @@ def optimize_initialization(params,params_init,curr_data,num_iters_initializatio
     optimizer = initialize_optimizer(params,config['GRN']['random_initialization_lrs'])
     iter = 0
     save_idx = 0
-    print(f"opacity is leaf: {params['logit_opacities'].is_leaf}")
-    print(f"rgb is leaf: {params['rgb_colors'].is_leaf}")
-    print(f"means is leaf: {params['means3D'].is_leaf}")
-    print(f"rotations is leaf: {params['unnorm_rotations'].is_leaf}")
-    print(f"scales is leaf: {params['log_scales'].is_leaf}")
-
 
     progress_bar = tqdm(range(num_iters_initialization), desc=f"Initial optimization")
 
@@ -916,7 +910,6 @@ def optimize_initialization(params,params_init,curr_data,num_iters_initializatio
                     visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
                     tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=None,gaussian_deformations=config['deforms']['use_deformations'],
                     use_grn = config['GRN']['use_grn'],deformation_type = config['deforms']['deform_type'])
-        print(loss)
         loss.backward()
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
@@ -1575,7 +1568,7 @@ def rgbd_slam(config: dict):
                                                         reduction_type = config['gaussian_reduction']['reduction_type'],
                                                         reduction_fraction=config['gaussian_reduction']['reduction_fraction'] )                     # if config['GRN']['random_initialization']:
 
-                    post_num_pts = params_iter['means3D'].shape[0]
+                    post_num_pts = params_iter['means3D'].shape[0]-params_init['means3D'].shape[0]
                     added_new_gaussians.append(post_num_pts)
                     densification_end_time = time.time()
                     densification_frame_time_sum += densification_end_time - densification_start_time
@@ -1686,13 +1679,13 @@ def rgbd_slam(config: dict):
                 # if num_iters_mapping > 0:
                 #     progress_bar.close()
                 # # Update the runtime numbers
+                num_iters_initialization = config['GRN']['num_iters_initialization_added_gaussians']
 
                 params_iter = optimize_initialization(params_iter,params_init,curr_data,num_iters_initialization,variables,iter_time_idx,config)
 
                 mapping_end_time = time.time()
                 mapping_frame_time_sum += mapping_end_time - mapping_start_time
                 mapping_frame_time_count += 1
-                num_iters_initialization = config['GRN']['num_iters_initialization_added_gaussians']
                 if time_idx == 0 or (time_idx+1) % config['report_global_progress_every'] == 0:
                     try:
                         # Report Mapping Progress
@@ -1745,7 +1738,7 @@ def rgbd_slam(config: dict):
         
     
         torch.cuda.empty_cache()
-
+    nr_gauss = []
     for time_idx_plot in range(num_frames):
         if config['deforms']['use_deformations']:
             local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(params[time_idx_plot],time_idx_plot,True,deformation_type=config['deforms']['deform_type'])
@@ -1756,6 +1749,7 @@ def rgbd_slam(config: dict):
             local_opacities = params_iter['logit_opacities']
             local_colors = params_iter['rgb_colors']
         
+        nr_gauss.append(local_means.shape[0])
         # local_means = params['means3D']
         # local_rots = params['unnorm_rotations']
         # local_scales = params['log_scales']
@@ -1774,7 +1768,7 @@ def rgbd_slam(config: dict):
         img.save(f'./scripts/plots/final/{ii}.png')
 
     # timer.end()
-    # plt.plot(added_new_gaussians)
+    # plt.plot(nr_gauss)
     # plt.show()
     # Compute Average Runtimes
     if tracking_iter_time_count == 0:
