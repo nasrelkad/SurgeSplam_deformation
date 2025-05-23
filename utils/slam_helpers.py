@@ -783,3 +783,23 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
         params_iter = params
     return params_iter, variables
 
+def align_shift_and_scale(gt_disp, pred_disp,mask):
+    ssum = torch.sum(mask, (1, 2))
+    valid = ssum > 0
+
+    
+    t_gt = torch.median((gt_disp[valid]*mask[valid]).view(valid.sum(),-1),dim = 1).values
+    # print(t_gt)
+    # print(gt_disp[valid].view(valid.sum(),-1).shape,t_gt.shape)
+
+    s_gt = torch.mean(torch.abs(gt_disp[valid].view(valid.sum(),-1)- t_gt[:,None]),1)
+    t_pred = torch.median((pred_disp[valid]*mask[valid]).view(valid.sum(),-1),dim = 1).values
+    s_pred = torch.mean(torch.abs(pred_disp[valid].view(valid.sum(),-1)- t_pred[:,None]),1)
+    # print(pred_disp.view(gt_disp.shape[0],-1).shape,t_pred.shape,s_pred.shape)
+    pred_disp_aligned = (pred_disp.view(pred_disp.shape[0],-1)- t_pred[:,None])/s_pred[:,None]
+    pred_disp_aligned = pred_disp_aligned.view(pred_disp.shape[0],pred_disp.shape[1],pred_disp.shape[2])
+
+
+    gt_disp_aligned = (gt_disp.view(gt_disp.shape[0],-1)- t_gt[:,None])/s_gt[:,None]
+    gt_disp_aligned = gt_disp_aligned.view(gt_disp.shape[0],gt_disp.shape[1],gt_disp.shape[2])
+    return  gt_disp_aligned, pred_disp_aligned,t_gt, s_gt, t_pred, s_pred
