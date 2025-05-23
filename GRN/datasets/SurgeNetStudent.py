@@ -43,25 +43,25 @@ class ZipDataset(torch.utils.data.Dataset):
     def __init__(
             self,
             transform: Callable,
-            depth_transform: Callable,
+            # depth_transform: Callable,
             zip_path: Path,
-            depth_path: Path,
+            # depth_path: Path,
             image_suffix: str,
             train_student: bool,
     ):
 
         # Assign variables
         self.transform = transform
-        self.depth_transform = depth_transform
+        # self.depth_transform = depth_transform
         self.zip_path = zip_path
-        self.depth_path = depth_path
+        # self.depth_path = depth_path
         self.images = []
-        self.depths = []
+        # self.depths = []
         self.image_suffix = image_suffix
         self.train_student = train_student
         # Load the zip file
         image_zip = zipfile.ZipFile(self.zip_path)
-        depth_zip = zipfile.ZipFile(self.depth_path)
+        # depth_zip = zipfile.ZipFile(self.depth_path)
 
         # Get the members of the zip file
         self.image_folder_members = {
@@ -69,10 +69,10 @@ class ZipDataset(torch.utils.data.Dataset):
             for m in sorted(image_zip.infolist(), key=lambda x: x.filename)
         }
 
-        self.depth_folder_members = {
-            str(Path(m.filename)): m
-            for m in sorted(depth_zip.infolist(), key=lambda x: x.filename)
-        }
+        # self.depth_folder_members = {
+        #     str(Path(m.filename)): m
+        #     for m in sorted(depth_zip.infolist(), key=lambda x: x.filename)
+        # }
 
         # Get the image names from the zip file, check whether they are valid
         for image_name, m in self.image_folder_members.items():
@@ -81,9 +81,9 @@ class ZipDataset(torch.utils.data.Dataset):
             ):
                 continue
             self.images.append(image_name)
-        for depth_name, m in self.depth_folder_members.items():
-            if depth_name.endswith('.npy'):
-                self.depths.append(depth_name)
+        # for depth_name, m in self.depth_folder_members.items():
+        #     if depth_name.endswith('.npy'):
+        #         self.depths.append(depth_name)
         # print(len(self.depths))
     
 
@@ -118,24 +118,24 @@ class ZipDataset(torch.utils.data.Dataset):
         
 
         # Return depth labels        
-        with zipfile.ZipFile(self.depth_path) as depth_zip:
-            fn = self.depth_folder_members[self.depths[index]].filename
-            # Open the image data from the zip file based on index
-            with depth_zip.open(
-                    fn
-            ) as depth_file:
-                label = torch.from_numpy(np.load(depth_file)).unsqueeze(0)
-            full_file_path_depth = os.path.join(self.depth_path,fn)
+        # with zipfile.ZipFile(self.depth_path) as depth_zip:
+        #     fn = self.depth_folder_members[self.depths[index]].filename
+        #     # Open the image data from the zip file based on index
+        #     with depth_zip.open(
+        #             fn
+        #     ) as depth_file:
+        #         label = torch.from_numpy(np.load(depth_file)).unsqueeze(0)
+        #     full_file_path_depth = os.path.join(self.depth_path,fn)
         
         # Apply torchvision transforms if defined
         if self.transform:
             image = self.transform(image)
-        if self.depth_transform:
-            label = self.depth_transform(label)
+        # if self.depth_transform:
+        #     label = self.depth_transform(label)
         if do_flip:
             image = torchvision.transforms.functional.hflip(image)
-            label = torchvision.transforms.functional.hflip(label)
-        return image, label, full_file_path,full_file_path_depth
+            # label = torchvision.transforms.functional.hflip(label)
+        return image,  full_file_path
     
     def __getitem__(self,index:int):
         if self.train_student:
@@ -175,7 +175,7 @@ def concat_zip_datasets(
 
     # Create list of zip folders
     zip_folders = list(Path(parent_folder).iterdir())
-    zip_folders_depth = list(Path(depth_path).iterdir())
+    # zip_folders_depth = list(Path(depth_path).iterdir())
     included_folders = []
     included_folders_depth = []
     if datasets is not None:
@@ -183,16 +183,16 @@ def concat_zip_datasets(
             for zip_folder in zip_folders:
                 if dataset in zip_folder.name:
                     included_folders.append(zip_folder)
-            for zip_folder in zip_folders_depth:
-                if dataset in zip_folder.name:
-                    included_folders_depth.append(zip_folder)
+            # for zip_folder in zip_folders_depth:
+            #     if dataset in zip_folder.name:
+            #         included_folders_depth.append(zip_folder)
     else:
         for zip_folder in zip_folders: # Only append zipfiles to the included folder list (not any unzipped folders or orther files)
             if zipfile.is_zipfile(zip_folder):
                 included_folders.append(zip_folder)
-        for zip_folder in zip_folders_depth:
-            if zipfile.is_zipfile(zip_folder):
-                included_folders_depth.append(zip_folder)
+        # for zip_folder in zip_folders_depth:
+        #     if zipfile.is_zipfile(zip_folder):
+        #         included_folders_depth.append(zip_folder)
 
 
     # print(included_folders,included_folders_depth)
@@ -200,9 +200,9 @@ def concat_zip_datasets(
     dataset = [
         ZipDataset(
             transform=transform,
-            depth_transform = depth_transform,
+            # depth_transform = depth_transform,
             zip_path=included_folders[i],
-            depth_path = included_folders_depth[i],
+            # depth_path = included_folders_depth[i],
             image_suffix=image_suffix,
             train_student=train_student)
         for i in range(len(included_folders))
