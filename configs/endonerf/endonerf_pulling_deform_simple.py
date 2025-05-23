@@ -9,12 +9,12 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "pulling_deform_simple_22"
+    scene_name = "pulling_deform_simple_32 w/o SurgeDepth"
 
 map_every = 1
 keyframe_every = 8
 # mapping_window_size = 24
-tracking_iters = 100
+tracking_iters = 25
 mapping_iters = 1
 
 group_name = f"EndoNerf {scene_name}"
@@ -55,7 +55,7 @@ config = dict(
         forward_prop=True, # Forward Propagate Poses
         num_iters=tracking_iters,
         use_sil_for_loss=True,
-        sil_thres=0.9,
+        sil_thres=0.7,
         use_l1=True,
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
@@ -77,7 +77,7 @@ config = dict(
         perform_mapping = True,
         num_iters=mapping_iters,
         add_new_gaussians=True,
-        sil_thres=0.01, # For Addition of new Gaussians
+        sil_thres=0.9, # For Addition of new Gaussians
         use_l1=True,
         use_sil_for_loss=True,
         ignore_outlier_depth_loss=False,
@@ -154,15 +154,15 @@ config = dict(
         random_initialization = False,
         init_scale = -2.5,
         num_iters_initialization = 50,
-        num_iters_initialization_added_gaussians = 100,
+        num_iters_initialization_added_gaussians = 10,
         sil_thres = 0.0,
         model_path = 'GRN/models/GRN_v2.pth',
         random_initialization_lrs = dict(
-            means3D=0.0005,
-            rgb_colors=0.0005,
-            unnorm_rotations=0.0005,
+            means3D=0.005,
+            rgb_colors=0.005,
+            unnorm_rotations=0.005,
             logit_opacities=0.001,
-            log_scales=0.0005,
+            log_scales=0.005,
             cam_unnorm_rots=0.000,
             cam_trans=0.000,
         ),
