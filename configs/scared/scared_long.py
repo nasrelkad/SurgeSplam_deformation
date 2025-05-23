@@ -77,7 +77,7 @@ config = dict(
         perform_mapping = True,
         num_iters=mapping_iters,
         add_new_gaussians=True,
-        sil_thres=0.1, # For Addition of new Gaussians
+        sil_thres=0.9, # For Addition of new Gaussians
         use_l1=True,
         use_sil_for_loss=True,
         ignore_outlier_depth_loss=False,
@@ -137,10 +137,10 @@ config = dict(
         model_size = 'vitb',
         normalization_means = [0.46888983, 0.29536288, 0.28712815], 
         normalization_stds = [0.24689102 ,0.21034359, 0.21188641],
-        shift_pred = 3.4345359019963704   ,
-        scale_pred = 0.9459655483121597 ,
-        shift_gt =   0.019956537514519056   ,
-        scale_gt =   0.0021386507684754996    ,
+        shift_pred = 2.0192598978494627   ,
+        scale_pred = 0.5414197885483871 ,
+        shift_gt =   0.016469928791720198   ,
+        scale_gt =   0.0034374421235340256    ,
     ), 
     deforms = dict(
         use_deformations = True,
@@ -154,15 +154,15 @@ config = dict(
         random_initialization = False,
         init_scale = -2.5,
         num_iters_initialization = 50,
-        num_iters_initialization_added_gaussians = 100,
+        num_iters_initialization_added_gaussians = 10,
         sil_thres = 0.0,
         model_path = 'GRN/models/GRN_v2.pth',
         random_initialization_lrs = dict(
-            means3D=0.0005,
-            rgb_colors=0.0000,
-            unnorm_rotations=0.0005,
+            means3D=0.005,
+            rgb_colors=0.005,
+            unnorm_rotations=0.005,
             logit_opacities=0.001,
-            log_scales=0.0005,
+            log_scales=0.005,
             cam_unnorm_rots=0.000,
             cam_trans=0.000,
         ),
@@ -175,7 +175,7 @@ config = dict(
     gaussian_reduction = dict(
         reduce_gaussians = True,
         reduction_type = 'random',
-        reduction_fraction = 0.8
+        reduction_fraction = 0.0
     )   
 
 )

@@ -9,12 +9,12 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "cutting_deform_simple_2"
+    scene_name = "cutting_deform_simple_5 w/o SurgeDepth"
 
 map_every = 1
 keyframe_every = 8
 # mapping_window_size = 24
-tracking_iters = 50
+tracking_iters = 25
 mapping_iters = 1
 
 group_name = f"EndoNerf {scene_name}"
@@ -60,11 +60,11 @@ config = dict(
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
             im=2.0,
-            depth=0.5,
-            deform = 0
+            depth=2.0,
+            deform = 0.5
         ),
         lrs=dict(
-            means3D=0.02,
+            means3D=0.005,
             rgb_colors=0.0,
             unnorm_rotations=0.001,
             logit_opacities=0.0,
@@ -77,7 +77,7 @@ config = dict(
         perform_mapping = True,
         num_iters=mapping_iters,
         add_new_gaussians=True,
-        sil_thres=0.1, # For Addition of new Gaussians
+        sil_thres=0.9, # For Addition of new Gaussians
         use_l1=True,
         use_sil_for_loss=True,
         ignore_outlier_depth_loss=False,
@@ -95,14 +95,14 @@ config = dict(
             cam_unnorm_rots=0.000,
             cam_trans=0.000,
         ),
-        prune_gaussians=False, # Prune Gaussians during Mapping
+        prune_gaussians=True, # Prune Gaussians during Mapping
         pruning_dict=dict( # Needs to be updated based on the number of mapping iterations
             start_after=0,
             remove_big_after=0,
-            stop_after=20,
-            prune_every=20,
-            removal_opacity_threshold=0.05,
-            final_removal_opacity_threshold=0.05,
+            stop_after=10000,
+            prune_every=1,
+            removal_opacity_threshold=0.1,
+            final_removal_opacity_threshold=0.1,
             reset_opacities=False,
             reset_opacities_every=int(1e10), # Doesn't consider iter 0
         ),
@@ -132,15 +132,15 @@ config = dict(
         gaussian_simplification=False,
     ),
     depth = dict(
-        use_gt_depth = False,
+        use_gt_depth = True,
         model_path = 'models/SurgeDepth/SurgeDepthStudent_V5.pth',
         model_size = 'vitb',
         normalization_means = [0.46888983, 0.29536288, 0.28712815], 
         normalization_stds = [0.24689102 ,0.21034359, 0.21188641],
-        shift_pred = 0.9459649324417114   ,
-        scale_pred = 3.434535264968872 ,
-        shift_gt =   0.0021386505104601383   ,
-        scale_gt =   0.01995653659105301    ,
+        shift_pred = 2.0192598978494627   ,
+        scale_pred = 0.5414197885483871 ,
+        shift_gt =   0.016469928791720198   ,
+        scale_gt =   0.0034374421235340256    ,
     ), 
     deforms = dict(
         use_deformations = True,
@@ -155,14 +155,14 @@ config = dict(
         init_scale = -2.5,
         num_iters_initialization = 50,
         num_iters_initialization_added_gaussians = 10,
-        sil_thres = 0.01,
-        model_path = 'GRN/models/GRN_v1.pth',
+        sil_thres = 0.0,
+        model_path = 'GRN/models/GRN_v2.pth',
         random_initialization_lrs = dict(
-            means3D=0.0005,
-            rgb_colors=0.0005,
-            unnorm_rotations=0.0005,
-            logit_opacities=0.0005,
-            log_scales=0.0005,
+            means3D=0.005,
+            rgb_colors=0.005,
+            unnorm_rotations=0.005,
+            logit_opacities=0.001,
+            log_scales=0.005,
             cam_unnorm_rots=0.000,
             cam_trans=0.000,
         ),
@@ -171,10 +171,11 @@ config = dict(
         # grn_input_dim = 3,
         # grn_num_heads = 4,
         # grn_use_norm = True,
-    ),      
+    ),
     gaussian_reduction = dict(
         reduce_gaussians = True,
         reduction_type = 'random',
-        reduction_fraction = 0.5
-    )          
+        reduction_fraction = 0.0
+    )   
+
 )
