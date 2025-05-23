@@ -35,7 +35,7 @@ from utils.slam_helpers import (
     transform_to_frame, l1_loss_v1, matrix_to_quaternion,
     transformed_GRNparams2depthplussilhouette,transformed_GRNparams2rendervar,
     add_new_gaussians,grn_initialization,deform_gaussians,initialize_deformations,initialize_new_params,grn_initialization,
-    get_mask
+    get_mask,align_shift_and_scale
 )
 from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, densify
 from utils.vis_utils import plot_video
@@ -541,26 +541,7 @@ def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_rad
     else:
         return params_list, variables, intrinsics, w2c, cam
     
-def align_shift_and_scale(gt_disp, pred_disp,mask):
-    ssum = torch.sum(mask, (1, 2))
-    valid = ssum > 0
 
-    
-    t_gt = torch.median((gt_disp[valid]*mask[valid]).view(valid.sum(),-1),dim = 1).values
-    # print(t_gt)
-    # print(gt_disp[valid].view(valid.sum(),-1).shape,t_gt.shape)
-
-    s_gt = torch.mean(torch.abs(gt_disp[valid].view(valid.sum(),-1)- t_gt[:,None]),1)
-    t_pred = torch.median((pred_disp[valid]*mask[valid]).view(valid.sum(),-1),dim = 1).values
-    s_pred = torch.mean(torch.abs(pred_disp[valid].view(valid.sum(),-1)- t_pred[:,None]),1)
-    # print(pred_disp.view(gt_disp.shape[0],-1).shape,t_pred.shape,s_pred.shape)
-    pred_disp_aligned = (pred_disp.view(pred_disp.shape[0],-1)- t_pred[:,None])/s_pred[:,None]
-    pred_disp_aligned = pred_disp_aligned.view(pred_disp.shape[0],pred_disp.shape[1],pred_disp.shape[2])
-
-
-    gt_disp_aligned = (gt_disp.view(gt_disp.shape[0],-1)- t_gt[:,None])/s_gt[:,None]
-    gt_disp_aligned = gt_disp_aligned.view(gt_disp.shape[0],gt_disp.shape[1],gt_disp.shape[2])
-    return  gt_disp_aligned, pred_disp_aligned,t_gt, s_gt, t_pred, s_pred
 
 def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_weights, use_sil_for_loss, 
              sil_thres, use_l1,ignore_outlier_depth_loss, tracking=False, 
@@ -1167,10 +1148,10 @@ def rgbd_slam(config: dict):
             depth = 1/(output_norm)
             depth = depth.permute(1,2,0)*10
 
-        plt.imshow(depth.squeeze().cpu().detach())
-        plt.title('predicted depth')
-        plt.colorbar()
-        plt.show()
+        # plt.imshow(depth.squeeze().cpu().detach())
+        # plt.title('predicted depth')
+        # plt.colorbar()
+        # plt.show()
         color = color.permute(2, 0, 1) / 255
         depth = depth.permute(2, 0, 1)
 
@@ -1793,8 +1774,8 @@ def rgbd_slam(config: dict):
         img.save(f'./scripts/plots/final/{ii}.png')
 
     # timer.end()
-    plt.plot(added_new_gaussians)
-    plt.show()
+    # plt.plot(added_new_gaussians)
+    # plt.show()
     # Compute Average Runtimes
     if tracking_iter_time_count == 0:
         tracking_iter_time_count = 1
@@ -1866,7 +1847,7 @@ def rgbd_slam(config: dict):
     dataset = [dataset, eval_dataset, 'C3VD'] if dataset_config["train_or_test"] == 'train' else dataset
     with torch.no_grad():
         eval_save(dataset, params, eval_dir, sil_thres=config['mapping']['sil_thres'],
-                mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'])
+                mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],use_grn = config['GRN']['use_grn'])
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

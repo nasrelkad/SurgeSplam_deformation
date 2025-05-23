@@ -9,7 +9,7 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "pulling_deform_simple_17"
+    scene_name = "pulling_deform_simple_22"
 
 map_every = 1
 keyframe_every = 8
@@ -55,7 +55,7 @@ config = dict(
         forward_prop=True, # Forward Propagate Poses
         num_iters=tracking_iters,
         use_sil_for_loss=True,
-        sil_thres=0.7,
+        sil_thres=0.9,
         use_l1=True,
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
@@ -77,7 +77,7 @@ config = dict(
         perform_mapping = True,
         num_iters=mapping_iters,
         add_new_gaussians=True,
-        sil_thres=0.1, # For Addition of new Gaussians
+        sil_thres=0.01, # For Addition of new Gaussians
         use_l1=True,
         use_sil_for_loss=True,
         ignore_outlier_depth_loss=False,
@@ -150,7 +150,7 @@ config = dict(
         total_timescale = 50
     ),
     GRN = dict(
-        use_grn = False,
+        use_grn = True,
         random_initialization = False,
         init_scale = -2.5,
         num_iters_initialization = 50,
@@ -159,7 +159,7 @@ config = dict(
         model_path = 'GRN/models/GRN_v2.pth',
         random_initialization_lrs = dict(
             means3D=0.0005,
-            rgb_colors=0.0000,
+            rgb_colors=0.0005,
             unnorm_rotations=0.0005,
             logit_opacities=0.001,
             log_scales=0.0005,
@@ -175,7 +175,7 @@ config = dict(
     gaussian_reduction = dict(
         reduce_gaussians = True,
         reduction_type = 'random',
-        reduction_fraction = 0.8
+        reduction_fraction = 0.0
     )   
 
 )
