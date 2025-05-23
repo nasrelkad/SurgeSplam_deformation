@@ -46,6 +46,13 @@ import GRN.distributed_utils as distributed_utils
 
 import zipfile
 
+from models.SurgeDepth.dpt import SurgeDepth
+
+# import os
+
+os.environ['CUDA_LAUNCH_BLOCKING']="1"
+os.environ['TORCH_USE_CUDA_DSA'] = "1"
+
 def get_args_parser():
     parser = argparse.ArgumentParser('GRN',add_help=False)
     parser.add_argument('--epochs', default=50, type=int, help='Number of epochs of training.')
@@ -68,13 +75,15 @@ def get_args_parser():
     parser.add_argument('--learning_rate',default = 5e-5,type = float, help = 'learning rate for optimizer')
     # parser.add_argument('--pretrained_learning_rate',default = 5e-6,type=float,help='learning rate for the pretrained encoder')
     parser.add_argument('--wandb_logging', default = True, type=bool, help = 'If true, enable weights and biases logging')
-    parser.add_argument('--logging_interval',default = 10,type = int, help = 'Interval for wandb and terminal logging')
+    parser.add_argument('--logging_interval',default = 1000,type = int, help = 'Interval for wandb and terminal logging')
     # parser.add_argument('--teacher_path',default='/media/thesis_ssd/code/SurgeDepth/models/checkpoints/SurgeDepth_V6.pth', type = str,help = 'Path to the teacher model')
     parser.add_argument('--depth_loss_weight',default=0.002,type=float,help = 'Weighting factor for depth in loss function')
     parser.add_argument("--dist_url", default="env://", type=str, help="""url used to set up
         distributed training; see https://pytorch.org/docs/stable/distributed.html""")
     parser.add_argument('--num_accumulation_steps', default = 50, type = int, help = 'nr of batches to use for gradient accumultation')
     parser.add_argument('--masking_ratio', default = 0.8, type = float, help = 'Ratio of pixels to mask out for training')
+    parser.add_argument('--depth_model_size', default = 'vitb', type = str, help = 'encoder size for depth estimation model')
+    parser.add_argument('--depth_model_path', default = '/home/hhuitema/github_repos/SurgeSplam/models/SurgeDepth/SurgeDepthStudent_V5.pth', type = str, help = 'path to depth estimation checkpoint')
     return parser
 
 
@@ -204,7 +213,7 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
 
 #     return psnr, l1
 
-def train_surgedepth(args):
+def train_GRN(args):
     
     ## Setup distributed training
     distributed_utils.init_distributed_mode(args)
@@ -233,18 +242,25 @@ def train_surgedepth(args):
     ## Loading/preparing data
     transforms_train = transforms.Compose([transforms.ToTensor(),
                                            transforms.Resize((args.img_height,args.img_width),antialias = False),
-                                           normalize
+                                           normalize,
+                                           transforms.RandomApply([transforms.GaussianBlur(9)],p = 0.5)
     ])
     transform_depth = transforms.Compose([transforms.Resize((args.img_height,args.img_width),antialias = False)])
 
-    datasets = ['Cholec80_video01_s0001.zip']
+    datasets = None
 
     dataset = concat_zip_datasets(args.data_path,args.depth_path,datasets=datasets,transform=transforms_train,depth_transform=transform_depth,train_student=False)
-    index = int(len(dataset)*0.8)
+
+    indices = torch.randperm(len(dataset))[:500000]
+
+    subset = torch.utils.data.Subset(dataset, indices)
+
+
+    index = int(len(subset)*0.9)
     # dataset_train = dataset[:index]
     # dataset_val = dataset[int(len(dataset)*0.8):]
 
-    dataset_train, dataset_val = torch.utils.data.random_split(dataset,[index,len(dataset)-index])
+    dataset_train, dataset_val = torch.utils.data.random_split(subset,[index,len(subset)-index])
 
     sampler = torch.utils.data.DistributedSampler(dataset_train, shuffle=True)
     # dataset[0]
@@ -268,6 +284,20 @@ def train_surgedepth(args):
     )
 
 
+    # Loading surgedepth for pseudo-labeling
+    model_configs = {
+        'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
+        'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
+        'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
+        'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
+    }
+    model_surgedepth = SurgeDepth(**model_configs['vitb']).cuda()
+    model_surgedepth.load_state_dict(torch.load('/home/hhuitema/github_repos/SurgeSplam/models/SurgeDepth/SurgeDepthStudent_V5.pth'))
+    model_surgedepth.eval()
+    for param in model_surgedepth.parameters():
+        param.requires_grad = False
+
+
 
     print(f"Data loaded: there are {len(dataset)} train images")
     ## Loading the Networks
@@ -286,7 +316,7 @@ def train_surgedepth(args):
     optimizer = torch.optim.AdamW(model.parameters())
 
     ## LR schedulers
-    scheduler_depth = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0, end_factor=0.1, total_iters=args.epochs)
+    scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0, end_factor=0.1, total_iters=args.epochs)
     
     ## Option to resume training
     to_restore = {"epoch": 0}
@@ -312,8 +342,8 @@ def train_surgedepth(args):
     ## Train loop
     for epoch in range(start_epoch,args.epochs):
         data_loader.sampler.set_epoch(epoch)
-        train_stats = train_one_epoch(args,model,data_loader=data_loader, optimizer=optimizer,criterion=criterion,epoch= epoch,render_params=render_params,inv_normalize = inv_normalize)
-        val_stats,images = val_one_epoch(args,model,data_loader=data_loader_val, optimizer=optimizer,criterion=criterion,epoch= epoch,render_params=render_params,inv_normalize = inv_normalize)
+        train_stats = train_one_epoch(args,model,data_loader=data_loader, optimizer=optimizer,criterion=criterion,epoch= epoch,render_params=render_params,inv_normalize = inv_normalize,surgedepth_model = model_surgedepth)
+        val_stats,images = val_one_epoch(args,model,data_loader=data_loader_val, optimizer=optimizer,criterion=criterion,epoch= epoch,render_params=render_params,inv_normalize = inv_normalize,surgedepth_model = model_surgedepth)
 
         save_dict = {'model': model.module.state_dict(),
                      'optimizer':optimizer.state_dict(),
@@ -336,12 +366,13 @@ def train_surgedepth(args):
         # INCLUDE LOGGING STEPS HERE
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                     'epoch': epoch}
+        scheduler.step()
         torch.cuda.empty_cache()
 
     return None
 
 
-def train_one_epoch(args,model,data_loader,optimizer,criterion,epoch,render_params,inv_normalize):
+def train_one_epoch(args,model,data_loader,optimizer,criterion,epoch,render_params,inv_normalize,surgedepth_model):
     model.train()
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
     metric_logger = distributed_utils.MetricLogger(delimiter="  ")
@@ -396,7 +427,12 @@ def train_one_epoch(args,model,data_loader,optimizer,criterion,epoch,render_para
         # optimizer.zero_grad()
         # loss.backward()
         color = data[0].cuda().squeeze(0).detach()
-        depth = 1/(data[1].cuda()+1e-4).squeeze(0).detach()
+        disp = surgedepth_model(color.unsqueeze(0))
+        disp = disp/disp.max()
+        depth = 1/(disp+1e-4).detach()
+        # print(f'Min and max depth:{depth.min()} {depth.max()}')
+        # print(f'Min and max disp" {disp.min()} {disp.max()}')
+        # depth = 1/(data[1].cuda()+1e-4).squeeze(0).detach()
         # depth = data[1].cuda().squeeze(0)
 
         scale = torch.max(depth).detach()
@@ -436,7 +472,8 @@ def train_one_epoch(args,model,data_loader,optimizer,criterion,epoch,render_para
         cols = torch.permute(output[0], (1, 2, 0)).reshape(-1, 8) # (C, H, W) -> (H, W, C) -> (H * W, C)
         rots = cols[:,:4]
 
-        scales_norm = (cols[:,4:7]-cols[:,4:7].min()) / (cols[:,4:7].max()-cols[:,4:7].min())
+        # scales_norm = (cols[:,4:7]-cols[:,4:7].min()) / (cols[:,4:7].max()-cols[:,4:7].min())
+        scales_norm = cols[:,4:7]
         opacities = cols[:,7][:,None]
 
         params['unnorm_rotations'] = rots[mask]
@@ -463,17 +500,19 @@ def train_one_epoch(args,model,data_loader,optimizer,criterion,epoch,render_para
         # loss = img_loss+5*depth_loss
         # print(loss)
 
-        loss, _, _ = get_loss(params, curr_data, variables, 0, loss_weights,
+        loss_iter, _, _ = get_loss(params, curr_data, variables, 0, loss_weights,
                             use_sil_for_loss=True, sil_thres=0,
                             use_l1=True,ignore_outlier_depth_loss=True, tracking=False,mapping=True ,
                             plot_dir=None, visualize_tracking_loss=False,
                             tracking_iteration=0,GRN_input=True,plotting = False)
-
-        loss = loss/args.num_accumulation_steps
-        loss.backward()
+        if not torch.isnan(loss_iter) and torch.isfinite(loss_iter):
+            loss = loss_iter/args.num_accumulation_steps
+            loss.backward()
 
         if ((it+1)%args.num_accumulation_steps == 0) or (it+1 == len(data_loader)):
-            optimizer.step()
+            if not torch.isnan(loss) or torch.isfinite(loss):
+
+                optimizer.step()
             optimizer.zero_grad()
 
 
@@ -492,7 +531,7 @@ def train_one_epoch(args,model,data_loader,optimizer,criterion,epoch,render_para
 
         # # ~~~~~~~~~~~~~~~~~~~~~~~~~~~ SOME WANDB LOGGING ~~~~~~~~~~~~~~~~~~~~~~~~~~~
         with torch.no_grad():
-            if it  ==len(data_loader)-1: # Log every 10th batch
+            if it  % args.logging_interval == 0: # Log every 100th batch
                 if args.rank ==0:
                     
                     
@@ -549,6 +588,13 @@ def train_one_epoch(args,model,data_loader,optimizer,criterion,epoch,render_para
                     plt.close()
 
 
+    if it % 10000 == 0: # Save the latest checkpoint every 10000 batches
+        save_dict = {'model': model.module.state_dict(),
+            'optimizer_depth':optimizer.state_dict(),
+            'epoch': epoch+1,
+            'args': args,
+        }
+        utils.save_on_master(save_dict,os.path.join(args.output_dir,'checkpoint.pth'))
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
@@ -559,7 +605,7 @@ def train_one_epoch(args,model,data_loader,optimizer,criterion,epoch,render_para
 
 
 
-def val_one_epoch(args,model,data_loader,optimizer,criterion,epoch,render_params,inv_normalize):
+def val_one_epoch(args,model,data_loader,optimizer,criterion,epoch,render_params,inv_normalize,surgedepth_model):
     with torch.no_grad():
         model.eval()
         header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
@@ -567,7 +613,11 @@ def val_one_epoch(args,model,data_loader,optimizer,criterion,epoch,render_params
         for it, data in enumerate(metric_logger.log_every(data_loader, args.logging_interval, header)):
 
             color = data[0].cuda().squeeze(0).detach()
-            depth = 1/(data[1].cuda()+1e-4).squeeze(0).detach()
+            disp = surgedepth_model(color.unsqueeze(0))
+            disp = disp/disp.max()
+            depth = 1/(disp+1e-4).detach()
+
+            # depth = 1/(data[1].cuda()+1e-4).squeeze(0).detach()
             # depth = data[1].cuda().squeeze(0)
 
             scale = torch.max(depth).detach()
@@ -596,18 +646,14 @@ def val_one_epoch(args,model,data_loader,optimizer,criterion,epoch,render_params
                 im=1.0,
                 depth=1.0,
             )
-            
-            loss_distance_init, _, _ = get_loss(params, curr_data, variables, 0, loss_weights,
-                                            use_sil_for_loss=True, sil_thres=0,
-                                            use_l1=True,ignore_outlier_depth_loss=True, tracking=False,mapping=True ,
-                                            plot_dir=None, visualize_tracking_loss=False,
-                                            tracking_iteration=0,GRN_input=True,plotting = False)
+
             output = model(input)
             # print(output)
             cols = torch.permute(output[0], (1, 2, 0)).reshape(-1, 8) # (C, H, W) -> (H, W, C) -> (H * W, C)
             rots = cols[:,:4]
 
-            scales_norm = (cols[:,4:7]-cols[:,4:7].min()) / (cols[:,4:7].max()-cols[:,4:7].min())
+            # scales_norm = (cols[:,4:7]-cols[:,4:7].min()) / (cols[:,4:7].max()-cols[:,4:7].min())
+            scales_norm = cols[:,4:7]
             opacities = cols[:,7][:,None]
 
             params['unnorm_rotations'] = rots[mask]
@@ -618,17 +664,15 @@ def val_one_epoch(args,model,data_loader,optimizer,criterion,epoch,render_params
                                 use_sil_for_loss=True, sil_thres=0,
                                 use_l1=True,ignore_outlier_depth_loss=True, tracking=False,mapping=True ,
                                 plot_dir=None, visualize_tracking_loss=False,
-                                tracking_iteration=0,GRN_input=False,plotting = False)
+                                tracking_iteration=0,GRN_input=True,plotting = False)
 
             torch.cuda.synchronize()
             metric_logger.update(loss=loss.item())
             metric_logger.update(lr=optimizer.param_groups[0]["lr"])
-            # if it % args.logging_interval == 0:
-            #     stats_log = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
-            #     wandb.log(stats_log)
+
 
             # # ~~~~~~~~~~~~~~~~~~~~~~~~~~~ SOME WANDB LOGGING ~~~~~~~~~~~~~~~~~~~~~~~~~~~
-            if it  == len(data_loader)-1: # Log every 10th batch
+            if it  %args.logging_interval == 0: # Log every 10th batch
                 if args.rank ==0:
                     
                     
@@ -672,7 +716,6 @@ def val_one_epoch(args,model,data_loader,optimizer,criterion,epoch,render_params
                     ax[5].set_title('Input Depth scale: {:2f}'.format(scale))
                     plt.colorbar(im,ax = ax[5])
 
-                    # Create images list for logging
                     images = [wandb.Image(fig, caption='Top: Gt disparity, bottom: predicted disparity', mode='L')]
                     # stats_log = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
                     # stats_log['images'] = images
@@ -688,76 +731,11 @@ def val_one_epoch(args,model,data_loader,optimizer,criterion,epoch,render_params
         stats = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
     # print(stats[0])
     return stats,images
-# def val_one_epoch(model,data_loader,criterion,epoch):
-#     with torch.no_grad():
-#         header = 'Validation epoch: [{}/{}]'.format(epoch, args.epochs)
-#         metric_logger_val = distributed_utils.MetricLogger(delimiter="  ")
-#         for it, data in enumerate(metric_logger_val.log_every(data_loader, 10, header)):
-#             data_student = data[0]
-#             data_alignment = data[1]
 
-#             img = data_student[0].cuda()
-#             disp = data_student[1].cuda().squeeze(1)
-#             img_alignment = data_alignment[0].cuda()
-
-
-
-#             mask = disp >0                       # Mask out any pixes with depth values of 0
-
-
-#             for i in range(disp.shape[0]): # According to DAv1 Paper, each depth map is normalized between 0 and 10
-#                 disp[i,:,:] = (disp[i,:,:]-disp[i,:,:].min())/(disp[i,:,:].max()-disp[i,:,:].min())
-
-
-
-#             output = model.module(img).squeeze(1)              # Forward pass
-
-
-#             features_pretrained = frozen_encoder.get_intermediate_layers(img,12)
-#             features = model.module.pretrained.get_intermediate_layers(img_alignment,12)
-#             loss = criterion(output, disp,mask.squeeze(1)).item() + feature_loss(features_pretrained[0],features[0]).item()
-#             metric_logger_val.update(loss=loss)
-
-
-#         metric_logger_val.synchronize_between_processes()
-#         print("Averaged stats validation:", metric_logger_val)
-
-#     stats = {k: meter.global_avg for k, meter in metric_logger_val.meters.items()}
-#     if args.rank ==0:
-#         if args.wandb_logging:
-#             disp_viz = disp.clone() # Cloning the tensor to avoid inplace operations, avoids a memory leak
-#             output_viz = output.clone() # Cloning the tensor to avoid inplace operations, avoids a memory leak
-#             for i in range(5):
-#                 # Normalize tensors (out-of-place operations)
-#                 disp_viz[i,:,:] = (disp[i,:,:] - disp[i,:,:].min()) / (disp[i,:,:].max() - disp[i,:,:].min())
-#                 output_viz[i,:,:] = (output[i,:,:] - output[i,:,:].min()) / (output[i,:,:].max() - output[i,:,:].min())
-
-#             # Ensure tensors are moved to CPU and converted to numpy
-#             disp_numpy = disp_viz[:5, :, :].cpu().detach().numpy()  # Move to CPU and then convert
-
-
-#             output_numpy = output_viz[:5, :, :].cpu().detach().numpy()  # Move to CPU and then convert
-
-#             # Concatenate and prepare for logging
-#             img_wandb = np.concatenate((disp_numpy, output_numpy), 1)  # Shape: 4x2HxW
-#             img_wandb = np.expand_dims(img_wandb, axis=3)
-#             img_wandb[img_wandb<0.00001] = 0.00001 # Need to clip images to be strictly within [0,1] or wandb outputs only black
-#             img_wandb[img_wandb>0.99999] = 0.99999 # Need to clip images to be strictly within [0,1] or wandb outputs only black
-
-#             # Create images list for logging
-#             images = [wandb.Image(img_wandb[i, :, :, :], caption='Top: Gt disparity, bottom: predicted disparity', mode='L') for i in range(5)]
-
-#             # Clear variables and free memory
-#             del disp, output, disp_numpy, output_numpy, disp_viz,output_viz,img_wandb
-#             torch.cuda.empty_cache()
-#     else:
-#         images = None
-            
-#   return stats,images
 
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser('SurgeDepth',parents = [get_args_parser()])
+    parser = argparse.ArgumentParser('GRN',parents = [get_args_parser()])
     args = parser.parse_args()
-    train_surgedepth(args)
+    train_GRN(args)

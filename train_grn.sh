@@ -4,7 +4,7 @@
 #SBATCH --cpus-per-task=9                                                              # Specify the number of CPUs/task
 #SBATCH --gpus=1                                                                        # Specify the number of GPUs to use
 #SBATCH --partition=gpu_mig                                                                 # Specify the node partition (see slides Cris)
-#SBATCH --time=00:10:00                                                                 # Specify the maximum time the job can run
+#SBATCH --time=60:00:00                                                                 # Specify the maximum time the job can run
 #SBATCH --output=/gpfs/home6/hhuitema/github_repos/SurgeSplam/slurm_outputs/%j.out      # Define output folder for slurm output files
 
 
@@ -26,5 +26,5 @@ srun apptainer exec --nv /home/hhuitema/docker/endogslam_v2.sif                 
                                                                                            --batch_size_per_gpu 1\
                                                                                            --num_workers 9\
                                                                                            --epochs 4 \
-                                                                                           --output_dir /gpfs/home6/hhuitema/github_repos/SurgeSplam/logs/GRN_1 \
+                                                                                           --output_dir /gpfs/home6/hhuitema/github_repos/SurgeSplam/logs/GRN_3 \
                                                                                            --learning_rate 1e-5 \
