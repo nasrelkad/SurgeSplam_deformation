@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 from datasets.gradslam_datasets.geometryutils import relative_transformation
 from utils.recon_helpers import setup_camera, energy_mask
 from utils.slam_external import build_rotation,calc_psnr
-from utils.slam_helpers import transform_to_frame, transform_to_frame_eval, transformed_params2rendervar, transformed_params2depthplussilhouette,transformed_GRNparams2rendervar,transformed_GRNparams2depthplussilhouette
+from utils.slam_helpers import transform_to_frame, transform_to_frame_eval, transformed_params2rendervar, transformed_params2depthplussilhouette,transformed_GRNparams2rendervar,transformed_GRNparams2depthplussilhouette, align_shift_and_scale
 
 
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
@@ -353,11 +353,11 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
     else:
         num_frames = len(dataset)
     print("Evaluating Final Parameters ...")
-    # psnr_list = []
-    # rmse_list = []
-    # l1_list = []
-    # lpips_list = []
-    # ssim_list = []
+    psnr_list = []
+    rmse_list = []
+    l1_list = []
+    lpips_list = []
+    ssim_list = []
     plot_dir = os.path.join(eval_dir, "plots")
     os.makedirs(plot_dir, exist_ok=True)
     if save_renders:
@@ -489,32 +489,29 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
             weighted_im = im * valid_depth_mask
             weighted_gt_im = curr_data['im'] * valid_depth_mask
             psnr = calc_psnr(weighted_im, weighted_gt_im).mean()
-            # ssim = ms_ssim(weighted_im.unsqueeze(0).cpu(), weighted_gt_im.unsqueeze(0).cpu(), 
-            #                 data_range=1.0, size_average=True)
-            # lpips_score = loss_fn_alex(torch.clamp(weighted_im.unsqueeze(0), 0.0, 1.0),
-            #                             torch.clamp(weighted_gt_im.unsqueeze(0), 0.0, 1.0)).item()
+            ssim = ms_ssim(weighted_im.unsqueeze(0).cpu(), weighted_gt_im.unsqueeze(0).cpu(), 
+                            data_range=1.0, size_average=True)
+            lpips_score = loss_fn_alex(torch.clamp(weighted_im.unsqueeze(0), 0.0, 1.0),
+                                        torch.clamp(weighted_gt_im.unsqueeze(0), 0.0, 1.0)).item()
 
-            # psnr_list.append(psnr.cpu().numpy())
-            # ssim_list.append(ssim.cpu().numpy())
-            # lpips_list.append(lpips_score)
+            psnr_list.append(psnr.cpu().numpy())
+            ssim_list.append(ssim.cpu().numpy())
+            lpips_list.append(lpips_score)
 
             # Compute Depth RMSE
-            # if mapping_iters==0 and not add_new_gaussians:
-            #     diff_depth_rmse = torch.sqrt((((rastered_depth - curr_data['depth']) * presence_sil_mask) ** 2))
-            #     diff_depth_rmse = diff_depth_rmse * valid_depth_mask
-            #     rmse = diff_depth_rmse.sum() / valid_depth_mask.sum()
-            #     diff_depth_l1 = torch.abs((rastered_depth - curr_data['depth']) * presence_sil_mask)
-            #     diff_depth_l1 = diff_depth_l1 * valid_depth_mask
-            #     depth_l1 = diff_depth_l1.sum() / valid_depth_mask.sum()
-            # else:
-            # diff_depth_rmse = torch.sqrt((((rastered_depth - curr_data['depth'])) ** 2))
-            # diff_depth_rmse = diff_depth_rmse * valid_depth_mask
-            # rmse = diff_depth_rmse.sum() / valid_depth_mask.sum()
-            diff_depth_l1 = torch.abs((rastered_depth - curr_data['depth']))
+
+            gt_depth_aligned,rastered_depth_aligned,_,_,_,_ = align_shift_and_scale( curr_data['depth'],rastered_depth_viz,valid_depth_mask)
+
+
+
+            diff_depth_rmse = torch.sqrt((((rastered_depth_aligned - gt_depth_aligned)) ** 2))
+            diff_depth_rmse = diff_depth_rmse * valid_depth_mask
+            rmse = diff_depth_rmse.sum() / valid_depth_mask.sum()
+            diff_depth_l1 = torch.abs((rastered_depth_aligned - gt_depth_aligned))
             diff_depth_l1 = diff_depth_l1 * valid_depth_mask
             depth_l1 = diff_depth_l1.sum() / valid_depth_mask.sum()
-            # rmse_list.append(rmse.cpu().numpy())
-            # l1_list.append(depth_l1.cpu().numpy())
+            rmse_list.append(rmse.cpu().numpy())
+            l1_list.append(depth_l1.cpu().numpy())
 
             if save_renders:
                 # Save Rendered RGB and Depth
@@ -575,44 +572,43 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
     # gt_w2c_list = valid_gt_w2c_list
 
     # # Calculate ATE RMSE
-    # ate_rmse = evaluate_ate(gt_w2c_list, latest_est_w2c_list)
-    # print("Final Average ATE RMSE: {:.2f} mm".format(ate_rmse*100))
+    ate_rmse = evaluate_ate(gt_w2c_list, latest_est_w2c_list)
+    print("Final Average ATE RMSE: {:.2f} mm".format(ate_rmse*100))
     
     # Compute Average Metrics
-    # NOTE: The metrics here is mainly used to debug and visualize the performance. We use a different module for evaluation to keep fair comparison.
-    # psnr_list = np.array(psnr_list)
-    # rmse_list = np.array(rmse_list)
-    # l1_list = np.array(l1_list)
-    # ssim_list = np.array(ssim_list)
-    # lpips_list = np.array(lpips_list)
-    # avg_psnr = psnr_list.mean()
-    # avg_rmse = rmse_list.mean()
-    # avg_l1 = l1_list.mean()
-    # avg_ssim = ssim_list.mean()
-    # avg_lpips = lpips_list.mean()
-    # print("Average PSNR: {:.2f}".format(avg_psnr))
-    # print("Average Depth RMSE: {:.2f} mm".format(avg_rmse*100))
-    # print("Average Depth L1: {:.2f} mm".format(avg_l1*100))
-    # print("Average MS-SSIM: {:.3f}".format(avg_ssim))
-    # print("Average LPIPS: {:.3f}".format(avg_lpips))
+    psnr_list = np.array(psnr_list)
+    rmse_list = np.array(rmse_list)
+    l1_list = np.array(l1_list)
+    ssim_list = np.array(ssim_list)
+    lpips_list = np.array(lpips_list)
+    avg_psnr = psnr_list.mean()
+    avg_rmse = rmse_list.mean()
+    avg_l1 = l1_list.mean()
+    avg_ssim = ssim_list.mean()
+    avg_lpips = lpips_list.mean()
+    print("Average PSNR: {:.2f}".format(avg_psnr))
+    print("Average Depth RMSE: {:.2f} mm".format(avg_rmse*100))
+    print("Average Depth L1: {:.2f} mm".format(avg_l1*100))
+    print("Average MS-SSIM: {:.3f}".format(avg_ssim))
+    print("Average LPIPS: {:.3f}".format(avg_lpips))
 
     # # Save metric lists as text files
-    # np.savetxt(os.path.join(eval_dir, "psnr.txt"), psnr_list)
-    # np.savetxt(os.path.join(eval_dir, "rmse.txt"), rmse_list)
-    # np.savetxt(os.path.join(eval_dir, "l1.txt"), l1_list)
-    # np.savetxt(os.path.join(eval_dir, "ssim.txt"), ssim_list)
-    # np.savetxt(os.path.join(eval_dir, "lpips.txt"), lpips_list)
+    np.savetxt(os.path.join(eval_dir, "psnr.txt"), psnr_list)
+    np.savetxt(os.path.join(eval_dir, "rmse.txt"), rmse_list)
+    np.savetxt(os.path.join(eval_dir, "l1.txt"), l1_list)
+    np.savetxt(os.path.join(eval_dir, "ssim.txt"), ssim_list)
+    np.savetxt(os.path.join(eval_dir, "lpips.txt"), lpips_list)
 
     # Plot PSNR & L1 as line plots
-    # fig, axs = plt.subplots(1, 2, figsize=(12, 4))
-    # axs[0].plot(np.arange(len(psnr_list)), psnr_list)
-    # axs[0].set_title("RGB PSNR")
-    # axs[0].set_xlabel("Time Step")
-    # axs[0].set_ylabel("PSNR")
-    # axs[1].plot(np.arange(len(l1_list)), l1_list*100)
-    # axs[1].set_title("Depth L1")
-    # axs[1].set_xlabel("Time Step")
-    # axs[1].set_ylabel("L1 (mm)")
-    # fig.suptitle("Average PSNR: {:.2f}, Average Depth L1: {:.2f} mm, ATE RMSE: {:.2f} mm".format(avg_psnr, avg_l1*100, ate_rmse*100), y=1.05, fontsize=16)
-    # plt.savefig(os.path.join(eval_dir, "metrics.png"), bbox_inches='tight')
-    # plt.close()
+    fig, axs = plt.subplots(1, 2, figsize=(12, 4))
+    axs[0].plot(np.arange(len(psnr_list)), psnr_list)
+    axs[0].set_title("RGB PSNR")
+    axs[0].set_xlabel("Time Step")
+    axs[0].set_ylabel("PSNR")
+    axs[1].plot(np.arange(len(l1_list)), l1_list*100)
+    axs[1].set_title("Depth L1")
+    axs[1].set_xlabel("Time Step")
+    axs[1].set_ylabel("L1 (mm)")
+    fig.suptitle("Average PSNR: {:.2f}, Average Depth L1: {:.2f} mm, ATE RMSE: {:.2f} mm".format(avg_psnr, avg_l1*100, ate_rmse*100), y=1.05, fontsize=16)
+    plt.savefig(os.path.join(eval_dir, "metrics.png"), bbox_inches='tight')
+    plt.close()
