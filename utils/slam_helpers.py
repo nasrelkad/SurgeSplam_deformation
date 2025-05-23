@@ -559,6 +559,10 @@ def initialize_deformations(params,nr_basis,use_distributed_biases,total_timesca
 def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis = 10,use_distributed_biases = False, total_timescale = None,use_deform = True,deform_type = 'gaussian',num_frames = 1,
                             random_initialization = False,init_scale = 0.1):
     num_pts = new_pt_cld.shape[0]
+    # Render all new gaussians with green color for debugging
+    # new_pt_cld[:,3] = 0
+    # new_pt_cld[:,5] = 0
+    # new_pt_cld[:,4] = 1
     means3D = new_pt_cld[:, :3] # [num_gaussians, 3]
     unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1)) # [num_gaussians, 3]
     logit_opacities = torch.ones((num_pts, 1), dtype=torch.float, device="cuda") * 0.5
@@ -788,13 +792,13 @@ def align_shift_and_scale(gt_disp, pred_disp,mask):
     valid = ssum > 0
 
     
-    t_gt = torch.median((gt_disp[valid]*mask[valid]).view(valid.sum(),-1),dim = 1).values
+    t_gt = torch.median((gt_disp[mask]*mask[mask]).view(valid.sum(),-1),dim = 1).values
     # print(t_gt)
     # print(gt_disp[valid].view(valid.sum(),-1).shape,t_gt.shape)
 
-    s_gt = torch.mean(torch.abs(gt_disp[valid].view(valid.sum(),-1)- t_gt[:,None]),1)
-    t_pred = torch.median((pred_disp[valid]*mask[valid]).view(valid.sum(),-1),dim = 1).values
-    s_pred = torch.mean(torch.abs(pred_disp[valid].view(valid.sum(),-1)- t_pred[:,None]),1)
+    s_gt = torch.mean(torch.abs(gt_disp[mask].view(valid.sum(),-1)- t_gt[:,None]),1)
+    t_pred = torch.median((pred_disp[mask]*mask[mask]).view(valid.sum(),-1),dim = 1).values
+    s_pred = torch.mean(torch.abs(pred_disp[mask].view(valid.sum(),-1)- t_pred[:,None]),1)
     # print(pred_disp.view(gt_disp.shape[0],-1).shape,t_pred.shape,s_pred.shape)
     pred_disp_aligned = (pred_disp.view(pred_disp.shape[0],-1)- t_pred[:,None])/s_pred[:,None]
     pred_disp_aligned = pred_disp_aligned.view(pred_disp.shape[0],pred_disp.shape[1],pred_disp.shape[2])

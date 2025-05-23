@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 from datasets.gradslam_datasets.geometryutils import relative_transformation
 from utils.recon_helpers import setup_camera, energy_mask
 from utils.slam_external import build_rotation,calc_psnr
-from utils.slam_helpers import transform_to_frame, transform_to_frame_eval, transformed_params2rendervar, transformed_params2depthplussilhouette,transformed_GRNparams2rendervar,transformed_GRNparams2depthplussilhouette, align_shift_and_scale
+from utils.slam_helpers import transform_to_frame, transform_to_frame_eval, transformed_params2rendervar, transformed_params2depthplussilhouette,transformed_GRNparams2rendervar,transformed_GRNparams2depthplussilhouette,align_shift_and_scale
 
 
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
@@ -55,6 +55,38 @@ def align(model, data):
 
     return rot, trans, trans_error
 
+# def align_shift_and_scale(gt_disp, pred_disp):
+
+#     t_gt = np.median(gt_disp)
+#     s_gt = np.mean(np.abs(gt_disp - t_gt))
+    
+#     t_pred = np.median(pred_disp)
+#     s_pred = np.mean(np.abs(pred_disp - t_pred))
+#     pred_disp_aligned = (pred_disp - t_pred) * (s_gt / s_pred) + t_gt
+
+#     return pred_disp_aligned, t_gt, s_gt, t_pred, s_pred
+
+
+# def align_shift_and_scale(gt_disp, pred_disp,mask):
+#     ssum = torch.sum(mask, (1, 2))
+#     valid = ssum > 0
+
+    
+#     t_gt = torch.median((gt_disp[valid]*mask[valid]).view(valid.sum(),-1),dim = 1).values
+#     # print(t_gt)
+#     # print(gt_disp[valid].view(valid.sum(),-1).shape,t_gt.shape)
+
+#     s_gt = torch.mean(torch.abs(gt_disp[valid].view(valid.sum(),-1)- t_gt[:,None]),1)
+#     t_pred = torch.median((pred_disp[valid]*mask[valid]).view(valid.sum(),-1),dim = 1).values
+#     s_pred = torch.mean(torch.abs(pred_disp[valid].view(valid.sum(),-1)- t_pred[:,None]),1)
+#     # print(pred_disp.view(gt_disp.shape[0],-1).shape,t_pred.shape,s_pred.shape)
+#     pred_disp_aligned = (pred_disp.view(pred_disp.shape[0],-1)- t_pred[:,None])/s_pred[:,None]
+#     pred_disp_aligned = pred_disp_aligned.view(pred_disp.shape[0],pred_disp.shape[1],pred_disp.shape[2])
+
+
+#     gt_disp_aligned = (gt_disp.view(gt_disp.shape[0],-1)- t_gt[:,None])/s_gt[:,None]
+#     gt_disp_aligned = gt_disp_aligned.view(gt_disp.shape[0],gt_disp.shape[1],gt_disp.shape[2])
+#     return  gt_disp_aligned, pred_disp_aligned,t_gt, s_gt, t_pred, s_pred
 
 def evaluate_ate(gt_traj, est_traj):
     """
@@ -340,6 +372,29 @@ def deform_gaussians(params, time, deform_grad, N=5,deformation_type = 'gaussian
 
     return xyz, rots, scales,opacities, colors
 
+
+def compute_errors(gt, pred):
+    """Computation of error metrics between predicted and ground truth depths
+    """
+    thresh = np.maximum((gt / pred), (pred / gt))
+    a1 = (thresh < 1.25     ).mean()
+    a2 = (thresh < 1.25 ** 2).mean()
+    a3 = (thresh < 1.25 ** 3).mean()
+
+    rmse = (gt - pred) ** 2
+    rmse = np.sqrt(rmse.mean())
+
+    rmse_log = (np.log(gt) - np.log(pred)) ** 2
+    rmse_log = np.sqrt(rmse_log.mean())
+
+    abs_rel = np.mean(np.abs(gt - pred) / gt)
+
+    sq_rel = np.mean(((gt - pred) ** 2) / gt)
+
+    psnr = 20*np.log10(np.max(gt)/np.sqrt(rmse))
+
+    return abs_rel, sq_rel, rmse, rmse_log, a1, a2, a3, psnr
+
 def eval_save(dataset, final_params, eval_dir, sil_thres, 
          mapping_iters, add_new_gaussians, save_renders=True,use_grn = True):
     # timer = Timer()
@@ -500,9 +555,53 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
 
             # Compute Depth RMSE
 
-            gt_depth_aligned,rastered_depth_aligned,_,_,_,_ = align_shift_and_scale( curr_data['depth'],rastered_depth_viz,valid_depth_mask)
+            # gt_depth_aligned,rastered_depth_aligned,t_gt,s_gt,t_pred,s_pred = align_shift_and_scale( curr_data['depth'].cpu().detach(),rastered_depth_viz.cpu().detach())
+            # gt_depth_aligned[gt_depth_aligned<1e-3] = 1e-3
+            # rastered_depth_aligned[rastered_depth_aligned<1e-3] = 1e-3
+            # gt_depth_aligned[gt_depth_aligned>150] = 150
+            # rastered_depth_aligned[rastered_depth_aligned>150] = 150
+            gt_depth_aligned = curr_data['depth']
+            _,_,t_gt,s_gt,t_pred,s_pred = align_shift_and_scale(curr_data['depth'], rastered_depth_viz,valid_depth_mask)
+            rastered_depth_aligned = (rastered_depth_viz-t_pred)*(s_gt/s_pred)+t_gt
+
+            # fig,ax = plt.subplots(2,3)
+            # im0 = ax[0,0].imshow(gt_depth_aligned.squeeze().cpu().detach())
+            # ax[0,0].set_title("GT Depth aligned, s_gt: {:.2f}, t_gt: {:.2f}".format(s_gt.item(),t_gt.item()))
+            # plt.colorbar(im0,ax=ax[0,0])
+            # im1 = ax[0,1].imshow(rastered_depth_aligned.squeeze().cpu().detach())
+            # ax[0,1].set_title("Rastered Depth aligned, s_pred: {:.2f}, t_pred: {:.2f}".format(s_pred.item(),t_pred.item()))
+            # plt.colorbar(im1,ax=ax[0,1])
+            # im2 = ax[0,2].imshow(np.abs(gt_depth_aligned.squeeze().cpu().detach()-rastered_depth_aligned.squeeze().cpu().detach()*valid_depth_mask.squeeze().cpu().detach()))
+            # plt.colorbar(im2,ax=ax[0,2])
 
 
+            # im3 = ax[1,0].imshow(curr_data['depth'].squeeze().cpu().detach())
+            # ax[1,0].set_title("GT Depth (not aligned)")
+            # plt.colorbar(im3,ax=ax[1,0])
+            # im4 = ax[1,1].imshow(rastered_depth_viz.squeeze().cpu().detach())
+            # ax[1,1].set_title("Rastered Depth (not aligned)")
+            # plt.colorbar(im4,ax=ax[1,1])
+            # im5 = ax[1,2].imshow(valid_depth_mask.squeeze().cpu().detach())
+            # ax[1,2].set_title("Valid Depth Mask")
+            # plt.colorbar(im5,ax=ax[1,2])
+            # plt.show()
+
+
+            # gt_depth_aligned = curr_data['depth'][valid_depth_mask].cpu().detach().numpy()
+            # rastered_depth_aligned = rastered_depth_viz[valid_depth_mask].cpu().detach().numpy()
+            # gt_depth_aligned[gt_depth_aligned<1e-3] = 1e-3
+            # rastered_depth_aligned[rastered_depth_aligned<1e-3] = 1e-3
+            # gt_depth_aligned[gt_depth_aligned>150] = 150
+            # rastered_depth_aligned[rastered_depth_aligned>150] = 150
+
+            # rastered_depth_aligned,t_gt,s_gt,t_pred,s_pred = align_shift_and_scale( gt_depth_aligned,rastered_depth_aligned)
+
+
+
+            print("s_gt: {:.2f}, t_gt: {:.2f}, s_pred: {:.2f}, t_pred: {:.2f}".format(s_gt.item(),t_gt.item(),s_pred.item(),t_pred.item()))
+
+            error = compute_errors((gt_depth_aligned[valid_depth_mask].cpu().detach().numpy()), (rastered_depth_aligned[valid_depth_mask].cpu().detach().numpy()))
+            print("Abs Rel: {:.4f}, Sq Rel: {:.4f}, RMSE: {:.4f}, RMSE Log: {:.4f}, A1: {:.4f}, A2: {:.4f}, A3: {:.4f}, PSNR: {:.4f}".format(*error))
 
             diff_depth_rmse = torch.sqrt((((rastered_depth_aligned - gt_depth_aligned)) ** 2))
             diff_depth_rmse = diff_depth_rmse * valid_depth_mask
