@@ -20,3 +20,5 @@ notes.txt
 playground.ipynb
 .vscode
 *.tar.gz
+
+slurm_outputs/
