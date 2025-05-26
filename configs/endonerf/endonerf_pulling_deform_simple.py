@@ -9,7 +9,7 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "pulling_deform_simple_32 w/o SurgeDepth"
+    scene_name = "pulling_deform_simple_33"
 
 map_every = 1
 keyframe_every = 8
@@ -60,8 +60,8 @@ config = dict(
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
             im=2.0,
-            depth=2.0,
-            deform = 0.5
+            depth=5.0,
+            deform = 1.0
         ),
         lrs=dict(
             means3D=0.005,
