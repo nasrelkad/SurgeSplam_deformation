@@ -6,3 +6,4 @@ from .c3vd import C3VDDataset
 from .scared import ScaredDataset
 from .endonerf import EndoNerfDataset
 from .RARP import RARPDataset
+from .hamlyn import HamlynDataset
