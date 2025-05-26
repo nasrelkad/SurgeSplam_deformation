@@ -25,6 +25,7 @@ from datasets.gradslam_datasets import (
     ScaredDataset,
     EndoNerfDataset,
     RARPDataset,
+    HamlynDataset
 )
 from utils.common_utils import seed_everything, save_params_ckpt, save_params, save_means3D
 from utils.eval_helpers import report_progress, eval_save
@@ -64,6 +65,8 @@ def get_dataset(config_dict, basedir, sequence, **kwargs):
         return EndoNerfDataset(config_dict, basedir, sequence, **kwargs)    
     elif config_dict["dataset_name"].lower() in ['rarp']:
         return RARPDataset(config_dict, basedir, sequence, **kwargs)
+    elif config_dict['dataset_name'].lower() in ['hamlyn']:
+        return HamlynDataset(config_dict, basedir, sequence, **kwargs)
     else:
         raise ValueError(f"Unknown dataset name {config_dict['dataset_name']}")
 
