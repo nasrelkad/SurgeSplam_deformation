@@ -88,7 +88,7 @@ def align(model, data):
 #     gt_disp_aligned = gt_disp_aligned.view(gt_disp.shape[0],gt_disp.shape[1],gt_disp.shape[2])
 #     return  gt_disp_aligned, pred_disp_aligned,t_gt, s_gt, t_pred, s_pred
 
-def evaluate_ate(gt_traj, est_traj):
+def evaluate_ate(gt_traj, est_traj, plot_traj = False):
     """
     Input : 
         gt_traj: list of 4x4 matrices 
@@ -101,7 +101,25 @@ def evaluate_ate(gt_traj, est_traj):
     gt_traj_pts  = torch.stack(gt_traj_pts).detach().cpu().numpy().T
     est_traj_pts = torch.stack(est_traj_pts).detach().cpu().numpy().T
 
-    _, _, trans_error = align(gt_traj_pts, est_traj_pts)
+    rot, trans, trans_error = align(gt_traj_pts, est_traj_pts)
+
+    gt_traj_aligned = rot* gt_traj_pts+trans
+    gt_traj_aligned = np.array(gt_traj_aligned)
+    fig = plt.figure()
+
+# syntax for 3-D projection
+    ax = plt.axes(projection ='3d')
+    x_gt = gt_traj_aligned[0,:]
+    y_gt = gt_traj_aligned[1,:]
+    z_gt = gt_traj_aligned[2,:]
+
+    x_est = est_traj_pts[0,:]
+    y_est = est_traj_pts[1,:]
+    z_est = est_traj_pts[2,:]
+    print(x_gt[0])
+    ax.plot3D(x_gt, y_gt, z_gt, 'green', label='Ground Truth Trajectory')
+    ax.plot3D(x_est, y_est, z_est, 'red', label='Estimated Trajectory')
+    plt.show()
 
     avg_trans_error = trans_error.mean()
 
@@ -413,6 +431,7 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
     l1_list = []
     lpips_list = []
     ssim_list = []
+    depth_errors_list = []
     plot_dir = os.path.join(eval_dir, "plots")
     os.makedirs(plot_dir, exist_ok=True)
     if save_renders:
@@ -464,7 +483,7 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
         
     for total_time_idx in tqdm(range(num_frames)):
         dataset_type, dataset, time_idx = get_idx(total_time_idx)
-        print(time_idx)
+        # print(time_idx)
          # Get RGB-D Data & Camera Parameters
         color, depth, intrinsics, pose = dataset[time_idx]
         intrinsics = intrinsics[:3, :3]
@@ -601,6 +620,7 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
             print("s_gt: {:.2f}, t_gt: {:.2f}, s_pred: {:.2f}, t_pred: {:.2f}".format(s_gt.item(),t_gt.item(),s_pred.item(),t_pred.item()))
 
             error = compute_errors((gt_depth_aligned[valid_depth_mask].cpu().detach().numpy()), (rastered_depth_aligned[valid_depth_mask].cpu().detach().numpy()))
+            depth_errors_list.append(error)
             print("Abs Rel: {:.4f}, Sq Rel: {:.4f}, RMSE: {:.4f}, RMSE Log: {:.4f}, A1: {:.4f}, A2: {:.4f}, A3: {:.4f}, PSNR: {:.4f}".format(*error))
 
             diff_depth_rmse = torch.sqrt((((rastered_depth_aligned - gt_depth_aligned)) ** 2))
@@ -654,42 +674,48 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
         valid_gt_w2c_list.append(gt_w2c_list[idx])
     
     # save poses for ate eval
-    if split:
-        with open(os.path.join(eval_dir, 'gt_train_w2c.txt'), 'w') as f:
-            for tensor in [gt_w2c_list[idx] for idx in train_idx]:
-                line = ''
-                for v in tensor.reshape(-1).numpy():
-                    line += str(v) + ','
-                f.write(line[:-1] + '\n')
-        with open(os.path.join(eval_dir, 'est_w2c.txt'), 'w') as f:
-            for tensor in latest_est_w2c_list:
-                line = ''
-                for v in tensor.reshape(-1).cpu().numpy():
-                    line += str(v) + ','
-                f.write(line[:-1] + '\n')
+    # if split:
+    with open(os.path.join(eval_dir, 'gt_train_w2c.txt'), 'w') as f:
+        for tensor in [gt_w2c_list[idx] for idx in range(num_frames)]:
+            line = ''
+            for v in tensor.reshape(-1).numpy():
+                line += str(v) + ','
+            f.write(line[:-1] + '\n')
+    with open(os.path.join(eval_dir, 'est_w2c.txt'), 'w') as f:
+        for tensor in latest_est_w2c_list:
+            line = ''
+            for v in tensor.reshape(-1).cpu().numpy():
+                line += str(v) + ','
+            f.write(line[:-1] + '\n')
     # timer.end()
     # gt_w2c_list = valid_gt_w2c_list
 
     # # Calculate ATE RMSE
     ate_rmse = evaluate_ate(gt_w2c_list, latest_est_w2c_list)
     print("Final Average ATE RMSE: {:.2f} mm".format(ate_rmse*100))
-    
+    depth_error_metrics = ['Abs Rel', 'Sq Rel', 'RMSE', 'RMSE Log', 'A1', 'A2', 'A3', 'PSNR']
     # Compute Average Metrics
     psnr_list = np.array(psnr_list)
     rmse_list = np.array(rmse_list)
     l1_list = np.array(l1_list)
     ssim_list = np.array(ssim_list)
     lpips_list = np.array(lpips_list)
+    depth_errors_np = {key: [] for key in depth_error_metrics}
+    for error in depth_errors_list:
+        for id,metric in enumerate(error):
+            depth_errors_np[depth_error_metrics[id]].append(metric)
     avg_psnr = psnr_list.mean()
     avg_rmse = rmse_list.mean()
     avg_l1 = l1_list.mean()
     avg_ssim = ssim_list.mean()
     avg_lpips = lpips_list.mean()
+    avg_depth_errors = {key: np.mean(depth_errors_np[key]) for key in depth_errors_np.keys()}
     print("Average PSNR: {:.2f}".format(avg_psnr))
     print("Average Depth RMSE: {:.2f} mm".format(avg_rmse*100))
     print("Average Depth L1: {:.2f} mm".format(avg_l1*100))
     print("Average MS-SSIM: {:.3f}".format(avg_ssim))
     print("Average LPIPS: {:.3f}".format(avg_lpips))
+    print("Average Depth Errors: {}".format(avg_depth_errors))
 
     # # Save metric lists as text files
     np.savetxt(os.path.join(eval_dir, "psnr.txt"), psnr_list)
@@ -697,6 +723,9 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
     np.savetxt(os.path.join(eval_dir, "l1.txt"), l1_list)
     np.savetxt(os.path.join(eval_dir, "ssim.txt"), ssim_list)
     np.savetxt(os.path.join(eval_dir, "lpips.txt"), lpips_list)
+    # np.savetxt(os.path.join(eval_dir, 'depth_errors.txt'), depth_errors_np)
+    np.savetxt(os.path.join(eval_dir, 'depth_errors.txt'),np.array([depth_errors_np[key] for key in depth_errors_np.keys()]).T,header = '       '.join(depth_errors_np.keys()), fmt='%.6f',delimiter=', ')
+
 
     # Plot PSNR & L1 as line plots
     fig, axs = plt.subplots(1, 2, figsize=(12, 4))
