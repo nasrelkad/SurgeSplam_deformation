@@ -175,6 +175,7 @@ def load_camera(cfg, scene_path):
 
 def load_scene_data(scene_path, first_frame_w2c, intrinsics, time_idx,deformation_type = None):
     # Load Scene Data
+    print(f"Loading data from {scene_path}")
     all_params = dict(np.load(scene_path, allow_pickle=True))
     intrinsics = torch.tensor(intrinsics).cuda().float()
     first_frame_w2c = torch.tensor(first_frame_w2c).cuda().float()
