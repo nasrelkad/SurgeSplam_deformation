@@ -25,7 +25,8 @@ from datasets.gradslam_datasets import (
     ScaredDataset,
     EndoNerfDataset,
     RARPDataset,
-    HamlynDataset
+    HamlynDataset,
+    StereoMisDataset
 )
 from utils.common_utils import seed_everything, save_params_ckpt, save_params, save_means3D
 from utils.eval_helpers import report_progress, eval_save
@@ -67,6 +68,8 @@ def get_dataset(config_dict, basedir, sequence, **kwargs):
         return RARPDataset(config_dict, basedir, sequence, **kwargs)
     elif config_dict['dataset_name'].lower() in ['hamlyn']:
         return HamlynDataset(config_dict, basedir, sequence, **kwargs)
+    elif config_dict['dataset_name'].lower() in ['stereomis']:
+        return StereoMisDataset(config_dict, basedir, sequence, **kwargs)
     else:
         raise ValueError(f"Unknown dataset name {config_dict['dataset_name']}")
 
@@ -508,10 +511,11 @@ def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_rad
     # Get Initial Point Cloud (PyTorch CUDA Tensor)
     mask = (depth > 0) & energy_mask(color) # Mask out invalid depth values
     # Image.fromarray(np.uint8(mask[0].detach().cpu().numpy()*255), 'L').save('mask.png')
+    print("Initial gaussian mask contains {} valid pixels".format(torch.sum(mask)))
     mask = mask.reshape(-1)
     if reduce_gaussians:
         mask = get_mask(mask,color,reduction_type,reduction_fraction)
-
+    print("After reducing gaussians, mask conttains {} valid pixels".format(torch.sum(mask)))
 
 
 
