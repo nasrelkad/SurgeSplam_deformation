@@ -1,7 +1,7 @@
 import os
 
 scenes = [
-    'pulling'
+    "dataset_5/keyframe_4"
 ]
 
 primary_device="cuda:0"
@@ -9,7 +9,7 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "pulling_deform_simple_53_no_GRN"
+    scene_name = "dataset_5/keyframe_4"
 
 map_every = 1
 keyframe_every = 8
@@ -17,7 +17,7 @@ keyframe_every = 8
 tracking_iters = 10
 mapping_iters = 1
 
-group_name = f"EndoNerf {scene_name}"
+group_name = "SCARED_LONG"
 run_name = scene_name
 
 config = dict(
@@ -39,8 +39,8 @@ config = dict(
     save_checkpoints=False, # Save Checkpoints
     checkpoint_interval=int(1e10), # Checkpoint Interval
     data=dict(
-        basedir=f"./data/endonerf_pulling",
-        gradslam_data_cfg="./configs/data/endonerf.yaml",
+        basedir=f"./data/SCARED_LONG/{scene_name}",
+        gradslam_data_cfg="./configs/data/scared.yaml",
         sequence=scene_name,
         desired_image_height=336,
         desired_image_width=336,
@@ -151,7 +151,7 @@ config = dict(
         total_timescale = 50
     ),
     GRN = dict(
-        use_grn = False,
+        use_grn = True,
         random_initialization = False,
         init_scale = -1.0,
         num_iters_initialization = 10,

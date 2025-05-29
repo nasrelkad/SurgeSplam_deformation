@@ -9,7 +9,7 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "pulling_deform_simple_53_no_GRN"
+    scene_name = "pulling_baseline"
 
 map_every = 1
 keyframe_every = 8
@@ -133,7 +133,7 @@ config = dict(
         gaussian_simplification=False,
     ),
     depth = dict(
-        use_gt_depth = False,
+        use_gt_depth = True,
         model_path = 'models/SurgeDepth/SurgeDepthStudent_V5.pth',
         model_size = 'vitb',
         normalization_means = [0.46888983, 0.29536288, 0.28712815], 
