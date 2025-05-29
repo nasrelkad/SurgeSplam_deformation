@@ -1,7 +1,7 @@
 import os
 
 scenes = [
-    'pulling'
+    'cutting'
 ]
 
 primary_device="cuda:0"
@@ -9,7 +9,7 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "pulling_deform_simple_53_no_GRN"
+    scene_name = "cutting_SurgeDepth_GRN_01_percent"
 
 map_every = 1
 keyframe_every = 8
@@ -39,7 +39,7 @@ config = dict(
     save_checkpoints=False, # Save Checkpoints
     checkpoint_interval=int(1e10), # Checkpoint Interval
     data=dict(
-        basedir=f"./data/endonerf_pulling",
+        basedir=f"./data/endonerf_cutting",
         gradslam_data_cfg="./configs/data/endonerf.yaml",
         sequence=scene_name,
         desired_image_height=336,
@@ -151,10 +151,10 @@ config = dict(
         total_timescale = 50
     ),
     GRN = dict(
-        use_grn = False,
+        use_grn = True,
         random_initialization = False,
         init_scale = -1.0,
-        num_iters_initialization = 10,
+        num_iters_initialization = 50,
         num_iters_initialization_added_gaussians = 20,
         sil_thres = 0.0,
         model_path = 'GRN/models/GRN_v3.pth',
@@ -176,7 +176,7 @@ config = dict(
     gaussian_reduction = dict(
         reduce_gaussians = True,
         reduction_type = 'random',
-        reduction_fraction = 0.0
+        reduction_fraction = 0.99
     )   
 
 )

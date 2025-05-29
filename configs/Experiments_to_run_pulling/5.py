@@ -9,7 +9,7 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "pulling_deform_simple_53_no_GRN"
+    scene_name = "pulling_deform_simple_48_baseline_w_surgedepth_w_GRN"
 
 map_every = 1
 keyframe_every = 8
@@ -60,15 +60,15 @@ config = dict(
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
             im=2.0,
-            depth=2.0,
-            deform = 0.5
+            depth=5.0,
+            deform = 1.0
         ),
         lrs=dict(
-            means3D=0.01,
+            means3D=0.005,
             rgb_colors=0.0,
             unnorm_rotations=0.001,
             logit_opacities=0.0,
-            log_scales=0.001,
+            log_scales=0.0000,
             cam_unnorm_rots=0.0002,
             cam_trans=0.00005,
         ),
@@ -105,7 +105,7 @@ config = dict(
             final_removal_opacity_threshold=0.1,
             reset_opacities=False,
             reset_opacities_every=int(1e10), # Doesn't consider iter 0
-            prune_size_thresh = 0.1
+            prune_size_thresh = 0.5
         ),
         use_gaussian_splatting_densification=False, # Use Gaussian Splatting-based Densification during Mapping
         densify_dict=dict( # Needs to be updated based on the number of mapping iterations
@@ -151,21 +151,21 @@ config = dict(
         total_timescale = 50
     ),
     GRN = dict(
-        use_grn = False,
+        use_grn = True,
         random_initialization = False,
         init_scale = -1.0,
         num_iters_initialization = 10,
-        num_iters_initialization_added_gaussians = 20,
+        num_iters_initialization_added_gaussians = 10,
         sil_thres = 0.0,
         model_path = 'GRN/models/GRN_v3.pth',
         random_initialization_lrs = dict(
-            means3D=0.01,
-            rgb_colors=0.001,
-            unnorm_rotations=0.01,
+            means3D=0.005,
+            rgb_colors=0.005,
+            unnorm_rotations=0.005,
             logit_opacities=0.001,
-            log_scales=0.01,
+            log_scales=0.005,
             cam_unnorm_rots=0.000,
-            cam_trans=0.0000,
+            cam_trans=0.000,
         ),
         # grn_hidden_dim = 128,
         # grn_out_dim = 3,
