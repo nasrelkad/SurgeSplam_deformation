@@ -1,0 +1,3115 @@
+System Paths:
+/media/thesis_ssd/code/EndoGSLAM/EndoGSLAM
+/media/thesis_ssd/code/EndoGSLAM/EndoGSLAM/scripts
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python310.zip
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python3.10
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python3.10/lib-dynload
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python3.10/site-packages
+Seed set to: 0 (type: <class 'int'>)
+Loaded Config:
+{'workdir': './experiments/EndoNerf pulling_deform_simple_44_baseline', 'run_name': 'pulling_deform_simple_44_baseline', 'seed': 0, 'primary_device': 'cuda:0', 'map_every': 1, 'keyframe_every': 8, 'distance_keyframe_selection': True, 'distance_current_frame_prob': 0.1, 'mapping_window_size': -1, 'report_global_progress_every': 2000, 'scene_radius_depth_ratio': 3, 'mean_sq_dist_method': 'projective', 'report_iter_progress': False, 'load_checkpoint': False, 'checkpoint_time_idx': 0, 'save_checkpoints': False, 'checkpoint_interval': 10000000000, 'data': {'basedir': './data/endonerf_pulling', 'gradslam_data_cfg': './configs/data/endonerf.yaml', 'sequence': 'pulling_deform_simple_44_baseline', 'desired_image_height': 336, 'desired_image_width': 336, 'start': 0, 'end': -1, 'stride': 1, 'num_frames': -1, 'train_or_test': 'all'}, 'tracking': {'use_gt_poses': False, 'forward_prop': True, 'num_iters': 10, 'use_sil_for_loss': True, 'sil_thres': 0.7, 'use_l1': True, 'ignore_outlier_depth_loss': False, 'loss_weights': {'im': 2.0, 'depth': 5.0, 'deform': 1.0}, 'lrs': {'means3D': 0.005, 'rgb_colors': 0.0, 'unnorm_rotations': 0.001, 'logit_opacities': 0.0, 'log_scales': 0.0, 'cam_unnorm_rots': 0.0002, 'cam_trans': 5e-05}, 'use_depth_loss_thres': False, 'depth_loss_thres': 100000, 'visualize_tracking_loss': False}, 'mapping': {'perform_mapping': True, 'num_iters': 1, 'add_new_gaussians': True, 'sil_thres': 0.9, 'use_l1': True, 'use_sil_for_loss': True, 'ignore_outlier_depth_loss': False, 'loss_weights': {'im': 1.0, 'depth': 1.0, 'deform': 0.5}, 'lrs': {'means3D': 0.0, 'rgb_colors': 0.0, 'unnorm_rotations': 0.0, 'logit_opacities': 0.0, 'log_scales': 0.0, 'cam_unnorm_rots': 0.0, 'cam_trans': 0.0}, 'prune_gaussians': True, 'pruning_dict': {'start_after': 0, 'remove_big_after': 0, 'stop_after': 10000, 'prune_every': 1, 'removal_opacity_threshold': 0.1, 'final_removal_opacity_threshold': 0.1, 'reset_opacities': False, 'reset_opacities_every': 10000000000, 'prune_size_thresh': 0.5}, 'use_gaussian_splatting_densification': False, 'densify_dict': {'start_after': 1, 'remove_big_after': 3000, 'stop_after': 5000, 'densify_every': 1, 'grad_thresh': 0.0002, 'num_to_split_into': 2, 'removal_opacity_threshold': 0.005, 'final_removal_opacity_threshold': 0.005, 'reset_opacities_every': 3000}}, 'viz': {'render_mode': 'color', 'offset_first_viz_cam': True, 'show_sil': False, 'visualize_cams': False, 'viz_w': 320, 'viz_h': 320, 'viz_near': 0.01, 'viz_far': 100.0, 'view_scale': 2, 'viz_fps': 30, 'enter_interactive_post_online': True, 'gaussian_simplification': False}, 'depth': {'use_gt_depth': True, 'model_path': 'models/SurgeDepth/SurgeDepthStudent_V5.pth', 'model_size': 'vitb', 'normalization_means': [0.46888983, 0.29536288, 0.28712815], 'normalization_stds': [0.24689102, 0.21034359, 0.21188641], 'shift_pred': 2.0192598978494627, 'scale_pred': 0.5414197885483871, 'shift_gt': 0.016469928791720198, 'scale_gt': 0.0034374421235340256}, 'deforms': {'use_deformations': True, 'deform_type': 'simple', 'nr_basis': 50, 'use_distributed_biases': True, 'total_timescale': 50}, 'GRN': {'use_grn': False, 'random_initialization': True, 'init_scale': -1.0, 'num_iters_initialization': 10, 'num_iters_initialization_added_gaussians': 10, 'sil_thres': 0.0, 'model_path': 'GRN/models/GRN_v3.pth', 'random_initialization_lrs': {'means3D': 0.005, 'rgb_colors': 0.005, 'unnorm_rotations': 0.005, 'logit_opacities': 0.001, 'log_scales': 0.005, 'cam_unnorm_rots': 0.0, 'cam_trans': 0.0}}, 'gaussian_reduction': {'reduce_gaussians': True, 'reduction_type': 'random', 'reduction_fraction': 0.0}}
+Loading Dataset ...
+Using CDF Keyframe Selection. Note that 'mapping window size' is useless.
+{'dataset_name': 'endonerf', 'camera_params': {'image_height': 540, 'image_width': 675, 'fx': 401.1595, 'fy': 400.9425, 'cx': 334.143, 'cy': 273.8665, 'png_depth_scale': 2.55, 'crop_edge': 0}}
+./data/endonerf_pulling
+True
+simple
+Initial gaussian mask contains 79947 valid pixels
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+After reducing gaussians, mask conttains 79947 valid pixels
+
+True
+Saving parameters to: ./experiments/EndoNerf pulling_deform_simple_44_baseline/pulling_deform_simple_44_baseline
+Failed to evaluate trajectory.
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 30 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 20 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 121 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 248 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 433 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 475 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 99 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 179 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 106 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 66 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 48 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 116 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 108 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 67 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 52 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 292 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 120 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 539 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 528 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 389 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 47 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 159 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 192 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 67 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 68 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 153 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 118 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 158 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 114 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 239 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 113 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 159 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 224 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 136 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 160 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 125 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 20 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 26 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 67 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 17 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 50 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 20 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 19 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 23 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 22 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 16 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 66 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 78 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 21 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 55 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 56 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 140 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 0 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 106 new gaussians
+
+Average Tracking/Iteration Time: 15.95639402216131 ms
+Average Tracking/Frame Time: 0.15791034698486328 s
+Average Mapping/Iteration Time: 0.0 ms
+Average Mapping/Frame Time: 0.17381553564752852 s
+Average Densification Time: 8.060780438509855 ms
+Saving parameters to: ./experiments/EndoNerf pulling_deform_simple_44_baseline/pulling_deform_simple_44_baseline
+Evaluating Final Parameters ...
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 5.49, t_gt: 27.06, s_pred: 5.55, t_pred: 26.74
+Abs Rel: 0.0168, Sq Rel: 0.0636, RMSE: 1.4936, RMSE Log: 0.0620, A1: 0.9937, A2: 0.9970, A3: 0.9980, PSNR: 39.7271
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 5.95, t_gt: 27.06, s_pred: 5.88, t_pred: 26.61
+Abs Rel: 0.0173, Sq Rel: 0.0493, RMSE: 1.3280, RMSE Log: 0.0464, A1: 0.9919, A2: 0.9962, A3: 0.9994, PSNR: 39.0033
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 6.08, t_gt: 27.45, s_pred: 6.24, t_pred: 27.29
+Abs Rel: 0.0271, Sq Rel: 0.0971, RMSE: 1.7350, RMSE Log: 0.0678, A1: 0.9864, A2: 0.9936, A3: 0.9982, PSNR: 30.0639
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 5.86, t_gt: 27.84, s_pred: 6.00, t_pred: 27.40
+Abs Rel: 0.0501, Sq Rel: 0.2409, RMSE: 2.6448, RMSE Log: 0.1196, A1: 0.9686, A2: 0.9858, A3: 0.9908, PSNR: 36.8029
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.35, t_gt: 26.67, s_pred: 4.70, t_pred: 27.38
+Abs Rel: 0.0453, Sq Rel: 0.1598, RMSE: 2.1078, RMSE Log: 0.0927, A1: 0.9700, A2: 0.9921, A3: 0.9971, PSNR: 34.6079
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.17, t_gt: 26.27, s_pred: 4.30, t_pred: 26.04
+Abs Rel: 0.0284, Sq Rel: 0.0680, RMSE: 1.3473, RMSE Log: 0.0559, A1: 0.9949, A2: 0.9982, A3: 0.9992, PSNR: 30.5746
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.48, t_gt: 25.10, s_pred: 4.54, t_pred: 25.39
+Abs Rel: 0.0280, Sq Rel: 0.1671, RMSE: 4.0239, RMSE Log: 0.1219, A1: 0.9808, A2: 0.9873, A3: 0.9899, PSNR: 53.3360
+True
+True
+True
+True
+True
+True
+True
+Final Average ATE RMSE: 1.98 mm
+Average PSNR: 32.57
+Average Depth RMSE: 84.06 mm
+Average Depth L1: 84.06 mm
+Average MS-SSIM: 0.955
+Average LPIPS: 0.129
+Average Depth Errors: {'Abs Rel': 0.030438496, 'Sq Rel': 0.12082408, 'RMSE': 2.0971897, 'RMSE Log': 0.08090582, 'A1': 0.9837824579235438, 'A2': 0.992889949599893, 'A3': 0.9960860681452862, 'PSNR': 37.73081847599575}
+Average number of gaussians 84237.714
+Saving video to ./experiments/EndoNerf pulling_deform_simple_44_baseline/pulling_deform_simple_44_baseline/keyframes.avi
+System Paths:
+/media/thesis_ssd/code/EndoGSLAM/EndoGSLAM
+/media/thesis_ssd/code/EndoGSLAM/EndoGSLAM/scripts
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python310.zip
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python3.10
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python3.10/lib-dynload
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python3.10/site-packages
+Seed set to: 0 (type: <class 'int'>)
+Loaded Config:
+{'workdir': './experiments/EndoNerf pulling_deform_simple_45_baseline_slow', 'run_name': 'pulling_deform_simple_45_baseline_slow', 'seed': 0, 'primary_device': 'cuda:0', 'map_every': 1, 'keyframe_every': 8, 'distance_keyframe_selection': True, 'distance_current_frame_prob': 0.1, 'mapping_window_size': -1, 'report_global_progress_every': 2000, 'scene_radius_depth_ratio': 3, 'mean_sq_dist_method': 'projective', 'report_iter_progress': False, 'load_checkpoint': False, 'checkpoint_time_idx': 0, 'save_checkpoints': False, 'checkpoint_interval': 10000000000, 'data': {'basedir': './data/endonerf_pulling', 'gradslam_data_cfg': './configs/data/endonerf.yaml', 'sequence': 'pulling_deform_simple_45_baseline_slow', 'desired_image_height': 336, 'desired_image_width': 336, 'start': 0, 'end': -1, 'stride': 1, 'num_frames': -1, 'train_or_test': 'all'}, 'tracking': {'use_gt_poses': False, 'forward_prop': True, 'num_iters': 100, 'use_sil_for_loss': True, 'sil_thres': 0.7, 'use_l1': True, 'ignore_outlier_depth_loss': False, 'loss_weights': {'im': 2.0, 'depth': 5.0, 'deform': 1.0}, 'lrs': {'means3D': 0.005, 'rgb_colors': 0.0, 'unnorm_rotations': 0.001, 'logit_opacities': 0.0, 'log_scales': 0.0, 'cam_unnorm_rots': 0.0002, 'cam_trans': 5e-05}, 'use_depth_loss_thres': False, 'depth_loss_thres': 100000, 'visualize_tracking_loss': False}, 'mapping': {'perform_mapping': True, 'num_iters': 1, 'add_new_gaussians': True, 'sil_thres': 0.9, 'use_l1': True, 'use_sil_for_loss': True, 'ignore_outlier_depth_loss': False, 'loss_weights': {'im': 1.0, 'depth': 1.0, 'deform': 0.5}, 'lrs': {'means3D': 0.0, 'rgb_colors': 0.0, 'unnorm_rotations': 0.0, 'logit_opacities': 0.0, 'log_scales': 0.0, 'cam_unnorm_rots': 0.0, 'cam_trans': 0.0}, 'prune_gaussians': True, 'pruning_dict': {'start_after': 0, 'remove_big_after': 0, 'stop_after': 10000, 'prune_every': 1, 'removal_opacity_threshold': 0.1, 'final_removal_opacity_threshold': 0.1, 'reset_opacities': False, 'reset_opacities_every': 10000000000, 'prune_size_thresh': 0.5}, 'use_gaussian_splatting_densification': False, 'densify_dict': {'start_after': 1, 'remove_big_after': 3000, 'stop_after': 5000, 'densify_every': 1, 'grad_thresh': 0.0002, 'num_to_split_into': 2, 'removal_opacity_threshold': 0.005, 'final_removal_opacity_threshold': 0.005, 'reset_opacities_every': 3000}}, 'viz': {'render_mode': 'color', 'offset_first_viz_cam': True, 'show_sil': False, 'visualize_cams': False, 'viz_w': 320, 'viz_h': 320, 'viz_near': 0.01, 'viz_far': 100.0, 'view_scale': 2, 'viz_fps': 30, 'enter_interactive_post_online': True, 'gaussian_simplification': False}, 'depth': {'use_gt_depth': True, 'model_path': 'models/SurgeDepth/SurgeDepthStudent_V5.pth', 'model_size': 'vitb', 'normalization_means': [0.46888983, 0.29536288, 0.28712815], 'normalization_stds': [0.24689102, 0.21034359, 0.21188641], 'shift_pred': 2.0192598978494627, 'scale_pred': 0.5414197885483871, 'shift_gt': 0.016469928791720198, 'scale_gt': 0.0034374421235340256}, 'deforms': {'use_deformations': True, 'deform_type': 'simple', 'nr_basis': 50, 'use_distributed_biases': True, 'total_timescale': 50}, 'GRN': {'use_grn': False, 'random_initialization': True, 'init_scale': -1.0, 'num_iters_initialization': 100, 'num_iters_initialization_added_gaussians': 100, 'sil_thres': 0.0, 'model_path': 'GRN/models/GRN_v3.pth', 'random_initialization_lrs': {'means3D': 0.005, 'rgb_colors': 0.005, 'unnorm_rotations': 0.005, 'logit_opacities': 0.001, 'log_scales': 0.005, 'cam_unnorm_rots': 0.0, 'cam_trans': 0.0}}, 'gaussian_reduction': {'reduce_gaussians': True, 'reduction_type': 'random', 'reduction_fraction': 0.0}}
+Loading Dataset ...
+Using CDF Keyframe Selection. Note that 'mapping window size' is useless.
+{'dataset_name': 'endonerf', 'camera_params': {'image_height': 540, 'image_width': 675, 'fx': 401.1595, 'fy': 400.9425, 'cx': 334.143, 'cy': 273.8665, 'png_depth_scale': 2.55, 'crop_edge': 0}}
+./data/endonerf_pulling
+True
+simple
+Initial gaussian mask contains 79947 valid pixels
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+After reducing gaussians, mask conttains 79947 valid pixels
+
+True
+Saving parameters to: ./experiments/EndoNerf pulling_deform_simple_45_baseline_slow/pulling_deform_simple_45_baseline_slow
+Failed to evaluate trajectory.
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 369 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 152 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 134 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 252 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 245 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 443 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1051 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 148 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 275 new gaussians
+Removing 5 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 256 new gaussians
+Removing 9 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 115 new gaussians
+Removing 3 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 707 new gaussians
+Removing 8 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 137 new gaussians
+Removing 3 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 80 new gaussians
+Removing 4 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 267 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 227 new gaussians
+Removing 2 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 574 new gaussians
+Removing 2 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 112 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 978 new gaussians
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 272 new gaussians
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 224 new gaussians
+Removing 2 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 357 new gaussians
+Removing 3 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 882 new gaussians
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1297 new gaussians
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 963 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 562 new gaussians
+Removing 3 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 871 new gaussians
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1275 new gaussians
+Removing 4 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 869 new gaussians
+Removing 8 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 319 new gaussians
+Removing 9 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 805 new gaussians
+Removing 10 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 771 new gaussians
+Removing 5 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 525 new gaussians
+Removing 17 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 682 new gaussians
+Removing 3 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 846 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 73 new gaussians
+Removing 19 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 87 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 88 new gaussians
+Removing 4 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 75 new gaussians
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 115 new gaussians
+Removing 2 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 58 new gaussians
+Removing 2 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 360 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 215 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 79 new gaussians
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 86 new gaussians
+Removing 5 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 99 new gaussians
+Removing 5 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 273 new gaussians
+Removing 2 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 235 new gaussians
+Removing 4 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 147 new gaussians
+Removing 5 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 70 new gaussians
+Removing 8 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 230 new gaussians
+Removing 10 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 247 new gaussians
+Removing 11 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 123 new gaussians
+Removing 13 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 70 new gaussians
+Removing 14 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 128 new gaussians
+Removing 5 Gaussians with big weights
+
+Average Tracking/Iteration Time: 11.754963528026234 ms
+Average Tracking/Frame Time: 1.1556385968412672 s
+Average Mapping/Iteration Time: 0.0 ms
+Average Mapping/Frame Time: 1.1660635343619756 s
+Average Densification Time: 6.224333156238902 ms
+Saving parameters to: ./experiments/EndoNerf pulling_deform_simple_45_baseline_slow/pulling_deform_simple_45_baseline_slow
+Evaluating Final Parameters ...
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 5.49, t_gt: 27.06, s_pred: 5.55, t_pred: 26.81
+Abs Rel: 0.0156, Sq Rel: 0.0545, RMSE: 1.0999, RMSE Log: 0.0406, A1: 0.9959, A2: 0.9972, A3: 0.9991, PSNR: 41.0557
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 5.95, t_gt: 27.06, s_pred: 5.78, t_pred: 27.08
+Abs Rel: 0.0126, Sq Rel: 0.0153, RMSE: 0.7479, RMSE Log: 0.0256, A1: 0.9986, A2: 0.9995, A3: 0.9999, PSNR: 41.4970
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 6.08, t_gt: 27.45, s_pred: 6.11, t_pred: 27.82
+Abs Rel: 0.0221, Sq Rel: 0.0475, RMSE: 1.1297, RMSE Log: 0.0485, A1: 0.9965, A2: 0.9982, A3: 0.9991, PSNR: 31.9273
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 5.86, t_gt: 27.84, s_pred: 5.63, t_pred: 27.89
+Abs Rel: 0.0286, Sq Rel: 0.0778, RMSE: 1.4652, RMSE Log: 0.0537, A1: 0.9908, A2: 0.9974, A3: 0.9995, PSNR: 39.3678
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.35, t_gt: 26.67, s_pred: 4.33, t_pred: 26.79
+Abs Rel: 0.0265, Sq Rel: 0.0769, RMSE: 1.3607, RMSE Log: 0.0595, A1: 0.9841, A2: 0.9954, A3: 0.9995, PSNR: 36.5087
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.17, t_gt: 26.27, s_pred: 4.28, t_pred: 25.97
+Abs Rel: 0.0131, Sq Rel: 0.0155, RMSE: 0.6452, RMSE Log: 0.0264, A1: 0.9986, A2: 0.9997, A3: 0.9999, PSNR: 33.7722
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.48, t_gt: 25.10, s_pred: 4.54, t_pred: 25.08
+Abs Rel: 0.0142, Sq Rel: 0.0380, RMSE: 3.5414, RMSE Log: 0.0361, A1: 0.9981, A2: 0.9991, A3: 0.9997, PSNR: 53.8907
+True
+True
+True
+True
+True
+True
+True
+Final Average ATE RMSE: 8.16 mm
+Average PSNR: 31.44
+Average Depth RMSE: 51.12 mm
+Average Depth L1: 51.12 mm
+Average MS-SSIM: 0.951
+Average LPIPS: 0.081
+Average Depth Errors: {'Abs Rel': 0.018945048, 'Sq Rel': 0.046490725, 'RMSE': 1.4271442, 'RMSE Log': 0.041479755, 'A1': 0.9946610755313114, 'A2': 0.9981015489651723, 'A3': 0.9995079272092161, 'PSNR': 39.717057773045134}
+Average number of gaussians 91338.286
+Saving video to ./experiments/EndoNerf pulling_deform_simple_45_baseline_slow/pulling_deform_simple_45_baseline_slow/keyframes.avi
+System Paths:
+/media/thesis_ssd/code/EndoGSLAM/EndoGSLAM
+/media/thesis_ssd/code/EndoGSLAM/EndoGSLAM/scripts
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python310.zip
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python3.10
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python3.10/lib-dynload
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python3.10/site-packages
+Seed set to: 0 (type: <class 'int'>)
+Loaded Config:
+{'workdir': './experiments/EndoNerf pulling_deform_simple_46_baseline_slow_w_surgedepth', 'run_name': 'pulling_deform_simple_46_baseline_slow_w_surgedepth', 'seed': 0, 'primary_device': 'cuda:0', 'map_every': 1, 'keyframe_every': 8, 'distance_keyframe_selection': True, 'distance_current_frame_prob': 0.1, 'mapping_window_size': -1, 'report_global_progress_every': 2000, 'scene_radius_depth_ratio': 3, 'mean_sq_dist_method': 'projective', 'report_iter_progress': False, 'load_checkpoint': False, 'checkpoint_time_idx': 0, 'save_checkpoints': False, 'checkpoint_interval': 10000000000, 'data': {'basedir': './data/endonerf_pulling', 'gradslam_data_cfg': './configs/data/endonerf.yaml', 'sequence': 'pulling_deform_simple_46_baseline_slow_w_surgedepth', 'desired_image_height': 336, 'desired_image_width': 336, 'start': 0, 'end': -1, 'stride': 1, 'num_frames': -1, 'train_or_test': 'all'}, 'tracking': {'use_gt_poses': False, 'forward_prop': True, 'num_iters': 100, 'use_sil_for_loss': True, 'sil_thres': 0.7, 'use_l1': True, 'ignore_outlier_depth_loss': False, 'loss_weights': {'im': 2.0, 'depth': 5.0, 'deform': 1.0}, 'lrs': {'means3D': 0.005, 'rgb_colors': 0.0, 'unnorm_rotations': 0.001, 'logit_opacities': 0.0, 'log_scales': 0.0, 'cam_unnorm_rots': 0.0002, 'cam_trans': 5e-05}, 'use_depth_loss_thres': False, 'depth_loss_thres': 100000, 'visualize_tracking_loss': False}, 'mapping': {'perform_mapping': True, 'num_iters': 1, 'add_new_gaussians': True, 'sil_thres': 0.9, 'use_l1': True, 'use_sil_for_loss': True, 'ignore_outlier_depth_loss': False, 'loss_weights': {'im': 1.0, 'depth': 1.0, 'deform': 0.5}, 'lrs': {'means3D': 0.0, 'rgb_colors': 0.0, 'unnorm_rotations': 0.0, 'logit_opacities': 0.0, 'log_scales': 0.0, 'cam_unnorm_rots': 0.0, 'cam_trans': 0.0}, 'prune_gaussians': True, 'pruning_dict': {'start_after': 0, 'remove_big_after': 0, 'stop_after': 10000, 'prune_every': 1, 'removal_opacity_threshold': 0.1, 'final_removal_opacity_threshold': 0.1, 'reset_opacities': False, 'reset_opacities_every': 10000000000, 'prune_size_thresh': 0.5}, 'use_gaussian_splatting_densification': False, 'densify_dict': {'start_after': 1, 'remove_big_after': 3000, 'stop_after': 5000, 'densify_every': 1, 'grad_thresh': 0.0002, 'num_to_split_into': 2, 'removal_opacity_threshold': 0.005, 'final_removal_opacity_threshold': 0.005, 'reset_opacities_every': 3000}}, 'viz': {'render_mode': 'color', 'offset_first_viz_cam': True, 'show_sil': False, 'visualize_cams': False, 'viz_w': 320, 'viz_h': 320, 'viz_near': 0.01, 'viz_far': 100.0, 'view_scale': 2, 'viz_fps': 30, 'enter_interactive_post_online': True, 'gaussian_simplification': False}, 'depth': {'use_gt_depth': False, 'model_path': 'models/SurgeDepth/SurgeDepthStudent_V5.pth', 'model_size': 'vitb', 'normalization_means': [0.46888983, 0.29536288, 0.28712815], 'normalization_stds': [0.24689102, 0.21034359, 0.21188641], 'shift_pred': 2.0192598978494627, 'scale_pred': 0.5414197885483871, 'shift_gt': 0.016469928791720198, 'scale_gt': 0.0034374421235340256}, 'deforms': {'use_deformations': True, 'deform_type': 'simple', 'nr_basis': 50, 'use_distributed_biases': True, 'total_timescale': 50}, 'GRN': {'use_grn': False, 'random_initialization': True, 'init_scale': -1.0, 'num_iters_initialization': 100, 'num_iters_initialization_added_gaussians': 100, 'sil_thres': 0.0, 'model_path': 'GRN/models/GRN_v3.pth', 'random_initialization_lrs': {'means3D': 0.005, 'rgb_colors': 0.005, 'unnorm_rotations': 0.005, 'logit_opacities': 0.001, 'log_scales': 0.005, 'cam_unnorm_rots': 0.0, 'cam_trans': 0.0}}, 'gaussian_reduction': {'reduce_gaussians': True, 'reduction_type': 'random', 'reduction_fraction': 0.0}}
+Loading Dataset ...
+Using CDF Keyframe Selection. Note that 'mapping window size' is useless.
+{'dataset_name': 'endonerf', 'camera_params': {'image_height': 540, 'image_width': 675, 'fx': 401.1595, 'fy': 400.9425, 'cx': 334.143, 'cy': 273.8665, 'png_depth_scale': 2.55, 'crop_edge': 0}}
+./data/endonerf_pulling
+True
+simple
+Initial gaussian mask contains 112896 valid pixels
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+After reducing gaussians, mask conttains 112896 valid pixels
+
+True
+Saving parameters to: ./experiments/EndoNerf pulling_deform_simple_46_baseline_slow_w_surgedepth/pulling_deform_simple_46_baseline_slow_w_surgedepth
+Failed to evaluate trajectory.
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 39 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 18 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 6 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 13 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 4 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 13 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 23 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 6 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 27 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 3 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 20 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 47 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 13 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 51 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 13 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 33 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 14 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 14 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 24 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 58 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 76 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 15 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 23 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 25 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 26 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 22 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 12 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 8 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 8 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 3 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 30 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 23 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 8 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 13 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 5 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 16 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 6 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 10 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 11 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 3 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 4 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 36 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 5 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 5 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 11 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 15 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 24 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 12 new gaussians
+
+Average Tracking/Iteration Time: 21.50178254734386 ms
+Average Tracking/Frame Time: 2.113278478384018 s
+Average Mapping/Iteration Time: 0.0 ms
+Average Mapping/Frame Time: 2.1728356991495406 s
+Average Densification Time: 5.745389244773172 ms
+Saving parameters to: ./experiments/EndoNerf pulling_deform_simple_46_baseline_slow_w_surgedepth/pulling_deform_simple_46_baseline_slow_w_surgedepth
+Evaluating Final Parameters ...
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 5.49, t_gt: 27.06, s_pred: 9.29, t_pred: 15.84
+Abs Rel: 0.2688, Sq Rel: 3.4545, RMSE: 10.2276, RMSE Log: 0.3184, A1: 0.4849, A2: 0.8193, A3: 0.9806, PSNR: 31.3716
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 5.95, t_gt: 27.06, s_pred: 8.36, t_pred: 15.20
+Abs Rel: 0.2998, Sq Rel: 4.2593, RMSE: 11.3575, RMSE Log: 0.3538, A1: 0.4458, A2: 0.7512, A3: 0.9462, PSNR: 29.6824
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 6.08, t_gt: 27.45, s_pred: 7.73, t_pred: 14.39
+Abs Rel: 0.3034, Sq Rel: 4.4060, RMSE: 11.8788, RMSE Log: 0.3649, A1: 0.4156, A2: 0.7771, A3: 0.9178, PSNR: 21.7091
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 5.86, t_gt: 27.84, s_pred: 7.62, t_pred: 14.38
+Abs Rel: 0.3092, Sq Rel: 4.1986, RMSE: 11.1528, RMSE Log: 0.3588, A1: 0.4266, A2: 0.7235, A3: 0.9429, PSNR: 30.5530
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.35, t_gt: 26.67, s_pred: 7.08, t_pred: 14.10
+Abs Rel: 0.2537, Sq Rel: 2.8136, RMSE: 9.0035, RMSE Log: 0.3039, A1: 0.4562, A2: 0.8345, A3: 0.9910, PSNR: 28.3022
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.17, t_gt: 26.27, s_pred: 6.19, t_pred: 14.05
+Abs Rel: 0.2331, Sq Rel: 2.6516, RMSE: 8.8438, RMSE Log: 0.3035, A1: 0.5227, A2: 0.8659, A3: 0.9808, PSNR: 22.4028
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.48, t_gt: 25.10, s_pred: 6.03, t_pred: 13.57
+Abs Rel: 0.2632, Sq Rel: 3.2696, RMSE: 10.3756, RMSE Log: 0.3464, A1: 0.4804, A2: 0.8316, A3: 0.9154, PSNR: 49.2223
+True
+True
+True
+True
+True
+True
+True
+Final Average ATE RMSE: 7.99 mm
+Average PSNR: 35.87
+Average Depth RMSE: 792.06 mm
+Average Depth L1: 792.06 mm
+Average MS-SSIM: 0.983
+Average LPIPS: 0.031
+Average Depth Errors: {'Abs Rel': 0.27588496, 'Sq Rel': 3.5790198, 'RMSE': 10.405663, 'RMSE Log': 0.33567622, 'A1': 0.46175928926867293, 'A2': 0.8004581205209693, 'A3': 0.9535219786237114, 'PSNR': 30.463345050811768}
+Average number of gaussians 113416.429
+Saving video to ./experiments/EndoNerf pulling_deform_simple_46_baseline_slow_w_surgedepth/pulling_deform_simple_46_baseline_slow_w_surgedepth/keyframes.avi
+System Paths:
+/media/thesis_ssd/code/EndoGSLAM/EndoGSLAM
+/media/thesis_ssd/code/EndoGSLAM/EndoGSLAM/scripts
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python310.zip
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python3.10
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python3.10/lib-dynload
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python3.10/site-packages
+Seed set to: 0 (type: <class 'int'>)
+Loaded Config:
+{'workdir': './experiments/EndoNerf pulling_deform_simple_47_baseline_w_surgedepth', 'run_name': 'pulling_deform_simple_47_baseline_w_surgedepth', 'seed': 0, 'primary_device': 'cuda:0', 'map_every': 1, 'keyframe_every': 8, 'distance_keyframe_selection': True, 'distance_current_frame_prob': 0.1, 'mapping_window_size': -1, 'report_global_progress_every': 2000, 'scene_radius_depth_ratio': 3, 'mean_sq_dist_method': 'projective', 'report_iter_progress': False, 'load_checkpoint': False, 'checkpoint_time_idx': 0, 'save_checkpoints': False, 'checkpoint_interval': 10000000000, 'data': {'basedir': './data/endonerf_pulling', 'gradslam_data_cfg': './configs/data/endonerf.yaml', 'sequence': 'pulling_deform_simple_47_baseline_w_surgedepth', 'desired_image_height': 336, 'desired_image_width': 336, 'start': 0, 'end': -1, 'stride': 1, 'num_frames': -1, 'train_or_test': 'all'}, 'tracking': {'use_gt_poses': False, 'forward_prop': True, 'num_iters': 10, 'use_sil_for_loss': True, 'sil_thres': 0.7, 'use_l1': True, 'ignore_outlier_depth_loss': False, 'loss_weights': {'im': 2.0, 'depth': 5.0, 'deform': 1.0}, 'lrs': {'means3D': 0.005, 'rgb_colors': 0.0, 'unnorm_rotations': 0.001, 'logit_opacities': 0.0, 'log_scales': 0.0, 'cam_unnorm_rots': 0.0002, 'cam_trans': 5e-05}, 'use_depth_loss_thres': False, 'depth_loss_thres': 100000, 'visualize_tracking_loss': False}, 'mapping': {'perform_mapping': True, 'num_iters': 1, 'add_new_gaussians': True, 'sil_thres': 0.9, 'use_l1': True, 'use_sil_for_loss': True, 'ignore_outlier_depth_loss': False, 'loss_weights': {'im': 1.0, 'depth': 1.0, 'deform': 0.5}, 'lrs': {'means3D': 0.0, 'rgb_colors': 0.0, 'unnorm_rotations': 0.0, 'logit_opacities': 0.0, 'log_scales': 0.0, 'cam_unnorm_rots': 0.0, 'cam_trans': 0.0}, 'prune_gaussians': True, 'pruning_dict': {'start_after': 0, 'remove_big_after': 0, 'stop_after': 10000, 'prune_every': 1, 'removal_opacity_threshold': 0.1, 'final_removal_opacity_threshold': 0.1, 'reset_opacities': False, 'reset_opacities_every': 10000000000, 'prune_size_thresh': 0.5}, 'use_gaussian_splatting_densification': False, 'densify_dict': {'start_after': 1, 'remove_big_after': 3000, 'stop_after': 5000, 'densify_every': 1, 'grad_thresh': 0.0002, 'num_to_split_into': 2, 'removal_opacity_threshold': 0.005, 'final_removal_opacity_threshold': 0.005, 'reset_opacities_every': 3000}}, 'viz': {'render_mode': 'color', 'offset_first_viz_cam': True, 'show_sil': False, 'visualize_cams': False, 'viz_w': 320, 'viz_h': 320, 'viz_near': 0.01, 'viz_far': 100.0, 'view_scale': 2, 'viz_fps': 30, 'enter_interactive_post_online': True, 'gaussian_simplification': False}, 'depth': {'use_gt_depth': False, 'model_path': 'models/SurgeDepth/SurgeDepthStudent_V5.pth', 'model_size': 'vitb', 'normalization_means': [0.46888983, 0.29536288, 0.28712815], 'normalization_stds': [0.24689102, 0.21034359, 0.21188641], 'shift_pred': 2.0192598978494627, 'scale_pred': 0.5414197885483871, 'shift_gt': 0.016469928791720198, 'scale_gt': 0.0034374421235340256}, 'deforms': {'use_deformations': True, 'deform_type': 'simple', 'nr_basis': 50, 'use_distributed_biases': True, 'total_timescale': 50}, 'GRN': {'use_grn': False, 'random_initialization': True, 'init_scale': -1.0, 'num_iters_initialization': 10, 'num_iters_initialization_added_gaussians': 10, 'sil_thres': 0.0, 'model_path': 'GRN/models/GRN_v3.pth', 'random_initialization_lrs': {'means3D': 0.005, 'rgb_colors': 0.005, 'unnorm_rotations': 0.005, 'logit_opacities': 0.001, 'log_scales': 0.005, 'cam_unnorm_rots': 0.0, 'cam_trans': 0.0}}, 'gaussian_reduction': {'reduce_gaussians': True, 'reduction_type': 'random', 'reduction_fraction': 0.0}}
+Loading Dataset ...
+Using CDF Keyframe Selection. Note that 'mapping window size' is useless.
+{'dataset_name': 'endonerf', 'camera_params': {'image_height': 540, 'image_width': 675, 'fx': 401.1595, 'fy': 400.9425, 'cx': 334.143, 'cy': 273.8665, 'png_depth_scale': 2.55, 'crop_edge': 0}}
+./data/endonerf_pulling
+True
+simple
+Initial gaussian mask contains 112896 valid pixels
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+After reducing gaussians, mask conttains 112896 valid pixels
+
+True
+Saving parameters to: ./experiments/EndoNerf pulling_deform_simple_47_baseline_w_surgedepth/pulling_deform_simple_47_baseline_w_surgedepth
+Failed to evaluate trajectory.
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 78 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 28 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 20 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 14 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 15 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 6 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 32 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 13 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 9 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 3 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 14 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 6 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 17 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 16 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 15 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 5 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 9 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 5 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 4 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 18 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 14 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 36 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 19 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 5 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 5 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+Average Tracking/Iteration Time: 33.205209645357996 ms
+Average Tracking/Frame Time: 0.32723855120795114 s
+Average Mapping/Iteration Time: 0.0 ms
+Average Mapping/Frame Time: 0.3356441855430603 s
+Average Densification Time: 5.360113490711559 ms
+Saving parameters to: ./experiments/EndoNerf pulling_deform_simple_47_baseline_w_surgedepth/pulling_deform_simple_47_baseline_w_surgedepth
+Evaluating Final Parameters ...
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 5.49, t_gt: 27.06, s_pred: 10.32, t_pred: 15.33
+Abs Rel: 0.2776, Sq Rel: 3.6105, RMSE: 10.5108, RMSE Log: 0.3316, A1: 0.4850, A2: 0.7885, A3: 0.9750, PSNR: 31.2530
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 5.95, t_gt: 27.06, s_pred: 9.45, t_pred: 14.82
+Abs Rel: 0.3021, Sq Rel: 4.2630, RMSE: 11.4227, RMSE Log: 0.3608, A1: 0.4578, A2: 0.7269, A3: 0.9347, PSNR: 29.6575
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 6.08, t_gt: 27.45, s_pred: 8.54, t_pred: 13.88
+Abs Rel: 0.3077, Sq Rel: 4.4571, RMSE: 11.9849, RMSE Log: 0.3705, A1: 0.4187, A2: 0.7615, A3: 0.9045, PSNR: 21.6705
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 5.86, t_gt: 27.84, s_pred: 8.92, t_pred: 14.00
+Abs Rel: 0.3097, Sq Rel: 4.1845, RMSE: 11.1316, RMSE Log: 0.3562, A1: 0.4381, A2: 0.7074, A3: 0.9648, PSNR: 30.5613
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.35, t_gt: 26.67, s_pred: 8.56, t_pred: 13.84
+Abs Rel: 0.2551, Sq Rel: 2.8599, RMSE: 9.0161, RMSE Log: 0.3009, A1: 0.4740, A2: 0.8200, A3: 0.9908, PSNR: 28.2961
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.17, t_gt: 26.27, s_pred: 7.96, t_pred: 14.37
+Abs Rel: 0.2339, Sq Rel: 2.7134, RMSE: 8.8485, RMSE Log: 0.2995, A1: 0.5208, A2: 0.8437, A3: 0.9893, PSNR: 22.4005
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.48, t_gt: 25.10, s_pred: 8.09, t_pred: 14.14
+Abs Rel: 0.2614, Sq Rel: 3.2482, RMSE: 10.2510, RMSE Log: 0.3351, A1: 0.4834, A2: 0.8252, A3: 0.9601, PSNR: 49.2748
+True
+True
+True
+True
+True
+True
+True
+Final Average ATE RMSE: 1.85 mm
+Average PSNR: 33.47
+Average Depth RMSE: 796.91 mm
+Average Depth L1: 796.91 mm
+Average MS-SSIM: 0.966
+Average LPIPS: 0.119
+Average Depth Errors: {'Abs Rel': 0.27821693, 'Sq Rel': 3.6195335, 'RMSE': 10.452227, 'RMSE Log': 0.33636054, 'A1': 0.4682589659407574, 'A2': 0.7818923182096373, 'A3': 0.959893848575519, 'PSNR': 30.444810731070383}
+Average number of gaussians 113214.714
+Saving video to ./experiments/EndoNerf pulling_deform_simple_47_baseline_w_surgedepth/pulling_deform_simple_47_baseline_w_surgedepth/keyframes.avi
+System Paths:
+/media/thesis_ssd/code/EndoGSLAM/EndoGSLAM
+/media/thesis_ssd/code/EndoGSLAM/EndoGSLAM/scripts
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python310.zip
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python3.10
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python3.10/lib-dynload
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python3.10/site-packages
+Seed set to: 0 (type: <class 'int'>)
+Loaded Config:
+{'workdir': './experiments/EndoNerf pulling_deform_simple_48_baseline_w_surgedepth_w_GRN', 'run_name': 'pulling_deform_simple_48_baseline_w_surgedepth_w_GRN', 'seed': 0, 'primary_device': 'cuda:0', 'map_every': 1, 'keyframe_every': 8, 'distance_keyframe_selection': True, 'distance_current_frame_prob': 0.1, 'mapping_window_size': -1, 'report_global_progress_every': 2000, 'scene_radius_depth_ratio': 3, 'mean_sq_dist_method': 'projective', 'report_iter_progress': False, 'load_checkpoint': False, 'checkpoint_time_idx': 0, 'save_checkpoints': False, 'checkpoint_interval': 10000000000, 'data': {'basedir': './data/endonerf_pulling', 'gradslam_data_cfg': './configs/data/endonerf.yaml', 'sequence': 'pulling_deform_simple_48_baseline_w_surgedepth_w_GRN', 'desired_image_height': 336, 'desired_image_width': 336, 'start': 0, 'end': -1, 'stride': 1, 'num_frames': -1, 'train_or_test': 'all'}, 'tracking': {'use_gt_poses': False, 'forward_prop': True, 'num_iters': 10, 'use_sil_for_loss': True, 'sil_thres': 0.7, 'use_l1': True, 'ignore_outlier_depth_loss': False, 'loss_weights': {'im': 2.0, 'depth': 5.0, 'deform': 1.0}, 'lrs': {'means3D': 0.005, 'rgb_colors': 0.0, 'unnorm_rotations': 0.001, 'logit_opacities': 0.0, 'log_scales': 0.0, 'cam_unnorm_rots': 0.0002, 'cam_trans': 5e-05}, 'use_depth_loss_thres': False, 'depth_loss_thres': 100000, 'visualize_tracking_loss': False}, 'mapping': {'perform_mapping': True, 'num_iters': 1, 'add_new_gaussians': True, 'sil_thres': 0.9, 'use_l1': True, 'use_sil_for_loss': True, 'ignore_outlier_depth_loss': False, 'loss_weights': {'im': 1.0, 'depth': 1.0, 'deform': 0.5}, 'lrs': {'means3D': 0.0, 'rgb_colors': 0.0, 'unnorm_rotations': 0.0, 'logit_opacities': 0.0, 'log_scales': 0.0, 'cam_unnorm_rots': 0.0, 'cam_trans': 0.0}, 'prune_gaussians': True, 'pruning_dict': {'start_after': 0, 'remove_big_after': 0, 'stop_after': 10000, 'prune_every': 1, 'removal_opacity_threshold': 0.1, 'final_removal_opacity_threshold': 0.1, 'reset_opacities': False, 'reset_opacities_every': 10000000000, 'prune_size_thresh': 0.5}, 'use_gaussian_splatting_densification': False, 'densify_dict': {'start_after': 1, 'remove_big_after': 3000, 'stop_after': 5000, 'densify_every': 1, 'grad_thresh': 0.0002, 'num_to_split_into': 2, 'removal_opacity_threshold': 0.005, 'final_removal_opacity_threshold': 0.005, 'reset_opacities_every': 3000}}, 'viz': {'render_mode': 'color', 'offset_first_viz_cam': True, 'show_sil': False, 'visualize_cams': False, 'viz_w': 320, 'viz_h': 320, 'viz_near': 0.01, 'viz_far': 100.0, 'view_scale': 2, 'viz_fps': 30, 'enter_interactive_post_online': True, 'gaussian_simplification': False}, 'depth': {'use_gt_depth': False, 'model_path': 'models/SurgeDepth/SurgeDepthStudent_V5.pth', 'model_size': 'vitb', 'normalization_means': [0.46888983, 0.29536288, 0.28712815], 'normalization_stds': [0.24689102, 0.21034359, 0.21188641], 'shift_pred': 2.0192598978494627, 'scale_pred': 0.5414197885483871, 'shift_gt': 0.016469928791720198, 'scale_gt': 0.0034374421235340256}, 'deforms': {'use_deformations': True, 'deform_type': 'simple', 'nr_basis': 50, 'use_distributed_biases': True, 'total_timescale': 50}, 'GRN': {'use_grn': True, 'random_initialization': False, 'init_scale': -1.0, 'num_iters_initialization': 10, 'num_iters_initialization_added_gaussians': 10, 'sil_thres': 0.0, 'model_path': 'GRN/models/GRN_v3.pth', 'random_initialization_lrs': {'means3D': 0.005, 'rgb_colors': 0.005, 'unnorm_rotations': 0.005, 'logit_opacities': 0.001, 'log_scales': 0.005, 'cam_unnorm_rots': 0.0, 'cam_trans': 0.0}}, 'gaussian_reduction': {'reduce_gaussians': True, 'reduction_type': 'random', 'reduction_fraction': 0.0}}
+Loading Dataset ...
+Using CDF Keyframe Selection. Note that 'mapping window size' is useless.
+Using GRN for initialization
+{'dataset_name': 'endonerf', 'camera_params': {'image_height': 540, 'image_width': 675, 'fx': 401.1595, 'fy': 400.9425, 'cx': 334.143, 'cy': 273.8665, 'png_depth_scale': 2.55, 'crop_edge': 0}}
+./data/endonerf_pulling
+True
+simple
+Initial gaussian mask contains 112896 valid pixels
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+After reducing gaussians, mask conttains 112896 valid pixels
+
+True
+Removing 244 Gaussians with big weights
+Saving parameters to: ./experiments/EndoNerf pulling_deform_simple_48_baseline_w_surgedepth_w_GRN/pulling_deform_simple_48_baseline_w_surgedepth_w_GRN
+Failed to evaluate trajectory.
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Removing 2 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 17 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 104 new gaussians
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 64 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 27 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 274 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 4 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 10 new gaussians
+Removing 2 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 8 new gaussians
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 6 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 6 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 34 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 18 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 14 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 6 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 6 new gaussians
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 5 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 3 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+Average Tracking/Iteration Time: 19.734199697321113 ms
+Average Tracking/Frame Time: 0.19499578646251134 s
+Average Mapping/Iteration Time: 0.0 ms
+Average Mapping/Frame Time: 0.21418084417070662 s
+Average Densification Time: 7.078062404285778 ms
+Saving parameters to: ./experiments/EndoNerf pulling_deform_simple_48_baseline_w_surgedepth_w_GRN/pulling_deform_simple_48_baseline_w_surgedepth_w_GRN
+Evaluating Final Parameters ...
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 5.49, t_gt: 27.06, s_pred: 10.75, t_pred: 18.50
+Abs Rel: 0.2336, Sq Rel: 2.6690, RMSE: 8.9319, RMSE Log: 0.2764, A1: 0.5170, A2: 0.9186, A3: 0.9972, PSNR: 31.9599
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 5.95, t_gt: 27.06, s_pred: 9.61, t_pred: 17.52
+Abs Rel: 0.2621, Sq Rel: 3.3663, RMSE: 10.0948, RMSE Log: 0.3101, A1: 0.4896, A2: 0.8265, A3: 0.9761, PSNR: 30.1942
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 6.08, t_gt: 27.45, s_pred: 8.83, t_pred: 16.44
+Abs Rel: 0.2650, Sq Rel: 3.6283, RMSE: 10.8681, RMSE Log: 0.3253, A1: 0.4735, A2: 0.8771, A3: 0.9410, PSNR: 22.0953
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 5.86, t_gt: 27.84, s_pred: 8.61, t_pred: 15.67
+Abs Rel: 0.2870, Sq Rel: 3.6795, RMSE: 10.3946, RMSE Log: 0.3303, A1: 0.4671, A2: 0.7695, A3: 0.9699, PSNR: 30.8588
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.35, t_gt: 26.67, s_pred: 9.02, t_pred: 15.57
+Abs Rel: 0.2340, Sq Rel: 2.4089, RMSE: 8.3153, RMSE Log: 0.2746, A1: 0.5071, A2: 0.8892, A3: 0.9965, PSNR: 28.6475
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.17, t_gt: 26.27, s_pred: 8.69, t_pred: 15.62
+Abs Rel: 0.2131, Sq Rel: 2.2499, RMSE: 8.1187, RMSE Log: 0.2706, A1: 0.5450, A2: 0.9015, A3: 0.9953, PSNR: 22.7743
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.48, t_gt: 25.10, s_pred: 8.60, t_pred: 14.89
+Abs Rel: 0.2410, Sq Rel: 2.6960, RMSE: 9.5464, RMSE Log: 0.3053, A1: 0.5046, A2: 0.8734, A3: 0.9777, PSNR: 49.5841
+True
+True
+True
+True
+True
+True
+True
+Final Average ATE RMSE: 1.50 mm
+Average PSNR: 31.53
+Average Depth RMSE: 709.94 mm
+Average Depth L1: 709.94 mm
+Average MS-SSIM: 0.921
+Average LPIPS: 0.071
+Average Depth Errors: {'Abs Rel': 0.2479687, 'Sq Rel': 2.9568276, 'RMSE': 9.467122, 'RMSE Log': 0.29893798, 'A1': 0.5005304167142414, 'A2': 0.8650968746080165, 'A3': 0.979081211789058, 'PSNR': 30.87344237736293}
+Average number of gaussians 113185.429
+Saving video to ./experiments/EndoNerf pulling_deform_simple_48_baseline_w_surgedepth_w_GRN/pulling_deform_simple_48_baseline_w_surgedepth_w_GRN/keyframes.avi
+System Paths:
+/media/thesis_ssd/code/EndoGSLAM/EndoGSLAM
+/media/thesis_ssd/code/EndoGSLAM/EndoGSLAM/scripts
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python310.zip
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python3.10
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python3.10/lib-dynload
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python3.10/site-packages
+Seed set to: 0 (type: <class 'int'>)
+Loaded Config:
+{'workdir': './experiments/EndoNerf pulling_deform_simple_49_baseline_w_surgedepth_w_GRN_w_reduce_gaussians', 'run_name': 'pulling_deform_simple_49_baseline_w_surgedepth_w_GRN_w_reduce_gaussians', 'seed': 0, 'primary_device': 'cuda:0', 'map_every': 1, 'keyframe_every': 8, 'distance_keyframe_selection': True, 'distance_current_frame_prob': 0.1, 'mapping_window_size': -1, 'report_global_progress_every': 2000, 'scene_radius_depth_ratio': 3, 'mean_sq_dist_method': 'projective', 'report_iter_progress': False, 'load_checkpoint': False, 'checkpoint_time_idx': 0, 'save_checkpoints': False, 'checkpoint_interval': 10000000000, 'data': {'basedir': './data/endonerf_pulling', 'gradslam_data_cfg': './configs/data/endonerf.yaml', 'sequence': 'pulling_deform_simple_49_baseline_w_surgedepth_w_GRN_w_reduce_gaussians', 'desired_image_height': 336, 'desired_image_width': 336, 'start': 0, 'end': -1, 'stride': 1, 'num_frames': -1, 'train_or_test': 'all'}, 'tracking': {'use_gt_poses': False, 'forward_prop': True, 'num_iters': 10, 'use_sil_for_loss': True, 'sil_thres': 0.7, 'use_l1': True, 'ignore_outlier_depth_loss': False, 'loss_weights': {'im': 2.0, 'depth': 5.0, 'deform': 1.0}, 'lrs': {'means3D': 0.005, 'rgb_colors': 0.0, 'unnorm_rotations': 0.001, 'logit_opacities': 0.0, 'log_scales': 0.0, 'cam_unnorm_rots': 0.0002, 'cam_trans': 5e-05}, 'use_depth_loss_thres': False, 'depth_loss_thres': 100000, 'visualize_tracking_loss': False}, 'mapping': {'perform_mapping': True, 'num_iters': 1, 'add_new_gaussians': True, 'sil_thres': 0.9, 'use_l1': True, 'use_sil_for_loss': True, 'ignore_outlier_depth_loss': False, 'loss_weights': {'im': 1.0, 'depth': 1.0, 'deform': 0.5}, 'lrs': {'means3D': 0.0, 'rgb_colors': 0.0, 'unnorm_rotations': 0.0, 'logit_opacities': 0.0, 'log_scales': 0.0, 'cam_unnorm_rots': 0.0, 'cam_trans': 0.0}, 'prune_gaussians': True, 'pruning_dict': {'start_after': 0, 'remove_big_after': 0, 'stop_after': 10000, 'prune_every': 1, 'removal_opacity_threshold': 0.1, 'final_removal_opacity_threshold': 0.1, 'reset_opacities': False, 'reset_opacities_every': 10000000000, 'prune_size_thresh': 0.5}, 'use_gaussian_splatting_densification': False, 'densify_dict': {'start_after': 1, 'remove_big_after': 3000, 'stop_after': 5000, 'densify_every': 1, 'grad_thresh': 0.0002, 'num_to_split_into': 2, 'removal_opacity_threshold': 0.005, 'final_removal_opacity_threshold': 0.005, 'reset_opacities_every': 3000}}, 'viz': {'render_mode': 'color', 'offset_first_viz_cam': True, 'show_sil': False, 'visualize_cams': False, 'viz_w': 320, 'viz_h': 320, 'viz_near': 0.01, 'viz_far': 100.0, 'view_scale': 2, 'viz_fps': 30, 'enter_interactive_post_online': True, 'gaussian_simplification': False}, 'depth': {'use_gt_depth': False, 'model_path': 'models/SurgeDepth/SurgeDepthStudent_V5.pth', 'model_size': 'vitb', 'normalization_means': [0.46888983, 0.29536288, 0.28712815], 'normalization_stds': [0.24689102, 0.21034359, 0.21188641], 'shift_pred': 2.0192598978494627, 'scale_pred': 0.5414197885483871, 'shift_gt': 0.016469928791720198, 'scale_gt': 0.0034374421235340256}, 'deforms': {'use_deformations': True, 'deform_type': 'simple', 'nr_basis': 50, 'use_distributed_biases': True, 'total_timescale': 50}, 'GRN': {'use_grn': True, 'random_initialization': False, 'init_scale': -1.0, 'num_iters_initialization': 10, 'num_iters_initialization_added_gaussians': 10, 'sil_thres': 0.0, 'model_path': 'GRN/models/GRN_v3.pth', 'random_initialization_lrs': {'means3D': 0.005, 'rgb_colors': 0.005, 'unnorm_rotations': 0.005, 'logit_opacities': 0.001, 'log_scales': 0.005, 'cam_unnorm_rots': 0.0, 'cam_trans': 0.0}}, 'gaussian_reduction': {'reduce_gaussians': True, 'reduction_type': 'random', 'reduction_fraction': 0.9}}
+Loading Dataset ...
+Using CDF Keyframe Selection. Note that 'mapping window size' is useless.
+Using GRN for initialization
+{'dataset_name': 'endonerf', 'camera_params': {'image_height': 540, 'image_width': 675, 'fx': 401.1595, 'fy': 400.9425, 'cx': 334.143, 'cy': 273.8665, 'png_depth_scale': 2.55, 'crop_edge': 0}}
+./data/endonerf_pulling
+True
+simple
+Initial gaussian mask contains 112896 valid pixels
+Reduction mask contains 11324 valid pixels, with reduction fraction of 0.9
+After reducing gaussians, mask conttains 11324 valid pixels
+
+True
+Removing 19 Gaussians with big weights
+Saving parameters to: ./experiments/EndoNerf pulling_deform_simple_49_baseline_w_surgedepth_w_GRN_w_reduce_gaussians/pulling_deform_simple_49_baseline_w_surgedepth_w_GRN_w_reduce_gaussians
+Failed to evaluate trajectory.
+
+True
+Reduction mask contains 11191 valid pixels, with reduction fraction of 0.9
+Adding 29 new gaussians
+Removing 2 Gaussians with big weights
+
+True
+Reduction mask contains 11265 valid pixels, with reduction fraction of 0.9
+Adding 71 new gaussians
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 11327 valid pixels, with reduction fraction of 0.9
+Adding 50 new gaussians
+
+True
+Reduction mask contains 11299 valid pixels, with reduction fraction of 0.9
+Adding 40 new gaussians
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 11284 valid pixels, with reduction fraction of 0.9
+Adding 40 new gaussians
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 11287 valid pixels, with reduction fraction of 0.9
+Adding 40 new gaussians
+
+True
+Reduction mask contains 11347 valid pixels, with reduction fraction of 0.9
+Adding 91 new gaussians
+
+True
+Reduction mask contains 11370 valid pixels, with reduction fraction of 0.9
+Adding 34 new gaussians
+
+True
+Reduction mask contains 11230 valid pixels, with reduction fraction of 0.9
+Adding 36 new gaussians
+
+True
+Reduction mask contains 11272 valid pixels, with reduction fraction of 0.9
+Adding 41 new gaussians
+Removing 2 Gaussians with big weights
+
+True
+Reduction mask contains 11372 valid pixels, with reduction fraction of 0.9
+Adding 26 new gaussians
+
+True
+Reduction mask contains 11292 valid pixels, with reduction fraction of 0.9
+Adding 39 new gaussians
+
+True
+Reduction mask contains 11180 valid pixels, with reduction fraction of 0.9
+Adding 16 new gaussians
+
+True
+Reduction mask contains 11259 valid pixels, with reduction fraction of 0.9
+Adding 27 new gaussians
+
+True
+Reduction mask contains 11259 valid pixels, with reduction fraction of 0.9
+Adding 26 new gaussians
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 11337 valid pixels, with reduction fraction of 0.9
+Adding 23 new gaussians
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 11331 valid pixels, with reduction fraction of 0.9
+Adding 23 new gaussians
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 11255 valid pixels, with reduction fraction of 0.9
+Adding 24 new gaussians
+
+True
+Reduction mask contains 11271 valid pixels, with reduction fraction of 0.9
+Adding 11 new gaussians
+
+True
+Reduction mask contains 11191 valid pixels, with reduction fraction of 0.9
+Adding 8 new gaussians
+
+True
+Reduction mask contains 11256 valid pixels, with reduction fraction of 0.9
+Adding 8 new gaussians
+
+True
+Reduction mask contains 11431 valid pixels, with reduction fraction of 0.9
+Adding 15 new gaussians
+
+True
+Reduction mask contains 11364 valid pixels, with reduction fraction of 0.9
+Adding 3 new gaussians
+
+True
+Reduction mask contains 11551 valid pixels, with reduction fraction of 0.9
+Adding 7 new gaussians
+
+True
+Reduction mask contains 11112 valid pixels, with reduction fraction of 0.9
+Adding 11 new gaussians
+
+True
+Reduction mask contains 11334 valid pixels, with reduction fraction of 0.9
+Adding 13 new gaussians
+
+True
+Reduction mask contains 11385 valid pixels, with reduction fraction of 0.9
+Adding 4 new gaussians
+
+True
+Reduction mask contains 11300 valid pixels, with reduction fraction of 0.9
+Adding 4 new gaussians
+
+True
+Reduction mask contains 11348 valid pixels, with reduction fraction of 0.9
+Adding 5 new gaussians
+
+True
+Reduction mask contains 11185 valid pixels, with reduction fraction of 0.9
+Adding 6 new gaussians
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 11271 valid pixels, with reduction fraction of 0.9
+Adding 11 new gaussians
+
+True
+Reduction mask contains 11454 valid pixels, with reduction fraction of 0.9
+Adding 7 new gaussians
+
+True
+Reduction mask contains 11331 valid pixels, with reduction fraction of 0.9
+Adding 2 new gaussians
+
+True
+Reduction mask contains 11364 valid pixels, with reduction fraction of 0.9
+Adding 9 new gaussians
+
+True
+Reduction mask contains 11271 valid pixels, with reduction fraction of 0.9
+Adding 4 new gaussians
+
+True
+Reduction mask contains 11314 valid pixels, with reduction fraction of 0.9
+Adding 6 new gaussians
+
+True
+Reduction mask contains 11232 valid pixels, with reduction fraction of 0.9
+Adding 7 new gaussians
+
+True
+Reduction mask contains 11371 valid pixels, with reduction fraction of 0.9
+Adding 24 new gaussians
+
+True
+Reduction mask contains 11182 valid pixels, with reduction fraction of 0.9
+Adding 7 new gaussians
+
+True
+Reduction mask contains 11217 valid pixels, with reduction fraction of 0.9
+Adding 11 new gaussians
+
+True
+Reduction mask contains 11134 valid pixels, with reduction fraction of 0.9
+Adding 9 new gaussians
+
+True
+Reduction mask contains 11275 valid pixels, with reduction fraction of 0.9
+Adding 14 new gaussians
+
+True
+Reduction mask contains 11188 valid pixels, with reduction fraction of 0.9
+Adding 8 new gaussians
+
+True
+Reduction mask contains 11403 valid pixels, with reduction fraction of 0.9
+Adding 9 new gaussians
+
+True
+Reduction mask contains 11308 valid pixels, with reduction fraction of 0.9
+Adding 8 new gaussians
+
+True
+Reduction mask contains 11415 valid pixels, with reduction fraction of 0.9
+Adding 9 new gaussians
+
+True
+Reduction mask contains 11327 valid pixels, with reduction fraction of 0.9
+Adding 9 new gaussians
+
+True
+Reduction mask contains 11418 valid pixels, with reduction fraction of 0.9
+Adding 13 new gaussians
+
+True
+Reduction mask contains 11484 valid pixels, with reduction fraction of 0.9
+Adding 10 new gaussians
+
+True
+Reduction mask contains 11241 valid pixels, with reduction fraction of 0.9
+Adding 3 new gaussians
+
+True
+Reduction mask contains 11457 valid pixels, with reduction fraction of 0.9
+Adding 10 new gaussians
+
+True
+Reduction mask contains 11273 valid pixels, with reduction fraction of 0.9
+Adding 6 new gaussians
+
+True
+Reduction mask contains 11229 valid pixels, with reduction fraction of 0.9
+Adding 4 new gaussians
+
+True
+Reduction mask contains 11182 valid pixels, with reduction fraction of 0.9
+Adding 7 new gaussians
+
+True
+Reduction mask contains 11197 valid pixels, with reduction fraction of 0.9
+Adding 6 new gaussians
+
+Average Tracking/Iteration Time: 13.072898171164773 ms
+Average Tracking/Frame Time: 0.12958648375102452 s
+Average Mapping/Iteration Time: 0.0 ms
+Average Mapping/Frame Time: 0.15048871721540177 s
+Average Densification Time: 12.41319396279075 ms
+Saving parameters to: ./experiments/EndoNerf pulling_deform_simple_49_baseline_w_surgedepth_w_GRN_w_reduce_gaussians/pulling_deform_simple_49_baseline_w_surgedepth_w_GRN_w_reduce_gaussians
+Evaluating Final Parameters ...
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 5.49, t_gt: 27.06, s_pred: 11.74, t_pred: 18.95
+Abs Rel: 0.2340, Sq Rel: 2.6773, RMSE: 8.9253, RMSE Log: 0.2751, A1: 0.5045, A2: 0.9164, A3: 0.9983, PSNR: 31.9631
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 5.95, t_gt: 27.06, s_pred: 10.31, t_pred: 18.13
+Abs Rel: 0.2582, Sq Rel: 3.2501, RMSE: 9.8494, RMSE Log: 0.2991, A1: 0.4896, A2: 0.8470, A3: 0.9899, PSNR: 30.3011
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 6.08, t_gt: 27.45, s_pred: 9.47, t_pred: 17.38
+Abs Rel: 0.2503, Sq Rel: 3.2844, RMSE: 10.2399, RMSE Log: 0.2973, A1: 0.4895, A2: 0.8983, A3: 0.9800, PSNR: 22.3539
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 5.86, t_gt: 27.84, s_pred: 10.03, t_pred: 17.42
+Abs Rel: 0.2530, Sq Rel: 2.9539, RMSE: 9.2431, RMSE Log: 0.2862, A1: 0.5180, A2: 0.8682, A3: 0.9945, PSNR: 31.3686
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.35, t_gt: 26.67, s_pred: 10.05, t_pred: 16.15
+Abs Rel: 0.2231, Sq Rel: 2.1568, RMSE: 7.8114, RMSE Log: 0.2546, A1: 0.5348, A2: 0.9324, A3: 0.9991, PSNR: 28.9190
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.17, t_gt: 26.27, s_pred: 9.60, t_pred: 15.88
+Abs Rel: 0.2030, Sq Rel: 2.0108, RMSE: 7.6250, RMSE Log: 0.2498, A1: 0.5558, A2: 0.9417, A3: 0.9988, PSNR: 23.0468
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.48, t_gt: 25.10, s_pred: 9.47, t_pred: 15.71
+Abs Rel: 0.2335, Sq Rel: 2.5064, RMSE: 9.1422, RMSE Log: 0.2848, A1: 0.5112, A2: 0.9101, A3: 0.9936, PSNR: 49.7720
+True
+True
+True
+True
+True
+True
+True
+Final Average ATE RMSE: 1.41 mm
+Average PSNR: 36.04
+Average Depth RMSE: 672.17 mm
+Average Depth L1: 672.17 mm
+Average MS-SSIM: 0.980
+Average LPIPS: 0.054
+Average Depth Errors: {'Abs Rel': 0.23645139, 'Sq Rel': 2.6913831, 'RMSE': 8.976615, 'RMSE Log': 0.27812022, 'A1': 0.5147820826343302, 'A2': 0.902005900354484, 'A3': 0.9934468480589546, 'PSNR': 31.103504725864955}
+Average number of gaussians 11992.857
+Saving video to ./experiments/EndoNerf pulling_deform_simple_49_baseline_w_surgedepth_w_GRN_w_reduce_gaussians/pulling_deform_simple_49_baseline_w_surgedepth_w_GRN_w_reduce_gaussians/keyframes.avi
+System Paths:
+/media/thesis_ssd/code/EndoGSLAM/EndoGSLAM
+/media/thesis_ssd/code/EndoGSLAM/EndoGSLAM/scripts
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python310.zip
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python3.10
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python3.10/lib-dynload
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python3.10/site-packages
+Seed set to: 0 (type: <class 'int'>)
+Loaded Config:
+{'workdir': './experiments/EndoNerf pulling_deform_simple_50_best', 'run_name': 'pulling_deform_simple_50_best', 'seed': 0, 'primary_device': 'cuda:0', 'map_every': 1, 'keyframe_every': 8, 'distance_keyframe_selection': True, 'distance_current_frame_prob': 0.1, 'mapping_window_size': -1, 'report_global_progress_every': 2000, 'scene_radius_depth_ratio': 3, 'mean_sq_dist_method': 'projective', 'report_iter_progress': False, 'load_checkpoint': False, 'checkpoint_time_idx': 0, 'save_checkpoints': False, 'checkpoint_interval': 10000000000, 'data': {'basedir': './data/endonerf_pulling', 'gradslam_data_cfg': './configs/data/endonerf.yaml', 'sequence': 'pulling_deform_simple_50_best', 'desired_image_height': 336, 'desired_image_width': 336, 'start': 0, 'end': -1, 'stride': 1, 'num_frames': -1, 'train_or_test': 'all'}, 'tracking': {'use_gt_poses': False, 'forward_prop': True, 'num_iters': 10, 'use_sil_for_loss': True, 'sil_thres': 0.7, 'use_l1': True, 'ignore_outlier_depth_loss': False, 'loss_weights': {'im': 2.0, 'depth': 5.0, 'deform': 1.0}, 'lrs': {'means3D': 0.005, 'rgb_colors': 0.0, 'unnorm_rotations': 0.001, 'logit_opacities': 0.0, 'log_scales': 0.0, 'cam_unnorm_rots': 0.0002, 'cam_trans': 5e-05}, 'use_depth_loss_thres': False, 'depth_loss_thres': 100000, 'visualize_tracking_loss': False}, 'mapping': {'perform_mapping': True, 'num_iters': 1, 'add_new_gaussians': True, 'sil_thres': 0.9, 'use_l1': True, 'use_sil_for_loss': True, 'ignore_outlier_depth_loss': False, 'loss_weights': {'im': 1.0, 'depth': 1.0, 'deform': 0.5}, 'lrs': {'means3D': 0.0, 'rgb_colors': 0.0, 'unnorm_rotations': 0.0, 'logit_opacities': 0.0, 'log_scales': 0.0, 'cam_unnorm_rots': 0.0, 'cam_trans': 0.0}, 'prune_gaussians': True, 'pruning_dict': {'start_after': 0, 'remove_big_after': 0, 'stop_after': 10000, 'prune_every': 1, 'removal_opacity_threshold': 0.1, 'final_removal_opacity_threshold': 0.1, 'reset_opacities': False, 'reset_opacities_every': 10000000000, 'prune_size_thresh': 0.1}, 'use_gaussian_splatting_densification': False, 'densify_dict': {'start_after': 1, 'remove_big_after': 3000, 'stop_after': 5000, 'densify_every': 1, 'grad_thresh': 0.0002, 'num_to_split_into': 2, 'removal_opacity_threshold': 0.005, 'final_removal_opacity_threshold': 0.005, 'reset_opacities_every': 3000}}, 'viz': {'render_mode': 'color', 'offset_first_viz_cam': True, 'show_sil': False, 'visualize_cams': False, 'viz_w': 320, 'viz_h': 320, 'viz_near': 0.01, 'viz_far': 100.0, 'view_scale': 2, 'viz_fps': 30, 'enter_interactive_post_online': True, 'gaussian_simplification': False}, 'depth': {'use_gt_depth': False, 'model_path': 'models/SurgeDepth/SurgeDepthStudent_V5.pth', 'model_size': 'vitb', 'normalization_means': [0.46888983, 0.29536288, 0.28712815], 'normalization_stds': [0.24689102, 0.21034359, 0.21188641], 'shift_pred': 2.0192598978494627, 'scale_pred': 0.5414197885483871, 'shift_gt': 0.016469928791720198, 'scale_gt': 0.0034374421235340256}, 'deforms': {'use_deformations': True, 'deform_type': 'simple', 'nr_basis': 50, 'use_distributed_biases': True, 'total_timescale': 50}, 'GRN': {'use_grn': True, 'random_initialization': False, 'init_scale': -1.0, 'num_iters_initialization': 10, 'num_iters_initialization_added_gaussians': 10, 'sil_thres': 0.0, 'model_path': 'GRN/models/GRN_v3.pth', 'random_initialization_lrs': {'means3D': 0.005, 'rgb_colors': 0.005, 'unnorm_rotations': 0.005, 'logit_opacities': 0.001, 'log_scales': 0.005, 'cam_unnorm_rots': 0.0, 'cam_trans': 0.0}}, 'gaussian_reduction': {'reduce_gaussians': True, 'reduction_type': 'random', 'reduction_fraction': 0.0}}
+Loading Dataset ...
+Using CDF Keyframe Selection. Note that 'mapping window size' is useless.
+Using GRN for initialization
+{'dataset_name': 'endonerf', 'camera_params': {'image_height': 540, 'image_width': 675, 'fx': 401.1595, 'fy': 400.9425, 'cx': 334.143, 'cy': 273.8665, 'png_depth_scale': 2.55, 'crop_edge': 0}}
+./data/endonerf_pulling
+True
+simple
+Initial gaussian mask contains 112896 valid pixels
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+After reducing gaussians, mask conttains 112896 valid pixels
+
+True
+Removing 4893 Gaussians with big weights
+Saving parameters to: ./experiments/EndoNerf pulling_deform_simple_50_best/pulling_deform_simple_50_best
+Failed to evaluate trajectory.
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 392 new gaussians
+Removing 381 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 159 new gaussians
+Removing 133 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 136 new gaussians
+Removing 31 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 16 new gaussians
+Removing 25 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 105 new gaussians
+Removing 26 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 90 new gaussians
+Removing 26 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 329 new gaussians
+Removing 22 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 4 new gaussians
+Removing 4 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 32 new gaussians
+Removing 9 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 17 new gaussians
+Removing 4 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 7 new gaussians
+Removing 8 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 10 new gaussians
+Removing 8 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 4 new gaussians
+Removing 4 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 46 new gaussians
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 12 new gaussians
+Removing 2 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 19 new gaussians
+Removing 3 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 9 new gaussians
+Removing 3 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 4 new gaussians
+Removing 2 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 5 new gaussians
+Removing 2 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Removing 2 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 3 new gaussians
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Removing 2 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Removing 2 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+Removing 2 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 3 new gaussians
+Removing 2 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Removing 2 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 5 new gaussians
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+Removing 3 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 5 new gaussians
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 5 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+Removing 3 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 3 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Removing 3 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 3 new gaussians
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+Removing 2 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Removing 1 Gaussians with big weights
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+Average Tracking/Iteration Time: 18.262141834605824 ms
+Average Tracking/Frame Time: 0.18059733510017395 s
+Average Mapping/Iteration Time: 0.0 ms
+Average Mapping/Frame Time: 0.1993743990148817 s
+Average Densification Time: 8.495382829145953 ms
+Saving parameters to: ./experiments/EndoNerf pulling_deform_simple_50_best/pulling_deform_simple_50_best
+Evaluating Final Parameters ...
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 5.49, t_gt: 27.06, s_pred: 11.06, t_pred: 18.50
+Abs Rel: 0.2349, Sq Rel: 2.7512, RMSE: 9.0820, RMSE Log: 0.2779, A1: 0.5136, A2: 0.9141, A3: 0.9939, PSNR: 31.8875
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 5.95, t_gt: 27.06, s_pred: 9.77, t_pred: 17.48
+Abs Rel: 0.2635, Sq Rel: 3.4286, RMSE: 10.2007, RMSE Log: 0.3114, A1: 0.4895, A2: 0.8259, A3: 0.9736, PSNR: 30.1489
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 6.08, t_gt: 27.45, s_pred: 8.88, t_pred: 16.41
+Abs Rel: 0.2662, Sq Rel: 3.6524, RMSE: 10.8994, RMSE Log: 0.3260, A1: 0.4732, A2: 0.8687, A3: 0.9405, PSNR: 22.0829
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 5.86, t_gt: 27.84, s_pred: 8.99, t_pred: 16.16
+Abs Rel: 0.2765, Sq Rel: 3.4741, RMSE: 10.1509, RMSE Log: 0.3182, A1: 0.4862, A2: 0.8018, A3: 0.9804, PSNR: 30.9618
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.35, t_gt: 26.67, s_pred: 9.14, t_pred: 15.63
+Abs Rel: 0.2330, Sq Rel: 2.3828, RMSE: 8.2619, RMSE Log: 0.2731, A1: 0.5106, A2: 0.8941, A3: 0.9967, PSNR: 28.6754
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.17, t_gt: 26.27, s_pred: 8.58, t_pred: 15.72
+Abs Rel: 0.2124, Sq Rel: 2.2148, RMSE: 8.0480, RMSE Log: 0.2701, A1: 0.5444, A2: 0.9032, A3: 0.9963, PSNR: 22.8123
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.48, t_gt: 25.10, s_pred: 8.69, t_pred: 15.39
+Abs Rel: 0.2406, Sq Rel: 2.7213, RMSE: 9.5595, RMSE Log: 0.3064, A1: 0.5042, A2: 0.8747, A3: 0.9737, PSNR: 49.5781
+True
+True
+True
+True
+True
+True
+True
+Final Average ATE RMSE: 1.52 mm
+Average PSNR: 35.22
+Average Depth RMSE: 706.87 mm
+Average Depth L1: 706.87 mm
+Average MS-SSIM: 0.974
+Average LPIPS: 0.039
+Average Depth Errors: {'Abs Rel': 0.24673416, 'Sq Rel': 2.9464538, 'RMSE': 9.457491, 'RMSE Log': 0.2975922, 'A1': 0.5031165849045703, 'A2': 0.8689302214009624, 'A3': 0.9792971871712489, 'PSNR': 30.87813581739153}
+Average number of gaussians 108634.143
+Saving video to ./experiments/EndoNerf pulling_deform_simple_50_best/pulling_deform_simple_50_best/keyframes.avi
+System Paths:
+/media/thesis_ssd/code/EndoGSLAM/EndoGSLAM
+/media/thesis_ssd/code/EndoGSLAM/EndoGSLAM/scripts
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python310.zip
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python3.10
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python3.10/lib-dynload
+/media/thesis_ssd/anaconda/envs/endogslam/lib/python3.10/site-packages
+Seed set to: 0 (type: <class 'int'>)
+Loaded Config:
+{'workdir': './experiments/EndoNerf cutting_deform_simple_24_best', 'run_name': 'cutting_deform_simple_24_best', 'seed': 0, 'primary_device': 'cuda:0', 'map_every': 1, 'keyframe_every': 8, 'distance_keyframe_selection': True, 'distance_current_frame_prob': 0.1, 'mapping_window_size': -1, 'report_global_progress_every': 2000, 'scene_radius_depth_ratio': 3, 'mean_sq_dist_method': 'projective', 'report_iter_progress': False, 'load_checkpoint': False, 'checkpoint_time_idx': 0, 'save_checkpoints': False, 'checkpoint_interval': 10000000000, 'data': {'basedir': './data/endonerf_cutting', 'gradslam_data_cfg': './configs/data/endonerf.yaml', 'sequence': 'cutting_deform_simple_24_best', 'desired_image_height': 336, 'desired_image_width': 336, 'start': 0, 'end': -1, 'stride': 1, 'num_frames': -1, 'train_or_test': 'all'}, 'tracking': {'use_gt_poses': False, 'forward_prop': True, 'num_iters': 10, 'use_sil_for_loss': True, 'sil_thres': 0.7, 'use_l1': True, 'ignore_outlier_depth_loss': False, 'loss_weights': {'im': 2.0, 'depth': 5.0, 'deform': 1.0}, 'lrs': {'means3D': 0.005, 'rgb_colors': 0.0, 'unnorm_rotations': 0.001, 'logit_opacities': 0.0, 'log_scales': 0.0, 'cam_unnorm_rots': 0.0002, 'cam_trans': 5e-05}, 'use_depth_loss_thres': False, 'depth_loss_thres': 100000, 'visualize_tracking_loss': False}, 'mapping': {'perform_mapping': True, 'num_iters': 1, 'add_new_gaussians': True, 'sil_thres': 0.9, 'use_l1': True, 'use_sil_for_loss': True, 'ignore_outlier_depth_loss': False, 'loss_weights': {'im': 1.0, 'depth': 1.0, 'deform': 0.5}, 'lrs': {'means3D': 0.0, 'rgb_colors': 0.0, 'unnorm_rotations': 0.0, 'logit_opacities': 0.0, 'log_scales': 0.0, 'cam_unnorm_rots': 0.0, 'cam_trans': 0.0}, 'prune_gaussians': True, 'pruning_dict': {'start_after': 0, 'remove_big_after': 0, 'stop_after': 10000, 'prune_every': 1, 'removal_opacity_threshold': 0.1, 'final_removal_opacity_threshold': 0.1, 'reset_opacities': False, 'reset_opacities_every': 10000000000, 'prune_size_thresh': 0.1}, 'use_gaussian_splatting_densification': False, 'densify_dict': {'start_after': 1, 'remove_big_after': 3000, 'stop_after': 5000, 'densify_every': 1, 'grad_thresh': 0.0002, 'num_to_split_into': 2, 'removal_opacity_threshold': 0.005, 'final_removal_opacity_threshold': 0.005, 'reset_opacities_every': 3000}}, 'viz': {'render_mode': 'color', 'offset_first_viz_cam': True, 'show_sil': False, 'visualize_cams': False, 'viz_w': 320, 'viz_h': 320, 'viz_near': 0.01, 'viz_far': 100.0, 'view_scale': 2, 'viz_fps': 30, 'enter_interactive_post_online': True, 'gaussian_simplification': False}, 'depth': {'use_gt_depth': False, 'model_path': 'models/SurgeDepth/SurgeDepthStudent_V5.pth', 'model_size': 'vitb', 'normalization_means': [0.46888983, 0.29536288, 0.28712815], 'normalization_stds': [0.24689102, 0.21034359, 0.21188641], 'shift_pred': 2.0192598978494627, 'scale_pred': 0.5414197885483871, 'shift_gt': 0.016469928791720198, 'scale_gt': 0.0034374421235340256}, 'deforms': {'use_deformations': True, 'deform_type': 'simple', 'nr_basis': 50, 'use_distributed_biases': True, 'total_timescale': 50}, 'GRN': {'use_grn': True, 'random_initialization': False, 'init_scale': -1.0, 'num_iters_initialization': 10, 'num_iters_initialization_added_gaussians': 10, 'sil_thres': 0.0, 'model_path': 'GRN/models/GRN_v3.pth', 'random_initialization_lrs': {'means3D': 0.005, 'rgb_colors': 0.005, 'unnorm_rotations': 0.005, 'logit_opacities': 0.001, 'log_scales': 0.005, 'cam_unnorm_rots': 0.0, 'cam_trans': 0.0}}, 'gaussian_reduction': {'reduce_gaussians': True, 'reduction_type': 'random', 'reduction_fraction': 0.0}}
+Loading Dataset ...
+Using CDF Keyframe Selection. Note that 'mapping window size' is useless.
+Using GRN for initialization
+{'dataset_name': 'endonerf', 'camera_params': {'image_height': 540, 'image_width': 675, 'fx': 401.1595, 'fy': 400.9425, 'cx': 334.143, 'cy': 273.8665, 'png_depth_scale': 2.55, 'crop_edge': 0}}
+./data/endonerf_cutting
+True
+simple
+Initial gaussian mask contains 112896 valid pixels
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+After reducing gaussians, mask conttains 112896 valid pixels
+
+True
+Removing 163 Gaussians with big weights
+Saving parameters to: ./experiments/EndoNerf cutting_deform_simple_24_best/cutting_deform_simple_24_best
+Failed to evaluate trajectory.
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 4 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 12 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 15 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 19 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 12 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 4 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 4 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 4 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 11 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 3 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 4 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 3 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 14 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 4 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 4 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 3 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 25 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 4 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 3 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 3 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 7 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 3 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 8 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 5 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 3 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 5 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 8 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 1 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 11 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 3 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+Adding 2 new gaussians
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+True
+Reduction mask contains 112896 valid pixels, with reduction fraction of 0.0
+
+Average Tracking/Iteration Time: 18.00640278002795 ms
+Average Tracking/Frame Time: 0.17991242095501753 s
+Average Mapping/Iteration Time: 0.0 ms
+Average Mapping/Frame Time: 0.1944703725132629 s
+Average Densification Time: 6.34311227237477 ms
+Saving parameters to: ./experiments/EndoNerf cutting_deform_simple_24_best/cutting_deform_simple_24_best
+Evaluating Final Parameters ...
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.76, t_gt: 23.14, s_pred: 12.88, t_pred: 18.28
+Abs Rel: 0.2496, Sq Rel: 4.9507, RMSE: 12.0599, RMSE Log: 0.2875, A1: 0.5455, A2: 0.9508, A3: 0.9796, PSNR: 19.9454
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.67, t_gt: 22.75, s_pred: 12.75, t_pred: 18.06
+Abs Rel: 0.2477, Sq Rel: 4.8586, RMSE: 11.8422, RMSE Log: 0.2869, A1: 0.5516, A2: 0.9516, A3: 0.9790, PSNR: 19.6205
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.68, t_gt: 22.75, s_pred: 12.20, t_pred: 17.47
+Abs Rel: 0.2582, Sq Rel: 4.7865, RMSE: 11.8073, RMSE Log: 0.2898, A1: 0.5319, A2: 0.9529, A3: 0.9787, PSNR: 20.1355
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.73, t_gt: 22.75, s_pred: 11.75, t_pred: 17.25
+Abs Rel: 0.2610, Sq Rel: 4.9132, RMSE: 11.9459, RMSE Log: 0.2911, A1: 0.5101, A2: 0.9527, A3: 0.9800, PSNR: 19.9867
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.69, t_gt: 22.75, s_pred: 11.41, t_pred: 17.46
+Abs Rel: 0.2600, Sq Rel: 4.4804, RMSE: 11.4280, RMSE Log: 0.2892, A1: 0.5129, A2: 0.9520, A3: 0.9810, PSNR: 20.3743
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.57, t_gt: 22.35, s_pred: 11.10, t_pred: 16.94
+Abs Rel: 0.2431, Sq Rel: 4.2581, RMSE: 11.2031, RMSE Log: 0.2834, A1: 0.5306, A2: 0.9446, A3: 0.9819, PSNR: 20.1662
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.63, t_gt: 22.35, s_pred: 10.88, t_pred: 16.77
+Abs Rel: 0.2527, Sq Rel: 4.4428, RMSE: 11.4465, RMSE Log: 0.2895, A1: 0.5193, A2: 0.9439, A3: 0.9809, PSNR: 22.1889
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.63, t_gt: 22.35, s_pred: 10.90, t_pred: 16.64
+Abs Rel: 0.2567, Sq Rel: 4.4733, RMSE: 11.4723, RMSE Log: 0.2899, A1: 0.4980, A2: 0.9458, A3: 0.9807, PSNR: 20.2605
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.49, t_gt: 22.35, s_pred: 10.38, t_pred: 16.22
+Abs Rel: 0.2615, Sq Rel: 4.4185, RMSE: 11.2262, RMSE Log: 0.2904, A1: 0.4744, A2: 0.9481, A3: 0.9813, PSNR: 19.7484
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.62, t_gt: 23.14, s_pred: 9.76, t_pred: 16.38
+Abs Rel: 0.2703, Sq Rel: 4.3451, RMSE: 11.0117, RMSE Log: 0.2958, A1: 0.4547, A2: 0.9491, A3: 0.9810, PSNR: 21.9568
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.43, t_gt: 23.14, s_pred: 9.77, t_pred: 16.10
+Abs Rel: 0.2528, Sq Rel: 3.9075, RMSE: 10.4889, RMSE Log: 0.2857, A1: 0.4882, A2: 0.9471, A3: 0.9831, PSNR: 20.5516
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.49, t_gt: 23.53, s_pred: 9.67, t_pred: 16.36
+Abs Rel: 0.2574, Sq Rel: 3.8768, RMSE: 10.4949, RMSE Log: 0.2854, A1: 0.4858, A2: 0.9497, A3: 0.9843, PSNR: 20.7442
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.50, t_gt: 23.53, s_pred: 9.65, t_pred: 16.31
+Abs Rel: 0.2539, Sq Rel: 3.8850, RMSE: 10.5382, RMSE Log: 0.2836, A1: 0.4828, A2: 0.9447, A3: 0.9844, PSNR: 20.7264
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.49, t_gt: 23.53, s_pred: 9.60, t_pred: 16.47
+Abs Rel: 0.2517, Sq Rel: 3.7003, RMSE: 10.3449, RMSE Log: 0.2826, A1: 0.4917, A2: 0.9447, A3: 0.9851, PSNR: 23.0111
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.33, t_gt: 23.53, s_pred: 9.26, t_pred: 15.88
+Abs Rel: 0.2471, Sq Rel: 3.4720, RMSE: 9.9026, RMSE Log: 0.2796, A1: 0.4986, A2: 0.9421, A3: 0.9870, PSNR: 20.9965
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.45, t_gt: 23.92, s_pred: 9.25, t_pred: 15.86
+Abs Rel: 0.2609, Sq Rel: 3.6712, RMSE: 10.1974, RMSE Log: 0.2879, A1: 0.4885, A2: 0.9330, A3: 0.9869, PSNR: 21.0600
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.56, t_gt: 23.53, s_pred: 9.29, t_pred: 16.10
+Abs Rel: 0.2591, Sq Rel: 3.7248, RMSE: 10.3502, RMSE Log: 0.2865, A1: 0.4704, A2: 0.9420, A3: 0.9859, PSNR: 20.9955
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.51, t_gt: 23.53, s_pred: 8.87, t_pred: 16.40
+Abs Rel: 0.2559, Sq Rel: 3.2702, RMSE: 9.5129, RMSE Log: 0.2831, A1: 0.4499, A2: 0.9434, A3: 0.9883, PSNR: 23.3000
+True
+True
+True
+True
+True
+True
+True
+True
+s_gt: 4.45, t_gt: 23.14, s_pred: 7.98, t_pred: 15.80
+Abs Rel: 0.2582, Sq Rel: 2.4483, RMSE: 7.8381, RMSE Log: 0.2833, A1: 0.4377, A2: 0.9359, A3: 0.9910, PSNR: 25.3386
+True
+True
+True
+True
+Final Average ATE RMSE: 1.09 mm
+Average PSNR: 33.81
+Average Depth RMSE: 604.32 mm
+Average Depth L1: 604.32 mm
+Average MS-SSIM: 0.971
+Average LPIPS: 0.039
+Average Depth Errors: {'Abs Rel': 0.25568447, 'Sq Rel': 4.0991135, 'RMSE': 10.795326, 'RMSE Log': 0.2869, 'A1': 0.49592170637006233, 'A2': 0.9460062366588217, 'A3': 0.9831566339496739, 'PSNR': 21.11090195806403}
+Average number of gaussians 112911.000
+Saving video to ./experiments/EndoNerf cutting_deform_simple_24_best/cutting_deform_simple_24_best/keyframes.avi

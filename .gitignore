@@ -22,3 +22,5 @@ playground.ipynb
 *.tar.gz
 
 slurm_outputs/
+
+experiments_backup/
