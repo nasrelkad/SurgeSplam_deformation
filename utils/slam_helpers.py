@@ -768,6 +768,12 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
         print("Adding {} new gaussians".format(new_pt_cld.shape[0]))
         new_params = initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis = nr_basis,use_distributed_biases=use_distributed_biases,total_timescale = total_timescale,use_deform = use_deform,deform_type=deformation_type,
                                             num_frames = num_frames,random_initialization=random_initialization,init_scale=init_scale)
+        
+
+        # bloat_params = True
+        # if bloat_params:
+        #         new_params['bloated_params'] = torch.zeros(new_pt_cld.shape[0],1,device='cuda')
+        #         # params_list = params
         if use_grn:
             new_params = grn_initialization(grn_model,new_params,new_pt_cld,mean3_sq_dist,curr_data['im'],curr_data['depth'],non_presence_mask,cam = cam)
 
