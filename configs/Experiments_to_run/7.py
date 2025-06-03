@@ -1,7 +1,7 @@
 import os
 
 scenes = [
-    "dataset_4/keyframe_3"
+    'pulling'
 ]
 
 primary_device="cuda:0"
@@ -9,7 +9,7 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "dataset_4/keyframe_3"
+    scene_name = "pulling_SurgeDepth_base_01_percent"
 
 map_every = 1
 keyframe_every = 8
@@ -17,7 +17,7 @@ keyframe_every = 8
 tracking_iters = 10
 mapping_iters = 1
 
-group_name = "SCARED_LONG_seq_2_high_deform_penalty"
+group_name = f"EndoNerf {scene_name}"
 run_name = scene_name
 
 config = dict(
@@ -39,8 +39,8 @@ config = dict(
     save_checkpoints=False, # Save Checkpoints
     checkpoint_interval=int(1e10), # Checkpoint Interval
     data=dict(
-        basedir=f"./data/SCARED_LONG/{scene_name}",
-        gradslam_data_cfg="./configs/data/scared.yaml",
+        basedir=f"./data/endonerf_pulling",
+        gradslam_data_cfg="./configs/data/endonerf.yaml",
         sequence=scene_name,
         desired_image_height=336,
         desired_image_width=336,
@@ -61,16 +61,16 @@ config = dict(
         loss_weights=dict(
             im=2.0,
             depth=2.0,
-            deform = 2.0
+            deform = 0.5
         ),
         lrs=dict(
-            means3D=0.00,
+            means3D=0.01,
             rgb_colors=0.0,
-            unnorm_rotations=0.00,
+            unnorm_rotations=0.001,
             logit_opacities=0.0,
-            log_scales=0.00,
-            cam_unnorm_rots=0.002,
-            cam_trans=0.005,
+            log_scales=0.001,
+            cam_unnorm_rots=0.0002,
+            cam_trans=0.00005,
         ),
     ),
     mapping=dict(
@@ -151,10 +151,10 @@ config = dict(
         total_timescale = 50
     ),
     GRN = dict(
-        use_grn = True,
+        use_grn = False,
         random_initialization = False,
         init_scale = -1.0,
-        num_iters_initialization = 10,
+        num_iters_initialization = 50,
         num_iters_initialization_added_gaussians = 20,
         sil_thres = 0.0,
         model_path = 'GRN/models/GRN_v3.pth',
@@ -176,7 +176,7 @@ config = dict(
     gaussian_reduction = dict(
         reduce_gaussians = True,
         reduction_type = 'random',
-        reduction_fraction = 0.0
+        reduction_fraction = 0.99
     )   
 
 )

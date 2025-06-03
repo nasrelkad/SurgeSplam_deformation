@@ -105,21 +105,21 @@ def evaluate_ate(gt_traj, est_traj, plot_traj = False):
 
     gt_traj_aligned = rot* gt_traj_pts+trans
     gt_traj_aligned = np.array(gt_traj_aligned)
-    fig = plt.figure()
+#     fig = plt.figure()
 
-# syntax for 3-D projection
-    ax = plt.axes(projection ='3d')
-    x_gt = gt_traj_aligned[0,:]
-    y_gt = gt_traj_aligned[1,:]
-    z_gt = gt_traj_aligned[2,:]
+# # syntax for 3-D projection
+#     ax = plt.axes(projection ='3d')
+#     x_gt = gt_traj_aligned[0,:]
+#     y_gt = gt_traj_aligned[1,:]
+#     z_gt = gt_traj_aligned[2,:]
 
-    x_est = est_traj_pts[0,:]
-    y_est = est_traj_pts[1,:]
-    z_est = est_traj_pts[2,:]
-    print(x_gt[0])
-    ax.plot3D(x_gt, y_gt, z_gt, 'green', label='Ground Truth Trajectory')
-    ax.plot3D(x_est, y_est, z_est, 'red', label='Estimated Trajectory')
-    plt.show()
+#     x_est = est_traj_pts[0,:]
+#     y_est = est_traj_pts[1,:]
+#     z_est = est_traj_pts[2,:]
+#     print(x_gt[0])
+#     ax.plot3D(x_gt, y_gt, z_gt, 'green', label='Ground Truth Trajectory')
+#     ax.plot3D(x_est, y_est, z_est, 'red', label='Estimated Trajectory')
+#     plt.show()
 
     avg_trans_error = trans_error.mean()
 
@@ -432,6 +432,7 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
     lpips_list = []
     ssim_list = []
     depth_errors_list = []
+    nr_gaussians_list = []
     plot_dir = os.path.join(eval_dir, "plots")
     os.makedirs(plot_dir, exist_ok=True)
     if save_renders:
@@ -571,7 +572,7 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
             psnr_list.append(psnr.cpu().numpy())
             ssim_list.append(ssim.cpu().numpy())
             lpips_list.append(lpips_score)
-
+            nr_gaussians_list.append(local_scales.shape[0])
             # Compute Depth RMSE
 
             # gt_depth_aligned,rastered_depth_aligned,t_gt,s_gt,t_pred,s_pred = align_shift_and_scale( curr_data['depth'].cpu().detach(),rastered_depth_viz.cpu().detach())
@@ -700,6 +701,7 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
     l1_list = np.array(l1_list)
     ssim_list = np.array(ssim_list)
     lpips_list = np.array(lpips_list)
+    nr_gaussians_list = np.array(nr_gaussians_list)
     depth_errors_np = {key: [] for key in depth_error_metrics}
     for error in depth_errors_list:
         for id,metric in enumerate(error):
@@ -710,12 +712,14 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
     avg_ssim = ssim_list.mean()
     avg_lpips = lpips_list.mean()
     avg_depth_errors = {key: np.mean(depth_errors_np[key]) for key in depth_errors_np.keys()}
+    avg_gaussians = nr_gaussians_list.mean()
     print("Average PSNR: {:.2f}".format(avg_psnr))
     print("Average Depth RMSE: {:.2f} mm".format(avg_rmse*100))
     print("Average Depth L1: {:.2f} mm".format(avg_l1*100))
     print("Average MS-SSIM: {:.3f}".format(avg_ssim))
     print("Average LPIPS: {:.3f}".format(avg_lpips))
     print("Average Depth Errors: {}".format(avg_depth_errors))
+    print("Average number of gaussians {:.3f}".format(avg_gaussians))
 
     # # Save metric lists as text files
     np.savetxt(os.path.join(eval_dir, "psnr.txt"), psnr_list)
@@ -725,6 +729,7 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
     np.savetxt(os.path.join(eval_dir, "lpips.txt"), lpips_list)
     # np.savetxt(os.path.join(eval_dir, 'depth_errors.txt'), depth_errors_np)
     np.savetxt(os.path.join(eval_dir, 'depth_errors.txt'),np.array([depth_errors_np[key] for key in depth_errors_np.keys()]).T,header = '       '.join(depth_errors_np.keys()), fmt='%.6f',delimiter=', ')
+    np.savetxt(os.path.join(eval_dir, 'nr_gaussians.txt'),nr_gaussians_list)
 
 
     # Plot PSNR & L1 as line plots

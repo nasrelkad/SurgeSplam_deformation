@@ -1,7 +1,7 @@
 import os
 
 scenes = [
-    "dataset_4/keyframe_3"
+    'pulling'
 ]
 
 primary_device="cuda:0"
@@ -9,7 +9,7 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "dataset_4/keyframe_3"
+    scene_name = "pulling_deform_simple_44_baseline"
 
 map_every = 1
 keyframe_every = 8
@@ -17,7 +17,7 @@ keyframe_every = 8
 tracking_iters = 10
 mapping_iters = 1
 
-group_name = "SCARED_LONG_seq_2_high_deform_penalty"
+group_name = f"EndoNerf {scene_name}"
 run_name = scene_name
 
 config = dict(
@@ -39,8 +39,8 @@ config = dict(
     save_checkpoints=False, # Save Checkpoints
     checkpoint_interval=int(1e10), # Checkpoint Interval
     data=dict(
-        basedir=f"./data/SCARED_LONG/{scene_name}",
-        gradslam_data_cfg="./configs/data/scared.yaml",
+        basedir=f"./data/endonerf_pulling",
+        gradslam_data_cfg="./configs/data/endonerf.yaml",
         sequence=scene_name,
         desired_image_height=336,
         desired_image_width=336,
@@ -60,17 +60,17 @@ config = dict(
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
             im=2.0,
-            depth=2.0,
-            deform = 2.0
+            depth=5.0,
+            deform = 1.0
         ),
         lrs=dict(
-            means3D=0.00,
+            means3D=0.005,
             rgb_colors=0.0,
-            unnorm_rotations=0.00,
+            unnorm_rotations=0.001,
             logit_opacities=0.0,
-            log_scales=0.00,
-            cam_unnorm_rots=0.002,
-            cam_trans=0.005,
+            log_scales=0.0000,
+            cam_unnorm_rots=0.0002,
+            cam_trans=0.00005,
         ),
     ),
     mapping=dict(
@@ -105,7 +105,7 @@ config = dict(
             final_removal_opacity_threshold=0.1,
             reset_opacities=False,
             reset_opacities_every=int(1e10), # Doesn't consider iter 0
-            prune_size_thresh = 0.1
+            prune_size_thresh = 0.5
         ),
         use_gaussian_splatting_densification=False, # Use Gaussian Splatting-based Densification during Mapping
         densify_dict=dict( # Needs to be updated based on the number of mapping iterations
@@ -133,7 +133,7 @@ config = dict(
         gaussian_simplification=False,
     ),
     depth = dict(
-        use_gt_depth = False,
+        use_gt_depth = True,
         model_path = 'models/SurgeDepth/SurgeDepthStudent_V5.pth',
         model_size = 'vitb',
         normalization_means = [0.46888983, 0.29536288, 0.28712815], 
@@ -151,21 +151,21 @@ config = dict(
         total_timescale = 50
     ),
     GRN = dict(
-        use_grn = True,
-        random_initialization = False,
+        use_grn = False,
+        random_initialization = True,
         init_scale = -1.0,
         num_iters_initialization = 10,
-        num_iters_initialization_added_gaussians = 20,
+        num_iters_initialization_added_gaussians = 10,
         sil_thres = 0.0,
         model_path = 'GRN/models/GRN_v3.pth',
         random_initialization_lrs = dict(
-            means3D=0.01,
-            rgb_colors=0.001,
-            unnorm_rotations=0.01,
+            means3D=0.005,
+            rgb_colors=0.005,
+            unnorm_rotations=0.005,
             logit_opacities=0.001,
-            log_scales=0.01,
+            log_scales=0.005,
             cam_unnorm_rots=0.000,
-            cam_trans=0.0000,
+            cam_trans=0.000,
         ),
         # grn_hidden_dim = 128,
         # grn_out_dim = 3,

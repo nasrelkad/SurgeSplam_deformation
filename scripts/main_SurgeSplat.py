@@ -25,7 +25,8 @@ from datasets.gradslam_datasets import (
     ScaredDataset,
     EndoNerfDataset,
     RARPDataset,
-    HamlynDataset
+    HamlynDataset,
+    StereoMisDataset
 )
 from utils.common_utils import seed_everything, save_params_ckpt, save_params, save_means3D
 from utils.eval_helpers import report_progress, eval_save
@@ -67,6 +68,8 @@ def get_dataset(config_dict, basedir, sequence, **kwargs):
         return RARPDataset(config_dict, basedir, sequence, **kwargs)
     elif config_dict['dataset_name'].lower() in ['hamlyn']:
         return HamlynDataset(config_dict, basedir, sequence, **kwargs)
+    elif config_dict['dataset_name'].lower() in ['stereomis']:
+        return StereoMisDataset(config_dict, basedir, sequence, **kwargs)
     else:
         raise ValueError(f"Unknown dataset name {config_dict['dataset_name']}")
 
@@ -508,10 +511,11 @@ def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_rad
     # Get Initial Point Cloud (PyTorch CUDA Tensor)
     mask = (depth > 0) & energy_mask(color) # Mask out invalid depth values
     # Image.fromarray(np.uint8(mask[0].detach().cpu().numpy()*255), 'L').save('mask.png')
+    print("Initial gaussian mask contains {} valid pixels".format(torch.sum(mask)))
     mask = mask.reshape(-1)
     if reduce_gaussians:
         mask = get_mask(mask,color,reduction_type,reduction_fraction)
-
+    print("After reducing gaussians, mask conttains {} valid pixels".format(torch.sum(mask)))
 
 
 
@@ -523,7 +527,15 @@ def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_rad
 
   
     params_list, variables = initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification,use_deforms=use_deforms,deform_type=deform_type,nr_basis = nr_basis,use_distributed_biases=use_distributed_biases,total_timescale=total_timescale,cam = cam,random_initialization=random_initialization,init_scale=init_scale)
-
+    # bloat_params = True
+    # if bloat_params:
+    #     if isinstance(params_list,list):
+    #         params = params_list[0]
+    #         params['bloated_params'] = torch.zeros(init_pt_cld.shape[0],1,device='cuda')
+    #         params_list = [params for _ in range(num_frames)]
+    #     else:
+    #         params['bloated_params'] = torch.zeros(init_pt_cld.shape[0],1,device='cuda')
+    #         params_list = params
     
     
     
@@ -589,8 +601,17 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
         transformed_pts = transform_to_frame(local_means,params, iter_time_idx,
                                              gaussians_grad=True,
                                              camera_grad=False)
-
+    bloat_params = False
+    # print("We got to the loss calculation")
+    if bloat_params: # For ablation study: add bloating parameters to computation graph to see effect on optimization time
+        
+        # bloat_test = torch.zeros_like(local_opacities,device='cuda')
+        bloat = torch.zeros(local_opacities.shape[0],1200,device='cuda')
+        bloat = torch.sum(bloat)
+        # print(bloat.shape)
+        local_opacities = local_opacities+bloat
     # Initialize Render Variables
+    # print()
     if use_grn:
         rendervar = transformed_GRNparams2rendervar(params, transformed_pts,local_rots,local_scales,local_opacities,local_colors)
 
@@ -1282,7 +1303,11 @@ def rgbd_slam(config: dict):
                 # params[time_idx+1] = params[time_idx]
                 params_iter['cam_unnorm_rots'][...,time_idx] = params_iter['cam_unnorm_rots'][...,time_idx-1]
                 params_iter['cam_trans'][...,time_idx] = params_iter['cam_trans'][...,time_idx-1]
-                params[time_idx+1] = params_iter
+                try:
+                    params[time_idx+1] = params_iter
+                except:
+                    params.append(params_iter)
+                    print('Last frame is a test frame, appending to the list')
             continue    
         if isinstance(params,list):
             params_iter = params[time_idx]
