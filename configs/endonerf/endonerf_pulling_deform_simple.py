@@ -9,7 +9,7 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "pulling_deform_simple_53_no_GRN"
+    scene_name = "pulling_deform_simple_54_no_GRN_no_bloat"
 
 map_every = 1
 keyframe_every = 8
@@ -61,7 +61,7 @@ config = dict(
         loss_weights=dict(
             im=2.0,
             depth=2.0,
-            deform = 0.5
+            deform = 2.0
         ),
         lrs=dict(
             means3D=0.01,
@@ -69,8 +69,8 @@ config = dict(
             unnorm_rotations=0.001,
             logit_opacities=0.0,
             log_scales=0.001,
-            cam_unnorm_rots=0.0002,
-            cam_trans=0.00005,
+            cam_unnorm_rots=0.002,
+            cam_trans=0.005,
         ),
     ),
     mapping=dict(
