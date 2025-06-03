@@ -83,7 +83,7 @@ class StereoMisDataset(GradSLAMDataset):
 
     def get_filepaths(self):
         color_paths = natsorted(glob.glob(f"{self.input_folder}/color/*l.png"))
-        depth_paths = natsorted(glob.glob(f"{self.input_folder}/depth/*.npy"))
+        depth_paths = natsorted(glob.glob(f"{self.input_folder}/depth/*.png"))
         embedding_paths = None
         if self.load_embeddings:
             embedding_paths = natsorted(glob.glob(f"{self.input_folder}/{self.embedding_dir}/*.pt"))
