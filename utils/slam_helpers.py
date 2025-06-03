@@ -622,7 +622,8 @@ def grn_initialization(model,params,init_pt_cld,mean3_sq_dist,color,depth,mask =
 
     rots = cols[:,:4]
 
-    scales_norm = (cols[:,4:7]-cols[:,4:7].min()) / (cols[:,4:7].max()-cols[:,4:7].min())
+    # scales_norm = (cols[:,4:7]-cols[:,4:7].min()) / (cols[:,4:7].max()-cols[:,4:7].min())
+    scales_norm = cols[:,4:7] 
     opacities = cols[:,7][:,None]
 
     # local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(params,0,False,5,'simple')
@@ -657,7 +658,8 @@ def grn_initialization(model,params,init_pt_cld,mean3_sq_dist,color,depth,mask =
 
 def get_mask(mask_input,color,reduction_type = 'random',reduction_fraction = 0.5):
     if reduction_type == 'random':
-        mask = (torch.randn(mask_input.shape)>reduction_fraction).cuda()
+        mask = (torch.rand(mask_input.shape)>reduction_fraction).cuda()
+        print('Reduction mask contains {} valid pixels, with reduction fraction of {}'.format(torch.sum(mask),reduction_fraction))
     else:
         mask = texture_mask_laplacian(color, num_samples=int(mask_input.sum()*(1-reduction_fraction))).cuda()
     return mask & mask_input
@@ -718,7 +720,7 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
     non_presence_sil_mask = (silhouette < sil_thres)
     # Check for new foreground objects by using GT depth
     gt_depth = curr_data['depth'][0, :, :]
-    gt_depth = (gt_depth-gt_depth.min())/(gt_depth.max()-gt_depth.min())*10+0.01
+    # gt_depth = (gt_depth-gt_depth.min())/(gt_depth.max()-gt_depth.min())*10+0.01
     
 
 
@@ -733,7 +735,7 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
         mask = get_mask(non_presence_mask,color=curr_data['im'],reduction_type = reduction_type,reduction_fraction = reduction_fraction)
 
         non_presence_mask = non_presence_mask & mask
-
+        
     # Get the new frame Gaussians based on the Silhouette
     if torch.sum(non_presence_mask) > 0:
 
@@ -763,8 +765,15 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
         new_pt_cld, mean3_sq_dist = get_pointcloud(curr_data['im'], curr_data['depth'], curr_data['intrinsics'], 
                                     curr_w2c, mask=non_presence_mask, compute_mean_sq_dist=True,
                                     mean_sq_dist_method=mean_sq_dist_method)
+        print("Adding {} new gaussians".format(new_pt_cld.shape[0]))
         new_params = initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis = nr_basis,use_distributed_biases=use_distributed_biases,total_timescale = total_timescale,use_deform = use_deform,deform_type=deformation_type,
                                             num_frames = num_frames,random_initialization=random_initialization,init_scale=init_scale)
+        
+
+        # bloat_params = True
+        # if bloat_params:
+        #         new_params['bloated_params'] = torch.zeros(new_pt_cld.shape[0],1,device='cuda')
+        #         # params_list = params
         if use_grn:
             new_params = grn_initialization(grn_model,new_params,new_pt_cld,mean3_sq_dist,curr_data['im'],curr_data['depth'],non_presence_mask,cam = cam)
 

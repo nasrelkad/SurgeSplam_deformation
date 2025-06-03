@@ -17,7 +17,7 @@ keyframe_every = 8
 tracking_iters = 10
 mapping_iters = 1
 
-group_name = "SCARED_LONG_seq_2_high_deform_penalty"
+group_name = "SCARED_LONG_seq_2"
 run_name = scene_name
 
 config = dict(
@@ -61,16 +61,16 @@ config = dict(
         loss_weights=dict(
             im=2.0,
             depth=2.0,
-            deform = 2.0
+            deform = 0.5
         ),
         lrs=dict(
-            means3D=0.00,
+            means3D=0.01,
             rgb_colors=0.0,
-            unnorm_rotations=0.00,
+            unnorm_rotations=0.001,
             logit_opacities=0.0,
-            log_scales=0.00,
-            cam_unnorm_rots=0.002,
-            cam_trans=0.005,
+            log_scales=0.001,
+            cam_unnorm_rots=0.0002,
+            cam_trans=0.00005,
         ),
     ),
     mapping=dict(

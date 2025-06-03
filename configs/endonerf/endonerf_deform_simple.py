@@ -9,7 +9,7 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "cutting_deform_simple_6"
+    scene_name = "cutting_deform_simple_25_best"
 
 map_every = 1
 keyframe_every = 8
@@ -60,8 +60,8 @@ config = dict(
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
             im=2.0,
-            depth=2.0,
-            deform = 0.5
+            depth=5.0,
+            deform = 1.0
         ),
         lrs=dict(
             means3D=0.005,
@@ -105,6 +105,7 @@ config = dict(
             final_removal_opacity_threshold=0.1,
             reset_opacities=False,
             reset_opacities_every=int(1e10), # Doesn't consider iter 0
+            prune_size_thresh = 0.1
         ),
         use_gaussian_splatting_densification=False, # Use Gaussian Splatting-based Densification during Mapping
         densify_dict=dict( # Needs to be updated based on the number of mapping iterations
@@ -152,11 +153,11 @@ config = dict(
     GRN = dict(
         use_grn = True,
         random_initialization = False,
-        init_scale = -2.5,
-        num_iters_initialization = 50,
+        init_scale = -1.0,
+        num_iters_initialization = 10,
         num_iters_initialization_added_gaussians = 10,
         sil_thres = 0.0,
-        model_path = 'GRN/models/GRN_v2.pth',
+        model_path = 'GRN/models/GRN_v3.pth',
         random_initialization_lrs = dict(
             means3D=0.005,
             rgb_colors=0.005,
