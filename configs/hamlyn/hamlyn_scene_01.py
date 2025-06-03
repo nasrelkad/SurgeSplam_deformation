@@ -9,7 +9,7 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "hamlyn_{}_1".format(scenes[0])
+    scene_name = "hamlyn_{}_2".format(scenes[0])
 
 map_every = 1
 keyframe_every = 8
@@ -39,7 +39,7 @@ config = dict(
     save_checkpoints=False, # Save Checkpoints
     checkpoint_interval=int(1e10), # Checkpoint Interval
     data=dict(
-        basedir=f"/media/thesis_ssd/data/Hamlyn/{scenes[0]}",
+        basedir=f"/home/hhuitema/data/hamlyn/{scenes[0]}",
         gradslam_data_cfg="./configs/data/hamlyn.yaml",
         sequence=scene_name,
         desired_image_height=336,
@@ -61,7 +61,7 @@ config = dict(
         loss_weights=dict(
             im=2.0,
             depth=5.0,
-            deform = 1.0
+            deform = 5.0
         ),
         lrs=dict(
             means3D=0.005,
@@ -175,7 +175,7 @@ config = dict(
     gaussian_reduction = dict(
         reduce_gaussians = True,
         reduction_type = 'random',
-        reduction_fraction = 0.0
+        reduction_fraction = 0.8
     )   
 
 )
