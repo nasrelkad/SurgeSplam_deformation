@@ -1,0 +1,12 @@
+dataset_name: 'EndoMapper'
+camera_params:
+  image_height: 960 
+  image_width: 720 
+  fx: 472.64955100886374
+  fy: 472.64955100886374
+  cx: 479.5
+  cy: 359.5
+  png_depth_scale: 1
+  crop_edge: 0
+
+
