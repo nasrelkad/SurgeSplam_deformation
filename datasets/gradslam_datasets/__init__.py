@@ -8,3 +8,4 @@ from .endonerf import EndoNerfDataset
 from .RARP import RARPDataset
 from .hamlyn import HamlynDataset
 from .stereomis import StereoMisDataset
+from .endomapper import EndoMapperDataset

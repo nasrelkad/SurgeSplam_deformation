@@ -37,7 +37,7 @@ def align(model, data):
     data_zerocentered = data - data.mean(1).reshape((3,-1))
 
     W = np.zeros((3, 3))
-    for column in range(model.shape[1]):
+    for column in range(model.shape[1] - 1):
         W += np.outer(model_zerocentered[:,
                          column], data_zerocentered[:, column])
     U, d, Vh = np.linalg.linalg.svd(W.transpose())
@@ -48,7 +48,7 @@ def align(model, data):
     trans = data.mean(1).reshape((3,-1)) - rot * model.mean(1).reshape((3,-1))
 
     model_aligned = rot * model + trans
-    alignment_error = model_aligned - data
+    alignment_error = model_aligned - data[:, :model_aligned.shape[1]]
 
     trans_error = np.sqrt(np.sum(np.multiply(
         alignment_error, alignment_error), 0)).A[0]
@@ -105,21 +105,21 @@ def evaluate_ate(gt_traj, est_traj, plot_traj = False):
 
     gt_traj_aligned = rot* gt_traj_pts+trans
     gt_traj_aligned = np.array(gt_traj_aligned)
-#     fig = plt.figure()
+    fig = plt.figure()
 
-# # syntax for 3-D projection
-#     ax = plt.axes(projection ='3d')
-#     x_gt = gt_traj_aligned[0,:]
-#     y_gt = gt_traj_aligned[1,:]
-#     z_gt = gt_traj_aligned[2,:]
+    #syntax for 3-D projection
+    ax = plt.axes(projection ='3d')
+    x_gt = gt_traj_aligned[0,:]
+    y_gt = gt_traj_aligned[1,:]
+    z_gt = gt_traj_aligned[2,:]
 
-#     x_est = est_traj_pts[0,:]
-#     y_est = est_traj_pts[1,:]
-#     z_est = est_traj_pts[2,:]
-#     print(x_gt[0])
-#     ax.plot3D(x_gt, y_gt, z_gt, 'green', label='Ground Truth Trajectory')
-#     ax.plot3D(x_est, y_est, z_est, 'red', label='Estimated Trajectory')
-#     plt.show()
+    x_est = est_traj_pts[0,:]
+    y_est = est_traj_pts[1,:]
+    z_est = est_traj_pts[2,:]
+    print(x_gt[0])
+    ax.plot3D(x_gt, y_gt, z_gt, 'green', label='Ground Truth Trajectory')
+    ax.plot3D(x_est, y_est, z_est, 'red', label='Estimated Trajectory')
+    plt.show()
 
     avg_trans_error = trans_error.mean()
 
@@ -381,12 +381,16 @@ def deform_gaussians(params, time, deform_grad, N=5,deformation_type = 'gaussian
 
 
     elif deformation_type == 'simple':
-        # with torch.no_grad():
-        xyz = params['means3D'][time]
-        rots = params['unnorm_rotations'][time]
-        scales = params['log_scales'][time]
-        opacities = params['logit_opacities'][time]
-        colors = params['rgb_colors'][time]
+        try:
+            # with torch.no_grad():
+            xyz = params['means3D'][time]
+            rots = params['unnorm_rotations'][time]
+            scales = params['log_scales'][time]
+            opacities = params['logit_opacities'][time]
+            colors = params['rgb_colors'][time]
+        except:
+            print(time)
+            print('failure above')
 
     return xyz, rots, scales,opacities, colors
 
@@ -460,8 +464,8 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
             _dataset = dataset
             time_idx = total_time_idx
         return dataset_type, _dataset, time_idx
-    
-    for total_time_idx in tqdm(range(num_frames)):
+    #for total_time_idx in tqdm(range(num_frames)):
+    for total_time_idx in range(1, num_frames):
         dataset_type, dataset, time_idx = get_idx(total_time_idx)
         gt_w2c_list.append(torch.linalg.inv(dataset.get_pose(time_idx).cpu()))
         gt_position_list.append(gt_w2c_list[-1][:3, 3])
@@ -481,7 +485,8 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
         # horn gt w2c for nvs render. Nothing to do with metrics like ate
         rot, trans, _ = align(torch.stack(gt_position_list)[train_idx].detach().cpu().numpy().T, torch.stack(est_position_list).detach().cpu().numpy().T)
         horn_gt_position = [rot @ gt_position.numpy()+trans.squeeze() for gt_position in gt_position_list]
-        
+    
+
     for total_time_idx in tqdm(range(num_frames)):
         dataset_type, dataset, time_idx = get_idx(total_time_idx)
         # print(time_idx)
@@ -491,6 +496,11 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
 
         # Process RGB-D Data
         color = color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
+        
+        if depth.ndim > 3:
+            depth = depth.squeeze(-1)  
+
+        
         depth = depth.permute(2, 0, 1) # (H, W, C) -> (C, H, W)
         
         # if torch.max(depth) > 1.0:
@@ -517,6 +527,7 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
         # Define current frame data
         curr_data = {'cam': cam, 'im': color, 'depth': depth, 'id': time_idx, 'intrinsics': intrinsics, 'w2c': first_frame_w2c}
 
+        
         # visall = False # NOTE: for debug
         # if not visall and dataset_type == 'train':
         #     continue
@@ -538,11 +549,13 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
 
             # Render Depth & Silhouette
             depth_sil, _, _ = Renderer(raster_settings=curr_data['cam'])(**depth_sil_rendervar)
+            
             rastered_depth = depth_sil[0, :, :].unsqueeze(0)
             
             # if rastered_depth.max() > 1.0:
             #     rastered_depth = rastered_depth / 100.0
-            
+            if curr_data['depth'].shape[0] == 3:
+                curr_data['depth'] = curr_data['depth'][0:1,:,:]
             # Mask invalid depth in GT
             valid_depth_mask = (curr_data['depth'] > 0) & (curr_data['depth'] < 1e10)
             rastered_depth_viz = rastered_depth.detach()
@@ -581,6 +594,8 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
             # gt_depth_aligned[gt_depth_aligned>150] = 150
             # rastered_depth_aligned[rastered_depth_aligned>150] = 150
             gt_depth_aligned = curr_data['depth']
+            
+
             _,_,t_gt,s_gt,t_pred,s_pred = align_shift_and_scale(curr_data['depth'], rastered_depth_viz,valid_depth_mask)
             rastered_depth_aligned = (rastered_depth_viz-t_pred)*(s_gt/s_pred)+t_gt
 
@@ -664,7 +679,8 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
     latest_est_w2c_list.append(latest_est_w2c)
     valid_gt_w2c_list = []
     valid_gt_w2c_list.append(gt_w2c_list[0])
-    for idx in range(1, num_frames):
+    
+    for idx in range(len(gt_w2c_list)):
         interm_cam_rot = F.normalize(final_params['cam_unnorm_rots'][..., idx].detach())
         interm_cam_trans = final_params['cam_trans'][..., idx].detach()
         intermrel_w2c = torch.eye(4).cuda().float()
@@ -677,7 +693,7 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
     # save poses for ate eval
     # if split:
     with open(os.path.join(eval_dir, 'gt_train_w2c.txt'), 'w') as f:
-        for tensor in [gt_w2c_list[idx] for idx in range(num_frames)]:
+        for tensor in [gt_w2c_list[idx] for idx in range(len(gt_w2c_list))]:
             line = ''
             for v in tensor.reshape(-1).numpy():
                 line += str(v) + ','

@@ -51,7 +51,9 @@ class C3VDDataset(GradSLAMDataset):
         train_idx = all_idx - eval_idx
         eval_idx = sorted(list(eval_idx))
         train_idx = sorted(list(train_idx))
-            
+        self.eval_idx = eval_idx
+        self.train_idx = train_idx
+
         if self.mode == 'test':
             self.color_paths = [self.color_paths[i] for i in eval_idx]
             self.depth_paths = [self.depth_paths[i] for i in eval_idx]

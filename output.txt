@@ -1,0 +1,8 @@
+System Paths:
+/home/nasr/SurgeSplam
+/home/nasr/SurgeSplam
+/home/nasr/SurgeSplam/viz_scripts
+/home/nasr/miniconda3/envs/endogslam/lib/python310.zip
+/home/nasr/miniconda3/envs/endogslam/lib/python3.10
+/home/nasr/miniconda3/envs/endogslam/lib/python3.10/lib-dynload
+/home/nasr/miniconda3/envs/endogslam/lib/python3.10/site-packages

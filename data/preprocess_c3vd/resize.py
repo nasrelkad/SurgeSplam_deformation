@@ -45,7 +45,7 @@ def process_folders(root_folder, target_width, target_height):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process and undisort color and depth images in dataset folders.")
     parser.add_argument("--root_path", default=".", help="Path to the root folder of the dataset.")
-    parser.add_argument("--target_width", default=1350//2, type=int, help="Target width for the images.")
-    parser.add_argument("--target_height", default=1080//2, type=int, help="Target height for the images.")
+    parser.add_argument("--target_width", default=1344//2, type=int, help="Target width for the images.")
+    parser.add_argument("--target_height", default=1064//2, type=int, help="Target height for the images.")
     args = parser.parse_args()
     process_folders(args.root_path, args.target_width, args.target_height)

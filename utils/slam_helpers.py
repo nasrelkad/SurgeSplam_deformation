@@ -616,9 +616,15 @@ def grn_initialization(model,params,init_pt_cld,mean3_sq_dist,color,depth,mask =
         
 
     output = model(input).detach()
-    # print(output)
-    cols = torch.permute(output[0], (1, 2, 0)).reshape(-1, 8) # (C, H, W) -> (H, W, C) -> (H * W, C)
-    
+
+    # input is (1, 4, H, W); keep these to align GRN output
+    _, _, H, W = input.shape
+    output = model(input).detach()
+    # bring GRN output to depth/color spatial size
+    if output.shape[-2:] != depth.shape[-2:]:
+        output = torch.nn.functional.interpolate(
+            output, size=depth.shape[-2:], mode="bilinear", align_corners=False) 
+    cols = output[0].permute(1, 2, 0).reshape(-1, 8)
 
     rots = cols[:,:4]
 
@@ -635,6 +641,7 @@ def grn_initialization(model,params,init_pt_cld,mean3_sq_dist,color,depth,mask =
     # plt.show() 
     # If we use simple deformations, rotations and scales will have shape [C x Num_gaussians x num_frames],
     # We need to apply the GRN inialization to each timestep
+
     if len(params['unnorm_rotations'].shape) ==3:
         params['unnorm_rotations'] = (rots[mask])[...,None].tile(1,1,params['unnorm_rotations'].shape[2])
         params['log_scales'] = (scales_norm[mask]*(torch.sqrt(mean3_sq_dist)[:,None].tile(1,3)))[...,None].tile(1,1,params['log_scales'].shape[2])
@@ -796,6 +803,37 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
         params_iter = params
     return params_iter, variables
 
+def align_shift_and_scale(gt_disp, pred_disp, mask):
+
+    ssum = torch.sum(mask, (1, 2))
+    valid = ssum > 0
+
+    if valid.sum() == 0:
+        # Return input as-is or raise a warning
+        print("⚠️ Warning: Empty valid mask in align_shift_and_scale")
+        return gt_disp, pred_disp, torch.tensor([0.0]), torch.tensor([1.0]), torch.tensor([0.0]), torch.tensor([1.0])
+    
+    # Select valid pixels
+    gt_selected = gt_disp[mask].view(valid.sum(), -1)
+    pred_selected = pred_disp[mask].view(valid.sum(), -1)
+
+    # Compute statistics
+    t_gt = torch.median(gt_selected, dim=1).values
+    s_gt = torch.mean(torch.abs(gt_selected - t_gt[:, None]), dim=1)
+
+    t_pred = torch.median(pred_selected, dim=1).values
+    s_pred = torch.mean(torch.abs(pred_selected - t_pred[:, None]), dim=1)
+
+    # Normalize
+    pred_disp_aligned = ((pred_disp.view(pred_disp.shape[0], -1) - t_pred[:, None]) / s_pred[:, None])
+    pred_disp_aligned = pred_disp_aligned.view_as(pred_disp)
+
+    gt_disp_aligned = ((gt_disp.view(gt_disp.shape[0], -1) - t_gt[:, None]) / s_gt[:, None])
+    gt_disp_aligned = gt_disp_aligned.view_as(gt_disp)
+
+    return gt_disp_aligned, pred_disp_aligned, t_gt, s_gt, t_pred, s_pred
+
+"""
 def align_shift_and_scale(gt_disp, pred_disp,mask):
     ssum = torch.sum(mask, (1, 2))
     valid = ssum > 0
@@ -816,3 +854,5 @@ def align_shift_and_scale(gt_disp, pred_disp,mask):
     gt_disp_aligned = (gt_disp.view(gt_disp.shape[0],-1)- t_gt[:,None])/s_gt[:,None]
     gt_disp_aligned = gt_disp_aligned.view(gt_disp.shape[0],gt_disp.shape[1],gt_disp.shape[2])
     return  gt_disp_aligned, pred_disp_aligned,t_gt, s_gt, t_pred, s_pred
+
+    """

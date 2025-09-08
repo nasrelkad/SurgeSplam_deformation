@@ -154,8 +154,8 @@ def remove_points(to_remove, params, variables, optimizer):
     variables['means2D_gradient_accum'] = variables['means2D_gradient_accum'][to_keep]
     variables['denom'] = variables['denom'][to_keep]
     variables['max_2D_radius'] = variables['max_2D_radius'][to_keep]
-    if 'timestep' in variables.keys():
-        variables['timestep'] = variables['timestep'][to_keep]
+    #if 'timestep' in variables.keys():
+    #    variables['timestep'] = variables['timestep'][to_keep]
     return params, variables
 
 

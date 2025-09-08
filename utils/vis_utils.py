@@ -13,16 +13,18 @@ def plot_video(image_folder: str, video_path: str = '', total: int = int(1e10), 
         os.makedirs(os.path.dirname(video_path))
     if fps == -1:
         fps = 30
-
+    
     all_image_paths = sorted(glob.glob(os.path.join(image_folder, '*.png')))
     
     first_image_path = all_image_paths[0]
+    
     first_image = cv2.imread(first_image_path)
     height, width, layers = first_image.shape
     fourcc = cv2.VideoWriter_fourcc(*'DIVX')
     video = cv2.VideoWriter(video_path, fourcc, fps, (width, height))
     img = cv2.imread(first_image_path)
     video.write(img)
+  
     for i in range(1, len(all_image_paths)):
         image_path = all_image_paths[i]
         if os.path.exists(image_path):

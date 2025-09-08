@@ -1,10 +1,13 @@
+#dict_keys(['means3D', 'unnorm_rotations', 'log_scales', 'logit_opacities', 'rgb_colors', 'cam_unnorm_rots', 'cam_trans', 
+# 'timestep', 'intrinsics', 'w2c', 'org_width', 'org_height', 'gt_w2c_all_frames', 'keyframe_time_indices'])
 import argparse
 import os
 import shutil
 import sys
 import time
 from importlib.machinery import SourceFileLoader
-
+import torch.nn as nn
+ 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 sys.path.insert(0, _BASE_DIR)
@@ -26,7 +29,8 @@ from datasets.gradslam_datasets import (
     EndoNerfDataset,
     RARPDataset,
     HamlynDataset,
-    StereoMisDataset
+    StereoMisDataset,
+    EndoMapperDataset
 )
 from utils.common_utils import seed_everything, save_params_ckpt, save_params, save_means3D
 from utils.eval_helpers import report_progress, eval_save
@@ -53,7 +57,101 @@ import matplotlib.pyplot as plt
 from PIL import Image
 
 
+class GaussianRegressionNetwork(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.e1 = EncoderBlock(4,32)    # 336x336x4 --> 168x168x32
+        self.e2 = EncoderBlock(32,64)   # 168x168x32 --> 84x84x64
+        self.e3 = EncoderBlock(64,128)  # 84x84x64 --> 42x42x128
+        self.e4 = EncoderBlock(128,256) #  42x42x128 --> 21x21x256
 
+
+        self.b = Conv_Block(256,512)    # 21x21x256 --> 21x21x512
+
+        self.d1 = DecoderBlock(512,256) # 21x21x512 --> 42x42x256
+        self.d2 = DecoderBlock(256,128) # 42x42x256 --> 84x84x128
+        self.d3 = DecoderBlock(128,64)  # 84x84x128 --> 168x168x64
+        self.d4 = DecoderBlock(64,32)   # 168x168x64 --> 336x336x32
+
+        self.classifier = nn.Conv2d(32,8,kernel_size=1,padding = 0) 
+        self.output = nn.Sigmoid()
+
+    def forward(self,inputs):
+
+        s1,p1 = self.e1(inputs)     # 336x336x4 --> 168x168x32
+        s2,p2 = self.e2(p1)         # 168x168x32 --> 84x84x64
+        s3,p3 = self.e3(p2)         # 84x84x64 --> 42x42x128
+        s4,p4 = self.e4(p3)         #  42x42x128 --> 21x21x256
+
+        b = self.b(p4)              # 21x21x256 --> 21x21x512
+        
+        d1 = self.d1(b,s4)          # 21x21x512 --> 42x42x256
+        d2 = self.d2(d1,s3)         # 42x42x256 --> 84x84x128
+        d3 = self.d3(d2,s2)         # 84x84x128 --> 168x168x64
+        d4 = self.d4(d3,s1)         # 168x168x64 --> 336x336x32
+        cls = self.classifier(d4)   # 336x336x32 --> 336x336x8
+        return cls
+
+
+class Conv_Block(nn.Module):
+    def __init__(self,ch_in,ch_out,kernel_size=3,padding = 1):
+        super().__init__()
+        self.conv_1 = nn.Conv2d(ch_in,ch_out, kernel_size = kernel_size, padding = padding)
+        self.conv_2 = nn.Conv2d(ch_out,ch_out,kernel_size = kernel_size, padding = padding)
+
+
+        self.batchnorm1 = nn.BatchNorm2d(ch_out)
+        self.batchnorm2 = nn.BatchNorm2d(ch_out)
+
+        self.relu = nn.ReLU()
+
+    def forward(self,inputs):
+        x = self.conv_1(inputs)
+        x = self.batchnorm1(x)
+        x = self.relu(x)
+
+        x = self.conv_2(x)
+        x = self.batchnorm2(x)
+        return self.relu(x)
+
+
+
+class EncoderBlock(nn.Module):
+    def __init__(self,ch_in,ch_out):
+        super().__init__()
+        self.conv = Conv_Block(ch_in,ch_out)
+        self.pool = nn.MaxPool2d((2,2))
+
+
+    def forward(self,inputs):
+        x = self.conv(inputs)
+        p = self.pool(x)
+
+
+        return x,p
+    
+
+class DecoderBlock(nn.Module):
+    def __init__(self,ch_in,ch_out):
+        super().__init__()
+        self.up = nn.ConvTranspose2d(ch_in,ch_out,kernel_size=2,stride = 2,padding = 0) # Strided transpose conv with no padding doubles size
+        self.conv = Conv_Block(2*ch_out,ch_out) # We concatenate the skip connection, so we get 2x ch_out channels
+
+    def forward(self, inputs, skip):
+        x = self.up(inputs)
+        
+        # Resize skip to match x
+        if x.shape[-2:] != skip.shape[-2:]:
+            skip = F.interpolate(skip, size=x.shape[-2:], mode="bilinear", align_corners=False)
+        
+        x = torch.cat([x, skip], axis=1)
+        return self.conv(x)
+"""
+    def forward(self,inputs,skip):
+        x = self.up(inputs)
+        x = torch.cat([x,skip],axis = 1)
+        return self.conv(x)    
+"""
 
 def get_dataset(config_dict, basedir, sequence, **kwargs):
     if config_dict["dataset_name"].lower() in ["endoslam_unity"]:
@@ -70,6 +168,8 @@ def get_dataset(config_dict, basedir, sequence, **kwargs):
         return HamlynDataset(config_dict, basedir, sequence, **kwargs)
     elif config_dict['dataset_name'].lower() in ['stereomis']:
         return StereoMisDataset(config_dict, basedir, sequence, **kwargs)
+    elif config_dict['dataset_name'].lower() in ['endomapper']:
+        return EndoMapperDataset(config_dict, basedir, sequence, **kwargs)
     else:
         raise ValueError(f"Unknown dataset name {config_dict['dataset_name']}")
 
@@ -404,6 +504,8 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification
         else:
             params[k] = torch.nn.Parameter(v.cuda().float().contiguous().requires_grad_(True))
 
+
+
     variables = {'max_2D_radius': torch.zeros(params['means3D'].shape[0]).cuda().float(),
                  'means2D_gradient_accum': torch.zeros(params['means3D'].shape[0]).cuda().float(),
                  'denom': torch.zeros(params['means3D'].shape[0]).cuda().float(),
@@ -414,12 +516,14 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification
             param_list = [params for _ in range(num_frames)]
         else:
             param_list = params
+    else:
+        param_list = params
     return param_list, variables
 
 
 def initialize_optimizer(params, lrs_dict):
     lrs = lrs_dict
-    param_groups = [{'params': [v], 'name': k, 'lr': lrs[k]} for k, v in params.items() if k != 'feature_rest']
+    param_groups = [{'params': [v], 'name': k, 'lr': lrs[k]} for k, v in params.items() if k != 'feature_rest' and isinstance(k, str) ]
     if 'feature_rest' in params:
         param_groups.append({'params': [params['feature_rest']], 'name': 'feature_rest', 'lr': lrs['rgb_colors'] / 20.0})
     return torch.optim.Adam(param_groups, lr=0.0, eps=1e-15)
@@ -693,13 +797,14 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
         img = Image.fromarray((im.permute(1,2,0).cpu().detach().numpy()*255).astype(np.uint8))
         os.makedirs(f'./scripts/plots/{ii}',exist_ok=True)
         img.save(f'./scripts/plots/{ii}/{save_idx}.png')
+        
 
-
-
+    
     if not save_idx == None:
+        
         ii = curr_data['id']
         diff = torch.abs(im-curr_data['im'])
-
+        
 
         # c_d_norm = (curr_data['depth']-curr_data['depth'].min())/(curr_data['depth'].max()-curr_data['depth'].min())
         # d_norm = (depth-depth.min())/(depth.max()-depth.min())
@@ -760,6 +865,17 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
 
     weighted_losses = {k: v * loss_weights[k] for k, v in losses.items()}
     loss = sum(weighted_losses.values())
+
+        # Make sure variables['max_2D_radius'] matches radius in shape
+    if variables['max_2D_radius'].shape[0] != radius.shape[0]:
+        diff = radius.shape[0] - variables['max_2D_radius'].shape[0]
+        if diff > 0:
+            # Add zeros for new Gaussians
+            extra = torch.zeros(diff, device=radius.device)
+            variables['max_2D_radius'] = torch.cat([variables['max_2D_radius'], extra])
+        else:
+            # Truncate if radius is shorter
+            variables['max_2D_radius'] = variables['max_2D_radius'][:radius.shape[0]]
 
     seen = radius > 0
     variables['max_2D_radius'][seen] = torch.max(radius[seen], variables['max_2D_radius'][seen])
@@ -1044,7 +1160,7 @@ def rgbd_slam(config: dict):
 
     if config['GRN']['use_grn']:
         print('Using GRN for initialization')
-        from GRN.models.conv_unet import GaussianRegressionNetwork
+        
 
         grn_model = GaussianRegressionNetwork().cuda()
         grn_model.load_state_dict(torch.load(config['GRN']['model_path']))
@@ -1163,7 +1279,7 @@ def rgbd_slam(config: dict):
             # depth = depth.permute(1,2,0)*10 # CxWxH --> WxHxC to align with rest of the pipeline    
             # print(depth.min())
             depth = 1/(output_norm)
-            depth = depth.permute(1,2,0)*10
+            depth = depth.permute(1,2,0)
 
         # plt.imshow(depth.squeeze().cpu().detach())
         # plt.title('predicted depth')
@@ -1283,9 +1399,6 @@ def rgbd_slam(config: dict):
     
     # timer.lap("all the config")
     added_new_gaussians = []
-
-
-
 
 
     # Iterate over Scan
@@ -1511,7 +1624,7 @@ def rgbd_slam(config: dict):
                 local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(params_iter,time_idx,True,deformation_type=config['deforms']['deform_type'])
             else:
                 local_means = params_iter['means3D']
-                local_rots = params_iter['unnorm_rots']
+                local_rots = params_iter['unnorm_rotations']
                 local_scales = params_iter['log_scales']
                 local_opacities = params_iter['logit_opacities']
                 local_colors = params_iter['rgb_colors']
@@ -1767,20 +1880,25 @@ def rgbd_slam(config: dict):
     
         torch.cuda.empty_cache()
     nr_gauss = []
+
+    
     for time_idx_plot in range(num_frames):
         if config['deforms']['use_deformations']:
             local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(params[time_idx_plot],time_idx_plot,True,deformation_type=config['deforms']['deform_type'])
         else:
             local_means = params_iter['means3D']
-            local_rots = params_iter['unnorm_rots']
+            local_rots = params_iter['unnorm_rotations']
             local_scales = params_iter['log_scales']
             local_opacities = params_iter['logit_opacities']
             local_colors = params_iter['rgb_colors']
         
+
         nr_gauss.append(local_means.shape[0])
         # local_means = params['means3D']
         # local_rots = params['unnorm_rotations']
         # local_scales = params['log_scales']
+        
+        params[0] = params[1]
         transformed_pts = transform_to_frame(local_means,params[time_idx_plot], time_idx_plot, gaussians_grad=False, camera_grad=False)
         # img_rendervar = transformed_params2rendervar(params,transformed_pts,local_rots,local_scales)
         if config['GRN']['use_grn']:
@@ -1840,11 +1958,11 @@ def rgbd_slam(config: dict):
         #         params_save['log_scales'] = torch.cat((params_save['log_scales'], params[time_idx]['log_scales'][:,:,None]), dim=2)
         #         params_save['logit_opacities'] = torch.cat((params_save['logit_opacities'], params[time_idx]['logit_opacities'][:,:,None]), dim=2)
         #         params_save['rgb_colors'] = torch.cat((params_save['rgb_colors'], params[time_idx]['rgb_colors'][:,:,None]), dim=2)
-        params_save['means3D'] = [params[idx]['means3D'] for idx in range(len(params))]
-        params_save['unnorm_rotations'] = [params[idx]['unnorm_rotations'] for idx in range(len(params))]
-        params_save['log_scales'] = [params[idx]['log_scales'] for idx in range(len(params))]
-        params_save['logit_opacities'] = [params[idx]['logit_opacities'] for idx in range(len(params))]
-        params_save['rgb_colors'] = [params[idx]['rgb_colors'] for idx in range(len(params))]
+        params_save['means3D'] = [params[idx]['means3D'] for idx in range(num_frames)]
+        params_save['unnorm_rotations'] = [params[idx]['unnorm_rotations'] for idx in range(num_frames)]
+        params_save['log_scales'] = [params[idx]['log_scales'] for idx in range(num_frames)]
+        params_save['logit_opacities'] = [params[idx]['logit_opacities'] for idx in range(num_frames)]
+        params_save['rgb_colors'] = [params[idx]['rgb_colors'] for idx in range(num_frames)]
         params_save['cam_unnorm_rots'] = params[time_idx]['cam_unnorm_rots']
         params_save['cam_trans'] = params[time_idx]['cam_trans']
         params = params_save
@@ -1862,8 +1980,9 @@ def rgbd_slam(config: dict):
     params['keyframe_time_indices'] = np.array(keyframe_time_indices)
     
     # Save Parameters
+    print(params.keys())
     save_params(params, output_dir)
-    # save_means3D(params['means3D'], output_dir)
+    save_means3D(params['means3D'][0], output_dir)
 
         # Evaluate Final Parameters
     dataset = [dataset, eval_dataset, 'C3VD'] if dataset_config["train_or_test"] == 'train' else dataset

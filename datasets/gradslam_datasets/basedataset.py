@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
+import pyexr
 import cv2
 import imageio
 import PIL
@@ -156,8 +157,10 @@ class GradSLAMDataset(torch.utils.data.Dataset):
         self.poses = torch.stack(self.poses)
         if self.relative_pose:
             self.transformed_poses = self._preprocess_poses(self.poses)
+            
         else:
             self.transformed_poses = self.poses
+
         
         if self.preload:
             self.prepared_data=[]
@@ -278,9 +281,18 @@ class GradSLAMDataset(torch.utils.data.Dataset):
         raise NotImplementedError
 
     def prepare_meta(self, index):
-        color_path = self.color_paths[index]
-        depth_path = self.depth_paths[index]
+        try:
+            color_path = self.color_paths[index]
+        except:
+            color_path = f'./data/C3VD/sigmoid_t2_a/color/{index:04d}_color.png'
+        try:
+            depth_path = self.depth_paths[index]
+        except:
+            depth_path = f'./data/C3VD/sigmoid_t2_a/depth/{index:04d}_depth.tiff'
         color = np.asarray(imageio.imread(color_path), dtype=float)
+        if color.shape[2] == 4:
+            color = color[:,:,:3]
+        
         print('.png' in depth_path)
         if '.png' in depth_path or '.jpg' in depth_path:
             # if 'Pixelwise' in depth_path: # NOTE: we use this to identify unitycam endoslam dataset
@@ -295,6 +307,9 @@ class GradSLAMDataset(torch.utils.data.Dataset):
             depth = np.load(depth_path).astype(np.float64)
         elif '.tiff' in depth_path:
             depth = np.array(PIL.Image.open(depth_path), dtype=np.float64)
+        elif '.exr' in depth_path:
+            depth = pyexr.read(depth_path).astype(np.float64) 
+            depth = depth[:,:,:3]
         else:
             raise ValueError("Depth image format not supported.")
 
@@ -321,8 +336,9 @@ class GradSLAMDataset(torch.utils.data.Dataset):
         K = datautils.scale_intrinsics(K, self.height_downsample_ratio, self.width_downsample_ratio)
         intrinsics = torch.eye(4).to(K)
         intrinsics[:3, :3] = K
-
+        
         pose = self.transformed_poses[index]
+
 
         if self.load_embeddings:
             embedding = self.read_embedding_from_file(self.embedding_paths[index])
