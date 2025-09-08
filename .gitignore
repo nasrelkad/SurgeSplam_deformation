@@ -23,4 +23,8 @@ playground.ipynb
 
 slurm_outputs/
 
-experiments_backup/
+experiments_backup/gaussians.ply
+*.ply
+outputs/
+results/
+checkpoints/
