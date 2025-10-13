@@ -284,17 +284,20 @@ class GradSLAMDataset(torch.utils.data.Dataset):
         try:
             color_path = self.color_paths[index]
         except:
-            color_path = f'./data/C3VD/sigmoid_t2_a/color/{index:04d}_color.png'
+            color_path = f'./data/C3VDv2/c1_transverse1_t4_v4/color/{index:04d}.png'
         try:
             depth_path = self.depth_paths[index]
         except:
-            depth_path = f'./data/C3VD/sigmoid_t2_a/depth/{index:04d}_depth.tiff'
+            depth_path = "__NO_DEPTH__"
         color = np.asarray(imageio.imread(color_path), dtype=float)
         if color.shape[2] == 4:
             color = color[:,:,:3]
         
-        print('.png' in depth_path)
-        if '.png' in depth_path or '.jpg' in depth_path:
+        if depth_path == "__NO_DEPTH__":
+            # Create a constant-1.0m depth in RAW units so that after dividing by png_depth_scale it becomes ~1.0
+            dummy = np.ones((color.shape[0], color.shape[1]), dtype=np.float64) * float(self.png_depth_scale)
+            depth = dummy
+        elif ('.png' in depth_path) or ('.jpg' in depth_path):
             # if 'Pixelwise' in depth_path: # NOTE: we use this to identify unitycam endoslam dataset
             #     depth = np.asarray(PIL.Image.open(depth_path).convert("L"), dtype=np.float64)
             #     # depth = cv2.blur(depth, (10, 10))

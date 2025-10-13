@@ -40,6 +40,7 @@ class C3VDDataset(GradSLAMDataset):
             desired_width=desired_width,
             load_embeddings=load_embeddings,
             embedding_dir=embedding_dir,
+            sequence = sequence,
             embedding_dim=embedding_dim,
             **kwargs,
         )
@@ -81,7 +82,18 @@ class C3VDDataset(GradSLAMDataset):
 
     def get_filepaths(self):
         color_paths = natsorted(glob.glob(f"{self.input_folder}/color/*.png"))
-        depth_paths = natsorted(glob.glob(f"{self.input_folder}/depth/*.tiff"))
+
+        # Try multiple depth patterns
+        depth_paths = []
+        for pat in ["*.tiff", "*.tif", "*.png", "*.npy", "*.exr"]:
+            depth_paths = natsorted(glob.glob(f"{self.input_folder}/depth/{pat}"))
+            if len(depth_paths) > 0:
+                break
+
+        # If no depth available, fabricate sentinel entries (one per color)
+        if len(depth_paths) == 0:
+            depth_paths = ["__NO_DEPTH__"] * len(color_paths)
+
         embedding_paths = None
         if self.load_embeddings:
             embedding_paths = natsorted(glob.glob(f"{self.input_folder}/{self.embedding_dir}/*.pt"))

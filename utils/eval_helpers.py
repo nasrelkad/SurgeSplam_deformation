@@ -218,7 +218,7 @@ def report_progress(params, data, i, progress_bar, iter_time_idx, sil_thres, eve
             ate_rmse = np.round(ate_rmse, decimals=6)
 
         # Get current frame Gaussians
-        transformed_pts = transform_to_frame(params, iter_time_idx, 
+        transformed_pts = transform_to_frame(local_means, params, iter_time_idx, 
                                              gaussians_grad=False,
                                              camera_grad=False)
 
@@ -252,6 +252,11 @@ def report_progress(params, data, i, progress_bar, iter_time_idx, sil_thres, eve
             diff_depth_l1 = torch.abs((rastered_depth - data['depth']))
             diff_depth_l1 = diff_depth_l1 * valid_depth_mask
             depth_l1 = diff_depth_l1.sum() / valid_depth_mask.sum()
+
+        print("GT  im min/max/mean:", float(data['im'].min()), float(data['im'].max()), float(data['im'].mean()))
+        print("REN im min/max/mean:", float(im.min()), float(im.max()), float(im.mean()))
+        nonzero_ratio = (im>1e-6).float().mean().item()
+        print("Rendered nonzero ratio:", nonzero_ratio)
 
         if not (tracking or mapping):
             progress_bar.set_postfix({f"Time-Step: {iter_time_idx} | PSNR: {psnr:.{7}} | Depth RMSE: {rmse:.{7}} | L1": f"{depth_l1:.{7}}"})
@@ -542,6 +547,7 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
                 depth_sil_rendervar = transformed_GRNparams2depthplussilhouette(final_params, curr_data['w2c'],
                                                                             transformed_pts,local_rots,local_scales,local_opacities)
             else:
+                print(local_scales.shape)
                 rendervar = transformed_params2rendervar(final_params, transformed_pts,local_rots,local_scales,local_opacities,local_colors)
 
                 depth_sil_rendervar = transformed_params2depthplussilhouette(final_params, curr_data['w2c'],

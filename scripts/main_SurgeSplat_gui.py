@@ -1,10 +1,13 @@
+#dict_keys(['means3D', 'unnorm_rotations', 'log_scales', 'logit_opacities', 'rgb_colors', 'cam_unnorm_rots', 'cam_trans', 
+# 'timestep', 'intrinsics', 'w2c', 'org_width', 'org_height', 'gt_w2c_all_frames', 'keyframe_time_indices'])
 import argparse
 import os
 import shutil
 import sys
 import time
 from importlib.machinery import SourceFileLoader
-
+import torch.nn as nn
+ 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 sys.path.insert(0, _BASE_DIR)
@@ -17,7 +20,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
-import torch.nn as nn
+
 from datasets.gradslam_datasets import (
     load_dataset_config,
     EndoSLAMDataset,
@@ -26,7 +29,8 @@ from datasets.gradslam_datasets import (
     EndoNerfDataset,
     RARPDataset,
     HamlynDataset,
-    StereoMisDataset
+    StereoMisDataset,
+    EndoMapperDataset
 )
 from utils.common_utils import seed_everything, save_params_ckpt, save_params, save_means3D
 from utils.eval_helpers import report_progress, eval_save
@@ -37,7 +41,7 @@ from utils.slam_helpers import (
     transform_to_frame, l1_loss_v1, matrix_to_quaternion,
     transformed_GRNparams2depthplussilhouette,transformed_GRNparams2rendervar,
     add_new_gaussians,grn_initialization,deform_gaussians,initialize_deformations,initialize_new_params,grn_initialization,
-    get_mask,align_shift_and_scale, initialize_cv_deformations, initialize_xyzt, xyzt_time_gate, apply_xyzt_gate
+    get_mask,align_shift_and_scale
 )
 from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, densify
 from utils.vis_utils import plot_video
@@ -49,8 +53,43 @@ import torchvision
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 
 import matplotlib.pyplot as plt
+try:
+    import open3d as o3d
+except Exception:
+    o3d = None
 
 from PIL import Image
+
+import numpy as np
+
+def _as_param_dict(params):
+    if isinstance(params, dict):
+        return params
+    if isinstance(params, (list, tuple)):
+        for p in params:
+            if isinstance(p, dict) and ('means3D' in p or 'rgb_colors' in p):
+                return p
+        for p in params:
+            if isinstance(p, dict):
+                return p
+    raise TypeError(f"Unexpected params type: {type(params)}; expected dict or list/tuple of dicts.")
+
+def _to_rgb01(arr):
+    """Convert array-like to Nx3 float colors in [0,1].
+    Handles 0..255, -1..1, and SH-like (>3 channels)."""
+    a = np.asarray(arr, dtype=np.float32)
+    if a.ndim == 2 and a.shape[1] > 3:
+        a = a[:, :3]
+    if a.size == 0:
+        return a
+    amax = float(a.max(initial=0.0))
+    amin = float(a.min(initial=0.0))
+    if amax > 1.5:    # likely 0..255
+        a = a / 255.0
+    if amin < 0.0:    # likely -1..1
+        a = 0.5 * (a + 1.0)
+    a = np.clip(a, 0.0, 1.0)
+    return a
 
 
 class GaussianRegressionNetwork(nn.Module):
@@ -142,6 +181,12 @@ class DecoderBlock(nn.Module):
         
         x = torch.cat([x, skip], axis=1)
         return self.conv(x)
+"""
+    def forward(self,inputs,skip):
+        x = self.up(inputs)
+        x = torch.cat([x,skip],axis = 1)
+        return self.conv(x)    
+"""
 
 def get_dataset(config_dict, basedir, sequence, **kwargs):
     if config_dict["dataset_name"].lower() in ["endoslam_unity"]:
@@ -158,18 +203,11 @@ def get_dataset(config_dict, basedir, sequence, **kwargs):
         return HamlynDataset(config_dict, basedir, sequence, **kwargs)
     elif config_dict['dataset_name'].lower() in ['stereomis']:
         return StereoMisDataset(config_dict, basedir, sequence, **kwargs)
+    elif config_dict['dataset_name'].lower() in ['endomapper']:
+        return EndoMapperDataset(config_dict, basedir, sequence, **kwargs)
     else:
         raise ValueError(f"Unknown dataset name {config_dict['dataset_name']}")
 
-def _set_requires_grad_for_phase(params_dict, lr_dict):
-    for name, tensor in params_dict.items():
-        if not isinstance(name, str):  # safety
-            continue
-        if not isinstance(tensor, torch.Tensor):
-            continue
-        req = (lr_dict.get(name, 0.0) > 0.0)
-        if tensor.requires_grad != req:
-            tensor.requires_grad_(req)
 
 def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True, 
                    mask=None, compute_mean_sq_dist=False, mean_sq_dist_method="projective"):
@@ -484,8 +522,6 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification
     if use_deforms:
         if deform_type == 'gaussian':
             params = initialize_deformations(params,nr_basis,use_distributed_biases=use_distributed_biases,total_timescale = total_timescale)
-        elif deform_type == 'cv':
-            params = initialize_cv_deformations(params)
 
  
     # Initialize a single gaussian trajectory to model the camera poses relative to the first frame
@@ -503,6 +539,8 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification
         else:
             params[k] = torch.nn.Parameter(v.cuda().float().contiguous().requires_grad_(True))
 
+
+
     variables = {'max_2D_radius': torch.zeros(params['means3D'].shape[0]).cuda().float(),
                  'means2D_gradient_accum': torch.zeros(params['means3D'].shape[0]).cuda().float(),
                  'denom': torch.zeros(params['means3D'].shape[0]).cuda().float(),
@@ -513,29 +551,16 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification
             param_list = [params for _ in range(num_frames)]
         else:
             param_list = params
+    else:
+        param_list = params
     return param_list, variables
 
 
 def initialize_optimizer(params, lrs_dict):
-    param_groups = []
-
-    for k, v in params.items():
-        # Skip SH features if you keep them separate
-        #if k == 'feature_rest':
-        #    continue
-
-        # Guard: only accept string keys (the LR dict has string keys)
-        if not isinstance(k, str):
-            #print(f"[initialize_optimizer] Skipping non-string param key: {k!r}")
-            continue
-
-        lr = lrs_dict.get(k, None)
-        if lr is None:
-            # No LR provided: skip (or set lr = 0.0 to freeze instead)
-            print(f"[initialize_optimizer] No LR for '{k}', skipping this param.")
-            continue
-
-        param_groups.append({'params': [v], 'name': k, 'lr': float(lr)})
+    lrs = lrs_dict
+    param_groups = [{'params': [v], 'name': k, 'lr': lrs[k]} for k, v in params.items() if k != 'feature_rest' and isinstance(k, str) ]
+    if 'feature_rest' in params:
+        param_groups.append({'params': [params['feature_rest']], 'name': 'feature_rest', 'lr': lrs['rgb_colors'] / 20.0})
     return torch.optim.Adam(param_groups, lr=0.0, eps=1e-15)
 
 
@@ -591,38 +616,8 @@ def initialize_optimizer(params, lrs_dict):
 #     # plt.show() 
 #     return params
 
-def _clamp_cv_deform(params, config):
-    # Only if you enabled CV-style fields in slam_helpers.initialize_cv_deformations(...)
-    for k in ('cv_vel_xyz','cv_vel_log_scales','cv_angvel_aa'):
-        if k not in params: 
-            continue
-    with torch.no_grad():
-        if 'cv_vel_xyz' in params:
-            mv = float(config['deforms'].get('max_vel_xyz', 0.05))
-            params['cv_vel_xyz'].clamp_(-mv, mv)
-        if 'cv_vel_log_scales' in params:
-            ms = float(config['deforms'].get('max_logscale_vel', 0.02))
-            params['cv_vel_log_scales'].clamp_(-ms, ms)
-        if 'cv_angvel_aa' in params:
-            ma = float(config['deforms'].get('max_ang_vel', 0.2))
-            w = params['cv_angvel_aa']
-            n = torch.norm(w, dim=-1, keepdim=True).clamp_min(1e-8)
-            scale = torch.clamp(ma / n, max=1.0)
-            params['cv_angvel_aa'].mul_(scale)
 
   
-# replace BOTH of these occurrences in main_SurgeSplat:
-#   color = color.permute(2, 0, 1) / 255
-#   tracking_color = tracking_color.permute(2, 0, 1) / 255
-
-def to01(t):
-    t = t.permute(2, 0, 1).float()
-    # Only divide if it’s actually 0..255
-    if t.max() > 1.5:
-        t = t / 255.0
-    return t.clamp(0.0, 1.0)
-
-
 
 
 def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_radius_depth_ratio, mean_sq_dist_method, densify_dataset=None, use_simplification=True,use_gt_depth = True,
@@ -637,8 +632,7 @@ def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_rad
     
     # Process Camera Parameters
     intrinsics = intrinsics[:3, :3]
-    w2c = torch.eye(4, device=pose.device, dtype=pose.dtype)
-    #w2c = torch.linalg.inv(pose)
+    w2c = torch.linalg.inv(pose)
 
     # Setup Camera
     cam = setup_camera(color.shape[2], color.shape[1], intrinsics.cpu().numpy(), w2c.detach().cpu().numpy(), use_simplification=use_simplification)
@@ -646,8 +640,7 @@ def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_rad
     if densify_dataset is not None:
         # Get Densification RGB-D Data & Camera Parameters
         color, depth, densify_intrinsics, _ = densify_dataset[0]
-        color = to01(color)                                  # fixes curr_data['im'] path
-        
+        color = color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
         depth = depth.permute(2, 0, 1) # (H, W, C) -> (C, H, W)
         densify_intrinsics = densify_intrinsics[:3, :3]
         densify_cam = setup_camera(color.shape[2], color.shape[1], densify_intrinsics.cpu().numpy(), w2c.detach().cpu().numpy())
@@ -673,7 +666,6 @@ def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_rad
 
   
     params_list, variables = initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification,use_deforms=use_deforms,deform_type=deform_type,nr_basis = nr_basis,use_distributed_biases=use_distributed_biases,total_timescale=total_timescale,cam = cam,random_initialization=random_initialization,init_scale=init_scale)
-    
     # bloat_params = True
     # if bloat_params:
     #     if isinstance(params_list,list):
@@ -748,31 +740,6 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
         transformed_pts = transform_to_frame(local_means,params, iter_time_idx,
                                              gaussians_grad=True,
                                              camera_grad=False)
-    
-
-    
-    w_compact = float(loss_weights.get('xyzt_compact', 1e-4))   # small!
-    w_center  = float(loss_weights.get('xyzt_center',  1e-4))
-    if 't_mu' in params:
-        if w_compact > 0.0 or w_center > 0.0:
-            mu = params['t_mu']
-            logvar = params['t_logvar']
-            var = torch.exp(logvar)
-
-            # Encourage small temporal support (but don't crush to zero)
-            compact = (var.sqrt()).mean()   # mean sigma_t
-
-            # Encourage center near current frame if it contributes (softly)
-            # Use gate as responsibility (stopgrad on gate to avoid trivial tricks)
-            with torch.no_grad():
-                gate = xyzt_time_gate(params, float(iter_time_idx))
-                gate = gate / (gate.sum() + 1e-8)
-            center = (gate * (mu - float(iter_time_idx)).abs()).sum()
-
-            losses['xyzt_compact'] = compact
-            losses['xyzt_center']  = center
-
-
     bloat_params = False
     # print("We got to the loss calculation")
     if bloat_params: # For ablation study: add bloating parameters to computation graph to see effect on optimization time
@@ -797,25 +764,18 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
                                                                     transformed_pts,local_rots,local_scales,local_opacities)
     
     # Visualize the Rendered Images
-    if 't_mu' in params:    
-        gt = xyzt_time_gate(params, float(iter_time_idx))     # time index of this frame
-        rendervar = apply_xyzt_gate(
-            rendervar, gt, gate_thresh=0.001)
+    # online_render(curr_data, iter_time_idx, rendervar, dev_use_controller=False)
         
-
     # RGB Rendering
     try:
         rendervar['means2D'].retain_grad()
     except:
         pass
-    
- 
-
     im, radius, _ = Renderer(raster_settings=curr_data['cam'])(**rendervar)
     variables['means2D'] = rendervar['means2D'] # Gradient only accum from colour render for densification
     # plt.imshow(im.permute(1,2,0).cpu().detach())
     # plt.show()
-    
+
     # Depth & Silhouette Rendering
     depth_sil, _, _ = Renderer(raster_settings=curr_data['cam'])(**depth_sil_rendervar)
     depth = depth_sil[0, :, :].unsqueeze(0)
@@ -872,13 +832,14 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
         img = Image.fromarray((im.permute(1,2,0).cpu().detach().numpy()*255).astype(np.uint8))
         os.makedirs(f'./scripts/plots/{ii}',exist_ok=True)
         img.save(f'./scripts/plots/{ii}/{save_idx}.png')
+        
 
-
-
+    
     if not save_idx == None:
+        
         ii = curr_data['id']
         diff = torch.abs(im-curr_data['im'])
-
+        
 
         # c_d_norm = (curr_data['depth']-curr_data['depth'].min())/(curr_data['depth'].max()-curr_data['depth'].min())
         # d_norm = (depth-depth.min())/(depth.max()-depth.min())
@@ -936,44 +897,22 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
         nr_gauss = min(nr_initial_gauss,nr_current_gauss)
         losses['deform'] = torch.sum(torch.square(params_initial['means3D'][:nr_gauss]-local_means[:nr_gauss]))/nr_gauss
 
-   
-
 
     weighted_losses = {k: v * loss_weights[k] for k, v in losses.items()}
     loss = sum(weighted_losses.values())
 
-    
-    seen = radius > 0
-
-    n = radius.shape[0]  # current number of gaussians rendered (matches params size)
-
-    def _pad_or_trim_1d(t, n, fill=0.0):
-        if t.shape[0] == n:
-            return t
-        if t.shape[0] < n:
-            pad = torch.full((n - t.shape[0],), fill, device=t.device, dtype=t.dtype)
-            return torch.cat([t, pad], dim=0)
+        # Make sure variables['max_2D_radius'] matches radius in shape
+    if variables['max_2D_radius'].shape[0] != radius.shape[0]:
+        diff = radius.shape[0] - variables['max_2D_radius'].shape[0]
+        if diff > 0:
+            # Add zeros for new Gaussians
+            extra = torch.zeros(diff, device=radius.device)
+            variables['max_2D_radius'] = torch.cat([variables['max_2D_radius'], extra])
         else:
-            return t[:n]
+            # Truncate if radius is shorter
+            variables['max_2D_radius'] = variables['max_2D_radius'][:radius.shape[0]]
 
-    for key, fill in [
-        ('means2D_gradient_accum', 0.0),
-        ('denom', 0.0),
-        ('max_2D_radius', 0.0),
-        # If you keep a per-point timestep buffer:
-        ('timestep', 0.0),
-    ]:
-        if key in variables:
-            variables[key] = _pad_or_trim_1d(variables[key], n, fill)
-
-    # Also ensure mask aligns to current N
-    if seen.shape[0] != n:
-        seen = seen[:n]
-
-
-
-
-
+    seen = radius > 0
     variables['max_2D_radius'][seen] = torch.max(radius[seen], variables['max_2D_radius'][seen])
     variables['seen'] = seen
     weighted_losses['loss'] = loss
@@ -1287,6 +1226,17 @@ def rgbd_slam(config: dict):
     if num_frames == -1:
         num_frames = dataset.end
 
+        # --- Interactive GUI (Open3D) setup ---
+        use_gui = config.get("viz", {}).get("interactive_gui", False) or config.get("viz_gui", False)
+        vis = None
+        pcd = None
+        if use_gui and (o3d is not None):
+            vis = o3d.visualization.Visualizer()
+            vis.create_window("SurgeSplam Live 3D", width=960, height=720, visible=True)
+            pcd = o3d.geometry.PointCloud()
+            vis.add_geometry(pcd)
+
+
     if dataset_config["train_or_test"] == 'train': # kind of ill implementation here. train_or_test should be 'all' or 'train'. If 'test', you view test set as full dataset.
         eval_dataset = get_dataset(
             config_dict=gradslam_data_cfg,
@@ -1375,7 +1325,7 @@ def rgbd_slam(config: dict):
             # depth = depth.permute(1,2,0)*10 # CxWxH --> WxHxC to align with rest of the pipeline    
             # print(depth.min())
             depth = 1/(output_norm)
-            depth = depth.permute(1,2,0)*10
+            depth = depth.permute(1,2,0)
 
         # plt.imshow(depth.squeeze().cpu().detach())
         # plt.title('predicted depth')
@@ -1404,12 +1354,7 @@ def rgbd_slam(config: dict):
                                                                             reduction_type = config['gaussian_reduction']['reduction_type'],
                                                                             reduction_fraction=config['gaussian_reduction']['reduction_fraction'] )        
         
-    params = initialize_xyzt(
-            params,
-            num_frames=num_frames,   # or config['dataset']['num_frames']
-            xyzt_init_sigma=config['deforms'].get('xyzt_init_sigma', 5.0),
-            device=params['means3D'].device
-        )
+    
     # local_means,local_rots,local_scales = deform_gaussians(params,0,False,5,'simple')
     # rendervar = transformed_GRNparams2rendervar(params,local_means,local_rots,local_scales)   
 
@@ -1437,7 +1382,7 @@ def rgbd_slam(config: dict):
             train_or_test=dataset_config["train_or_test"]
         )
         tracking_color, _, tracking_intrinsics, _ = tracking_dataset[0]
-        tracking_color = to01(tracking_color)                # fixes tracking path
+        tracking_color = tracking_color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
         tracking_intrinsics = tracking_intrinsics[:3, :3]
         tracking_cam = setup_camera(tracking_color.shape[2], tracking_color.shape[1], 
                                     tracking_intrinsics.cpu().numpy(), first_frame_w2c.detach().cpu().numpy(), 
@@ -1478,7 +1423,6 @@ def rgbd_slam(config: dict):
         for time_idx in range(checkpoint_time_idx):
             # Load RGBD frames incrementally instead of all frames
             color, depth, _, gt_pose = dataset[time_idx]
-
             # Process poses
             gt_w2c = torch.linalg.inv(gt_pose)
             gt_w2c_all_frames.append(gt_w2c)
@@ -1503,12 +1447,9 @@ def rgbd_slam(config: dict):
     added_new_gaussians = []
 
 
-
-
-
     # Iterate over Scan
     for time_idx in tqdm(range(checkpoint_time_idx, num_frames)): 
-        if time_idx in dataset.eval_idx:
+        if config.get('do_eval', True) and (time_idx in dataset.eval_idx):
             with torch.no_grad():
             # Copy current (deformed) parameters to next time step
                 # params['means3D'][..., time_idx+1] = params['means3D'][..., time_idx]
@@ -1550,7 +1491,7 @@ def rgbd_slam(config: dict):
             s_pred = config['depth']['scale_pred']
             t_gt =   config['depth']['shift_gt']
             s_gt =   config['depth']['scale_gt']
-            pred_disp = ((model(color_input)-t_pred)/s_pred)*s_gt + t_gt #Fix this scaling offset
+            pred_disp = ((model(color_input)-t_pred)/s_pred)*s_gt + t_gt # TODO: Fix this scaling offset
             depth = 1/pred_disp # Convert disp to depth
             depth = depth.permute(1,2,0) # CxWxH --> WxHxC to align with rest of the pipeline
             # plt.imshow(depth.squeeze().cpu().detach())
@@ -1606,7 +1547,6 @@ def rgbd_slam(config: dict):
         save_idx = 0
         if time_idx > 0 and not config['tracking']['use_gt_poses']:
             # Reset Optimizer & Learning Rates for tracking
-            _set_requires_grad_for_phase(params_iter, config['tracking']['lrs'])  # <- add this
             optimizer = initialize_optimizer(params_iter, config['tracking']['lrs'])
             # Keep Track of Best Candidate Rotation & Translation
             candidate_cam_unnorm_rot = params_iter['cam_unnorm_rots'][..., time_idx].detach().clone()
@@ -1727,13 +1667,10 @@ def rgbd_slam(config: dict):
             invariant_depth = curr_data['depth']
             # plt.imshow(invariant_depth.squeeze().cpu().detach())
             if config['deforms']['use_deformations']:
-                with torch.autocast(device_type='cuda', dtype=torch.float16):
-                    local_means, local_rots, local_scales, local_opacities, local_colors = deform_gaussians(
-                    params_iter, iter_time_idx, deform_grad=True, deformation_type=config['deforms']['deform_type']
-                    )
+                local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(params_iter,time_idx,True,deformation_type=config['deforms']['deform_type'])
             else:
                 local_means = params_iter['means3D']
-                local_rots = params_iter['unnorm_rots']
+                local_rots = params_iter['unnorm_rotations']
                 local_scales = params_iter['log_scales']
                 local_opacities = params_iter['logit_opacities']
                 local_colors = params_iter['rgb_colors']
@@ -1846,7 +1783,6 @@ def rgbd_slam(config: dict):
                 #         print(f"\nSelected Keyframes at Frame {time_idx}: {selected_time_idx}")
 
                 # # Reset Optimizer & Learning Rates for Full Map Optimization
-                _set_requires_grad_for_phase(params_iter, config['mapping']['lrs'])
                 optimizer = initialize_optimizer(params_iter, config['mapping']['lrs']) 
 
                 # # timer.lap("Densification Done at frame "+str(time_idx), 3)
@@ -1988,26 +1924,45 @@ def rgbd_slam(config: dict):
             np.save(os.path.join(ckpt_output_dir, f"keyframe_time_indices{time_idx}.npy"), np.array(keyframe_time_indices))
         
     
+        
+        # --- Update Open3D viewer with current Gaussians ---
+        if "params_iter" in locals() and vis is not None and pcd is not None:
+            with torch.no_grad():
+                _pts = params_iter["means3D"]
+                _cols = params_iter["rgb_colors"]
+                if hasattr(_pts, "is_cuda") and _pts.is_cuda:
+                    _pts = _pts.detach().cpu()
+                if hasattr(_cols, "is_cuda") and _cols.is_cuda:
+                    _cols = _cols.detach().cpu()
+                _np_pts = _pts[:, :3].numpy()
+                _np_cols = _cols[:, :3].clamp(0, 1).numpy()
+                pcd.points = o3d.utility.Vector3dVector(_np_pts)
+                pcd.colors = o3d.utility.Vector3dVector(_np_cols)
+                vis.update_geometry(pcd)
+                vis.poll_events()
+                vis.update_renderer()
         torch.cuda.empty_cache()
     nr_gauss = []
-    for time_idx_plot in range(1, num_frames):
+
+    
+    for time_idx_plot in range(num_frames):
         if config['deforms']['use_deformations']:
-            with torch.autocast(device_type='cuda', dtype=torch.float16):
-                local_means, local_rots, local_scales, local_opacities, local_colors = deform_gaussians(
-                params_iter, iter_time_idx, deform_grad=True, deformation_type=config['deforms']['deform_type']
-                )
+            local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(params[time_idx_plot],time_idx_plot,True,deformation_type=config['deforms']['deform_type'])
         else:
             local_means = params_iter['means3D']
-            local_rots = params_iter['unnorm_rots']
+            local_rots = params_iter['unnorm_rotations']
             local_scales = params_iter['log_scales']
             local_opacities = params_iter['logit_opacities']
             local_colors = params_iter['rgb_colors']
         
+
         nr_gauss.append(local_means.shape[0])
         # local_means = params['means3D']
         # local_rots = params['unnorm_rotations']
         # local_scales = params['log_scales']
-        transformed_pts = transform_to_frame(local_means,params_iter, time_idx_plot, gaussians_grad=False, camera_grad=False)
+        
+        params[0] = params[1]
+        transformed_pts = transform_to_frame(local_means,params[time_idx_plot], time_idx_plot, gaussians_grad=False, camera_grad=False)
         # img_rendervar = transformed_params2rendervar(params,transformed_pts,local_rots,local_scales)
         if config['GRN']['use_grn']:
             rendervar = transformed_GRNparams2rendervar(params[time_idx_plot], 
@@ -2066,11 +2021,11 @@ def rgbd_slam(config: dict):
         #         params_save['log_scales'] = torch.cat((params_save['log_scales'], params[time_idx]['log_scales'][:,:,None]), dim=2)
         #         params_save['logit_opacities'] = torch.cat((params_save['logit_opacities'], params[time_idx]['logit_opacities'][:,:,None]), dim=2)
         #         params_save['rgb_colors'] = torch.cat((params_save['rgb_colors'], params[time_idx]['rgb_colors'][:,:,None]), dim=2)
-        params_save['means3D'] = [params[idx]['means3D'] for idx in range(len(params))]
-        params_save['unnorm_rotations'] = [params[idx]['unnorm_rotations'] for idx in range(len(params))]
-        params_save['log_scales'] = [params[idx]['log_scales'] for idx in range(len(params))]
-        params_save['logit_opacities'] = [params[idx]['logit_opacities'] for idx in range(len(params))]
-        params_save['rgb_colors'] = [params[idx]['rgb_colors'] for idx in range(len(params))]
+        params_save['means3D'] = [params[idx]['means3D'] for idx in range(num_frames)]
+        params_save['unnorm_rotations'] = [params[idx]['unnorm_rotations'] for idx in range(num_frames)]
+        params_save['log_scales'] = [params[idx]['log_scales'] for idx in range(num_frames)]
+        params_save['logit_opacities'] = [params[idx]['logit_opacities'] for idx in range(num_frames)]
+        params_save['rgb_colors'] = [params[idx]['rgb_colors'] for idx in range(num_frames)]
         params_save['cam_unnorm_rots'] = params[time_idx]['cam_unnorm_rots']
         params_save['cam_trans'] = params[time_idx]['cam_trans']
         params = params_save
@@ -2088,27 +2043,38 @@ def rgbd_slam(config: dict):
     params['keyframe_time_indices'] = np.array(keyframe_time_indices)
     
     # Save Parameters
-    params_no_ints = {k: v for k, v in params.items() if not isinstance(k, int)}
-    save_params(params_no_ints, output_dir)
-    # save_means3D(params['means3D'], output_dir)
+    print(params.keys())
+    save_params(params, output_dir)
+    save_means3D(params['means3D'][0], output_dir)
 
         # Evaluate Final Parameters
     dataset = [dataset, eval_dataset, 'C3VD'] if dataset_config["train_or_test"] == 'train' else dataset
-    with torch.no_grad():
-        eval_save(dataset, params, eval_dir, sil_thres=config['mapping']['sil_thres'],
-                mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],use_grn = config['GRN']['use_grn'])
+    if config.get('do_eval', True):
+        with torch.no_grad():
+            eval_save(dataset, params, eval_dir, sil_thres=config['mapping']['sil_thres'],
+                    mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],use_grn = config['GRN']['use_grn'])
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument("experiment", type=str, help="Path to experiment file")
     parser.add_argument("--online_vis", action="store_true", help="Visualize mapping renderings while running")
+    parser.add_argument("--gui", action="store_true", help="Open interactive 3D viewer")
+    parser.add_argument("--no-eval", action="store_true", help="Disable evaluation phases")
 
     args = parser.parse_args()
 
     experiment = SourceFileLoader(
         os.path.basename(args.experiment), args.experiment
     ).load_module()
+
+    # Apply CLI overrides
+    if args.gui:
+        experiment.config.setdefault("viz", {})
+        experiment.config["viz"]["interactive_gui"] = True
+        experiment.config["viz_gui"] = True
+    if args.no_eval:
+        experiment.config["do_eval"] = False
 
     # Prepare dir for visualization
     if args.online_vis:

@@ -1,20 +1,9 @@
 import os
 
 scenes = [
-    "cecum_t1_b", 
-    "cecum_t2_b", 
-    "cecum_t3_a", 
-    "sigmoid_t1_a", 
-    "sigmoid_t2_a", 
-    "sigmoid_t3_a", 
-    "trans_t1_b", 
-    "trans_t2_c", 
-    "trans_t4_a", 
-    "trans_t4_b",
-    "cecum_t4_b",
-    "desc_t4_a",
-    "trans_t1_a",
-    "seq1"
+    "c1_ascending_t4_v4", 
+    "c1_transverse1_t4_v4", 
+ 
 ]
 
 primary_device="cuda:0"
@@ -22,15 +11,15 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "trans_t1_a"
+    scene_name = "c1_transverse1_t4_v4"
 
 map_every = 1
 keyframe_every = 8
 # mapping_window_size = 24
-tracking_iters = 25
-mapping_iters = 25
-frames = 60 # adjust untill which frame
-group_name = "C3VD_base"
+tracking_iters = 12
+mapping_iters = 50
+frames = 130 # adjust untill which frame
+group_name = "C3VDv2_base"
 run_name = scene_name
 
 config = dict(
@@ -42,7 +31,7 @@ config = dict(
     keyframe_every=keyframe_every, # Keyframe every nth frame
     distance_keyframe_selection=True, # Use Naive Keyframe Selection
     distance_current_frame_prob=0.1, # Probability of choosing the current frame in mapping optimization
-    mapping_window_size=-1, # Mapping window size
+    mapping_window_size=44, # Mapping window size
     report_global_progress_every=2000, # Report Global Progress every nth frame
     scene_radius_depth_ratio=3, # Max First Frame Depth to Scene Radius Ratio (For Pruning/Densification)
     mean_sq_dist_method="projective", # ["projective", "knn"] (Type of Mean Squared Distance Calculation for Scale of Gaussians)
@@ -52,19 +41,19 @@ config = dict(
     save_checkpoints=False, # Save Checkpoints
     checkpoint_interval=int(1e10), # Checkpoint Interval
     data=dict(
-        basedir="./data/C3VD",
-        gradslam_data_cfg="./configs/data/c3vd.yaml",
+        basedir="./data/C3VDv2",
+        gradslam_data_cfg="./configs/data/c3vdv2.yaml",
         sequence=scene_name,
         desired_image_height=1080//2,
         desired_image_width=1350//2,
         start=0,
-        end=frames, #-1,
+        end=frames,#-1,
         stride=1,
         num_frames=frames,#-1,
         train_or_test="all",
     ),
     depth = dict(
-        use_gt_depth = True,
+        use_gt_depth = False,
         model_path = 'models/SurgeDepth/SurgeDepthStudent_V5.pth',
         model_size = 'vitb',
         normalization_means = [0.46888983, 0.29536288, 0.28712815], 
@@ -90,10 +79,10 @@ config = dict(
     gaussian_reduction = dict(
         reduce_gaussians = True,
         reduction_type = 'laplace',
-        reduction_fraction = 0.8
+        reduction_fraction = 0.05
     ) ,  
     GRN = dict(
-        use_grn = False,
+        use_grn = True,
         random_initialization = True,
         init_scale = 0.02,
         num_iters_initialization = 10,

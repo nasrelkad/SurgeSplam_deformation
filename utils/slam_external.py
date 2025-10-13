@@ -136,27 +136,87 @@ def cat_params_to_optimizer(new_params, params, optimizer):
 
 
 def remove_points(to_remove, params, variables, optimizer):
+    import torch
+
+    # Boolean mask (True = keep)
     to_keep = ~to_remove
-    keys = [k for k in params.keys() if k not in ['cam_unnorm_rots', 'cam_trans']]
+
+    # Per-point parameter keys (don’t touch camera pose tensors)
+    keys = [k for k in params.keys()
+            if isinstance(k, str) and k not in ['cam_unnorm_rots', 'cam_trans']]
+
     for k in keys:
-        group = [g for g in optimizer.param_groups if g['name'] == k][0]
-        stored_state = optimizer.state.get(group['params'][0], None)
-        if stored_state is not None:
-            stored_state["exp_avg"] = stored_state["exp_avg"][to_keep]
-            stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][to_keep]
+        v = params[k]
+        # Find optimizer group for this key (may be missing if frozen)
+        group = next((g for g in optimizer.param_groups if g.get('name') == k), None)
+
+        if group is None:
+            # No optimizer state: just slice the tensor/param safely
+            if isinstance(v, torch.nn.Parameter):
+                req = bool(v.requires_grad)
+                # Align mask length defensively
+                min_len = min(v.shape[0], to_keep.shape[0])
+                params[k] = torch.nn.Parameter(v[:min_len][to_keep[:min_len]].detach().requires_grad_(req))
+            else:
+                min_len = min(v.shape[0], to_keep.shape[0])
+                params[k] = v[:min_len][to_keep[:min_len]]
+            continue
+
+        # With optimizer state
+        old_param = group['params'][0]
+        # Align lengths to avoid indexing errors
+        min_len = min(old_param.shape[0], to_keep.shape[0])
+        idx_mask = to_keep[:min_len]
+        old_param = old_param[:min_len]
+
+        stored = optimizer.state.get(old_param, None)
+
+        new_data = old_param[idx_mask]
+        new_param = torch.nn.Parameter(new_data.requires_grad_(True))
+
+        # Move Adam moments if present
+        if stored is not None:
+            if 'exp_avg' in stored:
+                stored['exp_avg'] = stored['exp_avg'][:min_len][idx_mask]
+            if 'exp_avg_sq' in stored:
+                stored['exp_avg_sq'] = stored['exp_avg_sq'][:min_len][idx_mask]
+            # Rebind state to the new param
             del optimizer.state[group['params'][0]]
-            group["params"][0] = torch.nn.Parameter((group["params"][0][to_keep].requires_grad_(True)))
-            optimizer.state[group['params'][0]] = stored_state
-            params[k] = group["params"][0]
+            group['params'][0] = new_param
+            optimizer.state[new_param] = stored
         else:
-            group["params"][0] = torch.nn.Parameter(group["params"][0][to_keep].requires_grad_(True))
-            params[k] = group["params"][0]
-    variables['means2D_gradient_accum'] = variables['means2D_gradient_accum'][to_keep]
-    variables['denom'] = variables['denom'][to_keep]
-    variables['max_2D_radius'] = variables['max_2D_radius'][to_keep]
-    #if 'timestep' in variables.keys():
-    #    variables['timestep'] = variables['timestep'][to_keep]
+            group['params'][0] = new_param
+
+        params[k] = new_param
+
+    # --- Keep auxiliary per-point buffers in sync ---
+    # Target length = any representative per-point tensor after pruning
+    for rep_key in ('logit_opacities', 'means', 'colors', 'log_scales'):
+        if rep_key in params:
+            N = params[rep_key].shape[0]
+            break
+    else:
+        N = None  # nothing to resize
+
+    def _resize_like(v, N):
+        if N is None:
+            return v
+        # If lengths match the mask, use mask; otherwise crop/pad to N
+        if v.shape[0] == to_keep.shape[0]:
+            return v[:to_keep.shape[0]][to_keep]
+        if v.shape[0] > N:
+            return v[:N]
+        if v.shape[0] < N:
+            pad = torch.zeros((N - v.shape[0],) + v.shape[1:], dtype=v.dtype, device=v.device)
+            return torch.cat([v, pad], dim=0)
+        return v
+
+    for name in ('means2D_gradient_accum', 'denom', 'radii', 'opacity', 'visibility_filter'):
+        if name in variables:
+            variables[name] = _resize_like(variables[name], N)
+
     return params, variables
+
 
 
 def inverse_sigmoid(x):
