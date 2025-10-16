@@ -438,6 +438,12 @@ def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True,
 
 #     return xyz, rots, scales,opacities, colors
 
+def to01(t):
+    t = t.permute(2, 0, 1).float()
+    # only divide if data is 0..255
+    if t.max() > 1.5:
+        t = t / 255.0
+    return t.clamp_(0, 1)
 
 def initialize_simple_deformations(params, num_frames):
     '''
@@ -513,6 +519,8 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification
             param_list = [params for _ in range(num_frames)]
         else:
             param_list = params
+    else:
+        param_list = params
     return param_list, variables
 
 
@@ -1381,7 +1389,7 @@ def rgbd_slam(config: dict):
         # plt.title('predicted depth')
         # plt.colorbar()
         # plt.show()
-        color = color.permute(2, 0, 1) / 255
+        color = to01(color)
         depth = depth.permute(2, 0, 1)
 
         print(config['deforms']['deform_type'])
@@ -1491,7 +1499,8 @@ def rgbd_slam(config: dict):
                 curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
                 curr_w2c[:3, 3] = curr_cam_tran
                 # Initialize Keyframe Info
-                color = color.permute(2, 0, 1) / 255
+                #color = color.permute(2, 0, 1) / 255
+                color = to01(color)
                 depth = depth.permute(2, 0, 1)
                 curr_keyframe = {'id': time_idx, 'est_w2c': curr_w2c, 'color': color, 'depth': depth}
                 # Add to keyframe list
@@ -1561,7 +1570,8 @@ def rgbd_slam(config: dict):
         # Process poses
         gt_w2c = torch.linalg.inv(gt_pose)
         # Process RGB-D Data
-        color = color.permute(2, 0, 1) / 255
+        #color = color.permute(2, 0, 1) / 255
+        color = to01(color)
         depth = depth.permute(2, 0, 1)
         gt_w2c_all_frames.append(gt_w2c)
         curr_gt_w2c = gt_w2c_all_frames
@@ -1581,7 +1591,8 @@ def rgbd_slam(config: dict):
         # Initialize Data for Tracking
         if seperate_tracking_res:
             tracking_color, tracking_depth, _, _ = tracking_dataset[time_idx]
-            tracking_color = tracking_color.permute(2, 0, 1) / 255
+            #tracking_color = tracking_color.permute(2, 0, 1) / 255
+            tracking_color = to01(tracking_color)
             tracking_depth = tracking_depth.permute(2, 0, 1)
             tracking_curr_data = {'cam': tracking_cam, 'im': tracking_color, 'depth': tracking_depth, 'id': iter_time_idx,
                                   'intrinsics': tracking_intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
@@ -1733,7 +1744,7 @@ def rgbd_slam(config: dict):
                     )
             else:
                 local_means = params_iter['means3D']
-                local_rots = params_iter['unnorm_rots']
+                local_rots = params_iter['unnorm_rotations']
                 local_scales = params_iter['log_scales']
                 local_opacities = params_iter['logit_opacities']
                 local_colors = params_iter['rgb_colors']
@@ -1789,7 +1800,8 @@ def rgbd_slam(config: dict):
                     if seperate_densification_res:
                         # Load RGBD frames incrementally instead of all frames
                         densify_color, densify_depth, _, _ = densify_dataset[time_idx]
-                        densify_color = densify_color.permute(2, 0, 1) / 255
+                        #densify_color = densify_color.permute(2, 0, 1) / 255
+                        densify_color = to01(densify_color)
                         densify_depth = densify_depth.permute(2, 0, 1)
                         densify_curr_data = {'cam': densify_cam, 'im': densify_color, 'depth': densify_depth, 'id': time_idx, 
                                     'intrinsics': densify_intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
@@ -1998,7 +2010,7 @@ def rgbd_slam(config: dict):
                 )
         else:
             local_means = params_iter['means3D']
-            local_rots = params_iter['unnorm_rots']
+            local_rots = params_iter['unnorm_rotations']
             local_scales = params_iter['log_scales']
             local_opacities = params_iter['logit_opacities']
             local_colors = params_iter['rgb_colors']
@@ -2008,6 +2020,7 @@ def rgbd_slam(config: dict):
         # local_rots = params['unnorm_rotations']
         # local_scales = params['log_scales']
         transformed_pts = transform_to_frame(local_means,params_iter, time_idx_plot, gaussians_grad=False, camera_grad=False)
+        
         # img_rendervar = transformed_params2rendervar(params,transformed_pts,local_rots,local_scales)
         if config['GRN']['use_grn']:
             rendervar = transformed_GRNparams2rendervar(params[time_idx_plot], 

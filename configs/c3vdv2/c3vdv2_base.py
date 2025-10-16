@@ -18,7 +18,7 @@ keyframe_every = 8
 # mapping_window_size = 24
 tracking_iters = 12
 mapping_iters = 50
-frames = 130 # adjust untill which frame
+frames = 100 # adjust untill which frame
 group_name = "C3VDv2_base"
 run_name = scene_name
 
@@ -77,7 +77,7 @@ config = dict(
         max_logscale_vel=0.01,    # per frame
     ),
     gaussian_reduction = dict(
-        reduce_gaussians = True,
+        reduce_gaussians = False,
         reduction_type = 'laplace',
         reduction_fraction = 0.05
     ) ,  
@@ -114,11 +114,11 @@ config = dict(
         # grn_use_norm = True,
     ),
     tracking=dict(
-        use_gt_poses=True, # Use GT Poses for Tracking
+        use_gt_poses=False, # Use GT Poses for Tracking
         forward_prop=True, # Forward Propagate Poses
         num_iters=tracking_iters,
         use_sil_for_loss=True,
-        sil_thres=0.99,
+        sil_thres=0.95,
         use_l1=True,
         ignore_outlier_depth_loss=False,
         loss_weights=dict(

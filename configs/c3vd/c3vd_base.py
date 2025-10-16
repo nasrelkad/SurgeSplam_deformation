@@ -29,7 +29,7 @@ keyframe_every = 8
 # mapping_window_size = 24
 tracking_iters = 25
 mapping_iters = 25
-frames = 60 # adjust untill which frame
+frames = 200 # adjust untill which frame
 group_name = "C3VD_base"
 run_name = scene_name
 

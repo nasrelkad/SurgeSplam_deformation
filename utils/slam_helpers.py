@@ -419,7 +419,7 @@ def transformed_GRNparams2rendervar(params, transformed_pts,local_rots,local_sca
         # 'scales': torch.exp(torch.tile(params['log_scales'], (1, 3))),
         'means2D': torch.zeros_like(transformed_pts, requires_grad=True, device="cuda") + 0
     }
-    if local_scales.shape[1] == 1:
+    if local_scales.shape[0] == 1:
         rendervar['colors_precomp'] = local_colors
         rendervar['scales'] = torch.tile(local_scales, (1, 3))
         # print('using uniform scales')
@@ -456,7 +456,7 @@ def transformed_GRNparams2depthplussilhouette(params, w2c, transformed_pts,local
         # 'scales': torch.exp(torch.tile(params['log_scales'], (1, 3))),
         'means2D': torch.zeros_like(transformed_pts, requires_grad=True, device="cuda") + 0
     }
-    if local_scales.shape[1] == 1:
+    if local_scales.shape[0] == 1:
         rendervar['scales'] = torch.tile(local_scales, (1, 3))
     else:
         rendervar['scales'] = local_scales

@@ -10,7 +10,7 @@ from datasets.gradslam_datasets.geometryutils import relative_transformation
 from utils.recon_helpers import setup_camera, energy_mask
 from utils.slam_external import build_rotation,calc_psnr
 from utils.slam_helpers import transform_to_frame, transform_to_frame_eval, transformed_params2rendervar, transformed_params2depthplussilhouette,transformed_GRNparams2rendervar,transformed_GRNparams2depthplussilhouette,align_shift_and_scale
-
+from utils.slam_helpers import deform_gaussians as deform_gaussians_eval
 
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 
@@ -18,6 +18,12 @@ from pytorch_msssim import ms_ssim
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from utils.time_helper import Timer
 loss_fn_alex = LearnedPerceptualImagePatchSimilarity(net_type='alex', normalize=True).cuda()
+
+def to01(t):
+    t = t.permute(2, 0, 1).float()
+    if t.max() > 1.5:      # only divide if the data is 0..255
+        t = t / 255.0
+    return t.clamp_(0, 1)
 
 def align(model, data):
     """Align two trajectories using the method of Horn (closed-form).
@@ -95,8 +101,9 @@ def evaluate_ate(gt_traj, est_traj, plot_traj = False):
         est_traj: list of 4x4 matrices
         len(gt_traj) == len(est_traj)
     """
-    gt_traj_pts = [gt_traj[idx][:3,3] for idx in range(len(gt_traj))]
+    
     est_traj_pts = [est_traj[idx][:3,3] for idx in range(len(est_traj))]
+    gt_traj_pts = [gt_traj[idx][:3,3] for idx in range(len(gt_traj))]
 
     gt_traj_pts  = torch.stack(gt_traj_pts).detach().cpu().numpy().T
     est_traj_pts = torch.stack(est_traj_pts).detach().cpu().numpy().T
@@ -291,7 +298,6 @@ def report_progress(params, data, i, progress_bar, iter_time_idx, sil_thres, eve
 
 #     return xyz,rots,scales
 
-
 def deform_gaussians(params, time, deform_grad, N=5,deformation_type = 'gaussian'):
     """
     Calculate deformations using the N closest basis functions based on |time - bias|.
@@ -385,14 +391,13 @@ def deform_gaussians(params, time, deform_grad, N=5,deformation_type = 'gaussian
         colors = params['rgb_colors']
 
 
-    elif deformation_type == 'simple':
+    elif deformation_type == 'simple' or deformation_type == 'cv' or deformation_type == 'gaussian'  :
         try:
-            # with torch.no_grad():
-            xyz = params['means3D'][time]
-            rots = params['unnorm_rotations'][time]
-            scales = params['log_scales'][time]
-            opacities = params['logit_opacities'][time]
-            colors = params['rgb_colors'][time]
+            xyz       = params['means3D'][:, :, time]
+            rots      = params['unnorm_rotations'][:, :, time]
+            scales    = params['log_scales'][:, :, time]
+            opacities = params['logit_opacities'][:, :, time]
+            colors    = params['rgb_colors'][:, :, time]
         except:
             print(time)
             print('failure above')
@@ -500,8 +505,9 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
         intrinsics = intrinsics[:3, :3]
 
         # Process RGB-D Data
-        color = color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
-        
+        #color = color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
+        color = to01(color)
+
         if depth.ndim > 3:
             depth = depth.squeeze(-1)  
 
@@ -516,9 +522,9 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
             first_frame_w2c = torch.linalg.inv(pose)
             # Setup Camera
             cam = setup_camera(color.shape[2], color.shape[1], intrinsics.cpu().numpy(), first_frame_w2c.detach().cpu().numpy())
-
+        
         # Get current frame Gaussians
-        local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(final_params,total_time_idx,False,deformation_type = 'simple')
+        local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians_eval(final_params,total_time_idx,False,deformation_type = 'cv')
         if dataset_type == 'train':
             cam_rot = F.normalize(final_params['cam_unnorm_rots'][..., time_idx].detach())
             cam_tran = final_params['cam_trans'][..., time_idx].detach()
@@ -591,7 +597,7 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
             psnr_list.append(psnr.cpu().numpy())
             ssim_list.append(ssim.cpu().numpy())
             lpips_list.append(lpips_score)
-            nr_gaussians_list.append(local_scales.shape[0])
+            nr_gaussians_list.append(transformed_pts.shape[0])
             # Compute Depth RMSE
 
             # gt_depth_aligned,rastered_depth_aligned,t_gt,s_gt,t_pred,s_pred = align_shift_and_scale( curr_data['depth'].cpu().detach(),rastered_depth_viz.cpu().detach())
