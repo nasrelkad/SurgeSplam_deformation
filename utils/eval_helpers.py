@@ -43,7 +43,7 @@ def align(model, data):
     data_zerocentered = data - data.mean(1).reshape((3,-1))
 
     W = np.zeros((3, 3))
-    for column in range(model.shape[1] - 1):
+    for column in range(model.shape[1]):
         W += np.outer(model_zerocentered[:,
                          column], data_zerocentered[:, column])
     U, d, Vh = np.linalg.linalg.svd(W.transpose())
@@ -54,13 +54,30 @@ def align(model, data):
     trans = data.mean(1).reshape((3,-1)) - rot * model.mean(1).reshape((3,-1))
 
     model_aligned = rot * model + trans
-    alignment_error = model_aligned - data[:, :model_aligned.shape[1]]
+    alignment_error = model_aligned - data
 
     trans_error = np.sqrt(np.sum(np.multiply(
         alignment_error, alignment_error), 0)).A[0]
 
     return rot, trans, trans_error
 
+def align_sim3(model, data):
+    """
+    Umeyama similarity alignment (Sim(3)): returns s, R, t
+    model, data: 3 x N
+    """
+    mu_m = model.mean(axis=1, keepdims=True)
+    mu_d = data.mean(axis=1, keepdims=True)
+    X = model - mu_m
+    Y = data - mu_d
+
+    cov = X @ Y.T / model.shape[1]
+    U, S, Vt = np.linalg.svd(cov)
+    R = U @ np.diag([1,1,np.sign(np.linalg.det(U @ Vt))]) @ Vt
+    var = (X**2).sum() / model.shape[1]
+    s = np.trace(np.diag(S) @ np.diag([1,1,np.sign(np.linalg.det(U @ Vt))])) / var
+    t = mu_d - s * R @ mu_m
+    return s, R, t
 # def align_shift_and_scale(gt_disp, pred_disp):
 
 #     t_gt = np.median(gt_disp)
@@ -101,9 +118,8 @@ def evaluate_ate(gt_traj, est_traj, plot_traj = False):
         est_traj: list of 4x4 matrices
         len(gt_traj) == len(est_traj)
     """
-    
-    est_traj_pts = [est_traj[idx][:3,3] for idx in range(len(est_traj))]
     gt_traj_pts = [gt_traj[idx][:3,3] for idx in range(len(gt_traj))]
+    est_traj_pts = [est_traj[idx][:3,3] for idx in range(len(est_traj)-1)]
 
     gt_traj_pts  = torch.stack(gt_traj_pts).detach().cpu().numpy().T
     est_traj_pts = torch.stack(est_traj_pts).detach().cpu().numpy().T
@@ -114,7 +130,7 @@ def evaluate_ate(gt_traj, est_traj, plot_traj = False):
     gt_traj_aligned = np.array(gt_traj_aligned)
     fig = plt.figure()
 
-    #syntax for 3-D projection
+# # syntax for 3-D projection
     ax = plt.axes(projection ='3d')
     x_gt = gt_traj_aligned[0,:]
     y_gt = gt_traj_aligned[1,:]
@@ -298,111 +314,147 @@ def report_progress(params, data, i, progress_bar, iter_time_idx, sil_thres, eve
 
 #     return xyz,rots,scales
 
-def deform_gaussians(params, time, deform_grad, N=5,deformation_type = 'gaussian'):
+def deform_gaussians(params, time, deform_grad, N=5, deformation_type='gaussian', temperature=0.5):
     """
-    Calculate deformations using the N closest basis functions based on |time - bias|.
-
-    Args:
-        params (dict): Dictionary containing deformation parameters.
-        time (torch.Tensor): Current time step.
-        deform_grad (bool): Whether to calculate gradients for deformations.
-        N (int): Number of closest basis functions to consider.
-
-    Returns:
-        xyz (torch.Tensor): Updated 3D positions.
-        rots (torch.Tensor): Updated rotations.
-        scales (torch.Tensor): Updated scales.
+    Gaussian deformation:
+      - soft attention over basis functions (keeps gradients flowing)
+      - safe positive stds via softplus
+      - rotation update via quaternion multiplication (delta quat)
+      - scale updated additively in log domain
+    
     """
-    if deformation_type =='gaussian':
-        if True:
-            if deform_grad:
-                weights = params['deform_weights']
-                stds = params['deform_stds']
-                biases = params['deform_biases']
-            else:
-                weights = params['deform_weights'].detach()
-                stds = params['deform_stds'].detach()
-                biases = params['deform_biases'].detach()
-
-            # Calculate the absolute difference between time and biases
-            time_diff = torch.abs(time - biases)
-
-            # Get the indices of the N smallest time differences
-            _, top_indices = torch.topk(-time_diff, N, dim=1)  # Negative for smallest values
-
-            # Create a mask to select only the top N basis functions
-            mask = torch.zeros_like(time_diff, dtype=torch.float)
-            mask.scatter_(1, top_indices, 1.0)
-
-            # Apply the mask to weights and biases
-            masked_weights = weights * mask
-            masked_biases = biases * mask
-
-            # Calculate deformations
-            deform = torch.sum(
-                masked_weights * torch.exp(-1 / (2 * stds**2) * (time - masked_biases)**2), dim=1
-            )  # Nx10 gaussians deformations
-
-            deform_xyz = deform[:, :3]
-            deform_rots = deform[:, 3:7]
-            deform_scales = deform[:, 7:10]
+    if deformation_type == 'gaussian':
+        # Pull tensors with/without grad
+        if deform_grad:
+            W = params['deform_weights']      # [G,B,10]
+            S_raw = params['deform_stds']     # [G,B,10]
+            C = params['deform_biases']       # [G,B,10]
         else:
-            if deform_grad:
-                weights = params['deform_weights']
-                stds = params['deform_stds']
-                biases = params['deform_biases']
-            else:
-                weights = params['deform_weights'].detach()
-                stds = params['deform_stds'].detach()
-                biases = params['deform_biases'].detach()
+            W = params['deform_weights'].detach()
+            S_raw = params['deform_stds'].detach()
+            C = params['deform_biases'].detach()
 
-            # Calculate the absolute difference between time and biases
-            time_diff = torch.abs(time - biases)
+        # Make sure 'time' is a tensor on the right device/dtype and broadcastable to C
+        t = torch.as_tensor(time, device=C.device, dtype=C.dtype)
+        while t.dim() < C.dim():
+            t = t.unsqueeze(0)  # expand to match [G,B,10] by broadcasting
 
-            # Get the indices of the N smallest time differences
-            _, top_indices = torch.topk(-time_diff, N, dim=1)  # Negative for smallest values
+        # strictly positive bandwidths
+        S = F.softplus(S_raw) + 1e-3  # [G,B,10]
 
-            # Create a mask to select only the top N basis functions
-            mask = torch.zeros_like(time_diff, dtype=torch.float)
-            mask.scatter_(1, top_indices, 1.0).detach()
+        # attention-like weights across bases (dim=1)
+        # score = - (t - C)^2 / (2*S^2)
+        score = -((t - C) ** 2) / (2.0 * (S ** 2) + 1e-12)
+        attn = F.softmax(score / max(temperature, 1e-3), dim=1)  # sum_B(attn)=1
 
-            # Register a gradient hook to zero out gradients for irrelevant basis functions
-            if deform_grad:
-                def zero_out_irrelevant_gradients(grad):
-                    return grad * mask
+        # Optional soft top-k: keep top-N mass but renormalize (still differentiable)
+        if N is not None and isinstance(N, int) and 0 < N < attn.shape[1]:
+            topv, topi = torch.topk(attn, k=N, dim=1)
+            m = torch.zeros_like(attn)
+            m.scatter_(1, topi, 1.0)
+            attn = attn * m
+            attn = attn / (attn.sum(dim=1, keepdim=True) + 1e-12)
 
-                weights.register_hook(zero_out_irrelevant_gradients)
-                biases.register_hook(zero_out_irrelevant_gradients)
-                stds.register_hook(zero_out_irrelevant_gradients)
+        # Weighted sum over bases -> per-gaussian deformation vector (10)
+        deform = torch.sum(attn * W, dim=1)  # [G,10]
 
-            # Calculate deformations
-            deform = torch.sum(
-                weights * torch.exp(-1 / (2 * stds**2) * (time - biases)**2), dim=1
-            )  # Nx10 gaussians deformations
+        # Split into xyz(3), rot_quat_delta(4), dlog_scales(3)
+        deform_xyz    = deform[:, 0:3]
+        deform_rot_q  = deform[:, 3:7]   # interpret as delta quaternion
+        deform_dlogS  = deform[:, 7:10]
 
-            deform_xyz = deform[:, :3]
-            deform_rots = deform[:, 3:7]
-            deform_scales = deform[:, 7:10]
-
+        # Apply updates
+        # positions
         xyz = params['means3D'] + deform_xyz
-        rots = params['unnorm_rotations'] + deform_rots
-        scales = params['log_scales'] + deform_scales
+
+        # rotations: compose base quaternion with delta quaternion
+        base_q = F.normalize(params['unnorm_rotations'], dim=-1)      # [G,4]
+        dq = F.normalize(deform_rot_q, dim=-1)                         # [G,4]
+
+        # quaternion multiply: (base_q * dq)
+        w1, x1, y1, z1 = base_q.unbind(-1)
+        w2, x2, y2, z2 = dq.unbind(-1)
+        w = w1*w2 - x1*x2 - y1*y2 - z1*z2
+        x = w1*x2 + x1*w2 + y1*z2 - z1*y2
+        y = w1*y2 - x1*z2 + y1*w2 + z1*x2
+        z = w1*z2 + x1*y2 - y1*x2 + z1*w2
+        rots = torch.stack([w, x, y, z], dim=-1)
+        rots = F.normalize(rots, dim=-1)
+
+        # scales: additive in log-domain (stays positive after exp in renderer)
+        scales = params['log_scales'] + deform_dlogS
+
         opacities = params['logit_opacities']
         colors = params['rgb_colors']
+        return xyz, rots, scales, opacities, colors
 
+    elif deformation_type == 'graph':
+        """
+        Skin each Gaussian to K nearest graph nodes, transform by node motion (CA + optional Fourier),
+        then blend in Lie/log spaces.
+        """
+        
+        # dt in frames relative to 0 (if you keep absolute time indices)
+        dt = (time if torch.is_tensor(time) else torch.tensor(float(time), device=params['means3D'].device, dtype=params['means3D'].dtype)).float()
+        # node motions
+        use_fourier = ('fourier_xyz_cos' in params)
+        R_i, t_i, logs_i = _graph_node_motion(params, dt, use_fourier=use_fourier)   # [Gm,3,3], [Gm,3], [Gm,3]
 
-    elif deformation_type == 'simple' or deformation_type == 'cv' or deformation_type == 'gaussian'  :
-        try:
-            xyz       = params['means3D'][:, :, time]
-            rots      = params['unnorm_rotations'][:, :, time]
-            scales    = params['log_scales'][:, :, time]
-            opacities = params['logit_opacities'][:, :, time]
-            colors    = params['rgb_colors'][:, :, time]
-        except:
-            print(time)
-            print('failure above')
+        # gather neighbors for each Gaussian
+        idx = params['graph_idx']     # [G,K] long
+        w   = params['graph_w']       # [G,K] float
+        nodes = params['graph_nodes'] # [Gm,3]
+        x = params['means3D']         # [G,3]
 
-    return xyz, rots, scales,opacities, colors
+        # [G,K,3]
+        n_ik = nodes[idx]         # neighbor node positions
+        t_ik = t_i[idx]           # node translations at t
+        R_ik = R_i[idx]           # node rotations at t
+        logs_ik = logs_i[idx]     # node log-scales at t
+
+        # center-relative, rotate, then uncenter and translate:
+        # x'_k = R_i(t)*(x - n_i) + n_i + t_i(t)
+        x_rel = (x.unsqueeze(1) - n_ik)                         # [G,K,3]
+        x_def = (R_ik @ x_rel.unsqueeze(-1)).squeeze(-1) + n_ik + t_ik
+        x_out = (w.unsqueeze(-1) * x_def).sum(dim=1)            # [G,3]
+
+        # rotation: blend axis-angle from node rotations (small-angle OK). We reuse node ang_i used inside _graph_node_motion
+        # For stability, compute ang_i again to avoid storing; tiny overhead.
+        # If you prefer, store the ang_i in _graph_node_motion and return it.
+        # Here: approximate Gaussian rotation as identity (or keep original) — optional:
+        rots_out = params['unnorm_rotations']  # keep original per-Gaussian orientation; advanced: blend node rotvecs.
+
+        # scales: blend log-scales
+        logs_g = (w.unsqueeze(-1) * logs_ik).sum(dim=1)         # [G,3]
+        scales_out = params['log_scales'] + logs_g              # add on top of per-Gaussian log-scales (optional)
+
+        opacities = params['logit_opacities']
+        colors    = params['rgb_colors']
+        return x_out, rots_out, scales_out, opacities, colors
+
+    elif deformation_type == 'simple':
+
+        xyz = params['means3D']
+        rots = params['unnorm_rotations']
+        scales = params['log_scales']
+        opacities = params['logit_opacities']
+        colors = params['rgb_colors']
+        return xyz, rots, scales, opacities, colors
+
+    elif deformation_type == 'cv':  # constant velocity (add 'ca' with t^2 terms if desired)
+        t = torch.as_tensor(time, device=params['means3D'].device, dtype=params['means3D'].dtype).view(-1,1)
+        v_xyz  = params['cv_vel_xyz']          # [G,3]
+        v_lsg  = params['cv_vel_log_scales']   # [G,3]
+        w_aa   = params['cv_angvel_aa']        # [G,3]
+
+        xyz = params['means3D'] + v_xyz * t
+        base_q = F.normalize(params['unnorm_rotations'], dim=-1)
+        dq = _aa_to_quat(w_aa * t)
+        rots = F.normalize(_qmul(base_q, dq), dim=-1)
+        scales = params['log_scales'] + v_lsg * t
+
+        opacities = params['logit_opacities']; colors = params['rgb_colors']
+        return xyz, rots, scales, opacities, colors
 
 
 def compute_errors(gt, pred):
@@ -428,7 +480,7 @@ def compute_errors(gt, pred):
     return abs_rel, sq_rel, rmse, rmse_log, a1, a2, a3, psnr
 
 def eval_save(dataset, final_params, eval_dir, sil_thres, 
-         mapping_iters, add_new_gaussians, save_renders=True,use_grn = True):
+         mapping_iters, add_new_gaussians, save_renders=True,use_grn = True, deformation_type='simple'):
     # timer = Timer()
     # timer.start()
     split = False
@@ -475,7 +527,7 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
             time_idx = total_time_idx
         return dataset_type, _dataset, time_idx
     #for total_time_idx in tqdm(range(num_frames)):
-    for total_time_idx in range(1, num_frames):
+    for total_time_idx in range(num_frames):
         dataset_type, dataset, time_idx = get_idx(total_time_idx)
         gt_w2c_list.append(torch.linalg.inv(dataset.get_pose(time_idx).cpu()))
         gt_position_list.append(gt_w2c_list[-1][:3, 3])
@@ -524,7 +576,7 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
             cam = setup_camera(color.shape[2], color.shape[1], intrinsics.cpu().numpy(), first_frame_w2c.detach().cpu().numpy())
         
         # Get current frame Gaussians
-        local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians_eval(final_params,total_time_idx,False,deformation_type = 'cv')
+        local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians_eval(final_params,total_time_idx,False,deformation_type = deformation_type)
         if dataset_type == 'train':
             cam_rot = F.normalize(final_params['cam_unnorm_rots'][..., time_idx].detach())
             cam_tran = final_params['cam_trans'][..., time_idx].detach()

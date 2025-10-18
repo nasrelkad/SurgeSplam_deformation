@@ -6,8 +6,8 @@ from utils.recon_helpers import energy_mask
 import torchvision
 import numpy as np
 import cv2
-
-
+import math
+from utils.slam_external import build_rotation
 def l1_loss_v1(x, y):
     return torch.abs((x - y)).mean()
 
@@ -185,16 +185,188 @@ def transformed_params2rendervar(params, transformed_pts,local_rots,local_scales
 #     }
 #     return rendervar
 
+# === Deformation Graph utilities ===
+def _farthest_point_sample(xyz, M):
+    """
+    xyz: [N,3] (cuda float)
+    returns: [M] indices of FPS (very small N is fine; this is O(NM))
+    """
+    
+    N = xyz.shape[0]
+    inds = torch.empty(M, dtype=torch.long, device=xyz.device)
+    d2 = torch.full((N,), float("inf"), device=xyz.device)
+    # start from a random point (or the centroid)
+    inds[0] = torch.randint(0, N, (1,), device=xyz.device)
+    last = xyz[inds[0]][None, :]
+    for i in range(1, M):
+        d2 = torch.minimum(d2, torch.sum((xyz - last) ** 2, dim=-1))
+        inds[i] = torch.argmax(d2)
+        last = xyz[inds[i]][None, :]
+    return inds
+
+def initialize_graph_deformations(params, num_nodes=256, K=6, sigma_mult=0.5,
+                                  use_fourier=True, M=2):
+    """
+    Creates a deformation graph:
+      - params['graph_nodes']      : [Gm,3]
+      - params['graph_idx']        : [G,K] (long)  KNN node indices per Gaussian
+      - params['graph_w']          : [G,K] weights per Gaussian (softmax of -dist^2/σ^2)
+      - Per-node learnables (all torch.nn.Parameter):
+          node_v_xyz,node_a_xyz     : [Gm,3]
+          node_v_ang,node_a_ang     : [Gm,3]  (axis-angle velocity/acc)
+          node_v_s,  node_a_s       : [Gm,3]  (log-scale velocity/acc)
+          fourier_{xyz,ang,s}_cos/sin : [Gm,M,3] (optional)
+    """
+    
+    means = params['means3D'].detach()  # [G,3], cuda float
+    G = means.shape[0]
+
+    # 1) make nodes by FPS
+    with torch.no_grad():
+        fps_idx = _farthest_point_sample(means, min(num_nodes, G))
+        nodes = means[fps_idx]  # [Gm,3]
+    Gm = nodes.shape[0]
+
+    # 2) KNN from each Gaussian to nodes
+    with torch.no_grad():
+        # squared distances
+        # [G, Gm]
+        d2 = torch.cdist(means, nodes, p=2.0) ** 2
+        knn_d2, knn_idx = torch.topk(d2, k=min(K, Gm), dim=1, largest=False)
+        # σ = sigma_mult * median node spacing
+        # estimate spacing from nodes
+        nn_nodes = torch.topk(torch.cdist(nodes, nodes, p=2.0), k=2, dim=1, largest=False).values[:, 1]
+        sigma = sigma_mult * torch.median(nn_nodes).clamp_min(1e-6)
+        w = torch.softmax(-knn_d2 / (sigma * sigma), dim=1)  # [G,K]
+
+    params['graph_nodes'] = torch.nn.Parameter(nodes.requires_grad_(False))
+    params['graph_idx']   = knn_idx.long()       # not a Parameter (kept fixed)
+    params['graph_w']     = w                    # not a Parameter (kept fixed)
+
+    # 3) per-node learnables (CA + small periodic)
+    zeros = lambda *s: torch.zeros(*s, device=means.device, dtype=means.dtype)
+    params['node_v_xyz'] = torch.nn.Parameter(zeros(Gm, 3).requires_grad_(True))
+    params['node_a_xyz'] = torch.nn.Parameter(zeros(Gm, 3).requires_grad_(True))
+    params['node_v_ang'] = torch.nn.Parameter(zeros(Gm, 3).requires_grad_(True))
+    params['node_a_ang'] = torch.nn.Parameter(zeros(Gm, 3).requires_grad_(True))
+    params['node_v_s']   = torch.nn.Parameter(zeros(Gm, 3).requires_grad_(True))
+    params['node_a_s']   = torch.nn.Parameter(zeros(Gm, 3).requires_grad_(True))
+
+    params['node_ang0']  = torch.nn.Parameter(zeros(Gm, 3).requires_grad_(True))  # small bias
+    params['node_s0']    = torch.nn.Parameter(zeros(Gm, 3).requires_grad_(True))  # log-scale bias
+    params['node_t0']    = torch.nn.Parameter(zeros(Gm, 3).requires_grad_(True))  # translation bias
+
+    if use_fourier and M > 0:
+        params['fourier_xyz_cos'] = torch.nn.Parameter(zeros(Gm, M, 3).requires_grad_(True))
+        params['fourier_xyz_sin'] = torch.nn.Parameter(zeros(Gm, M, 3).requires_grad_(True))
+        params['fourier_ang_cos'] = torch.nn.Parameter(zeros(Gm, M, 3).requires_grad_(True))
+        params['fourier_ang_sin'] = torch.nn.Parameter(zeros(Gm, M, 3).requires_grad_(True))
+        params['fourier_s_cos']   = torch.nn.Parameter(zeros(Gm, M, 3).requires_grad_(True))
+        params['fourier_s_sin']   = torch.nn.Parameter(zeros(Gm, M, 3).requires_grad_(True))
+
+    # keep a reference timescale if XYZT is not used
+    if 'timestep' not in params:
+        params['timestep'] = torch.zeros(G, device=means.device)
+    return params
+
+def rebind_graph(params, K=6, sigma_mult=0.5):
+    if 'graph_nodes' not in params or 'graph_idx' not in params:
+        return params  # nothing to do
+    means = params['means3D'].detach()
+    nodes = params['graph_nodes'].detach()
+    K = K or params['graph_idx'].shape[1]
+
+    d2 = torch.cdist(means, nodes, p=2.0) ** 2
+    knn_d2, knn_idx = torch.topk(d2, k=min(K, nodes.shape[0]), dim=1, largest=False)
+
+    # recompute σ from nodes
+    nn_nodes = torch.topk(torch.cdist(nodes, nodes, p=2.0), k=2, dim=1, largest=False).values[:, 1]
+    sigma = (sigma_mult or 0.5) * torch.median(nn_nodes).clamp_min(1e-6)
+
+    w = torch.softmax(-knn_d2 / (sigma * sigma), dim=1)
+    params['graph_idx'] = knn_idx.to(torch.long)
+    params['graph_w']   = w.detach()
+    return params
+
+def _graph_node_motion(params, dt, use_fourier=True):
+    """
+    dt: scalar float Tensor (frames from t0)
+    returns per-node:
+      R_i(t)  [Gm,3,3], t_i(t) [Gm,3], logs_i(t) [Gm,3]
+    """
+    
+   
+    Gm = params['node_v_xyz'].shape[0]
+    # CA terms
+    t_i   = params['node_t0'] + params['node_v_xyz'] * dt + 0.5 * params['node_a_xyz'] * (dt * dt)
+    ang_i = params['node_ang0'] + params['node_v_ang'] * dt + 0.5 * params['node_a_ang'] * (dt * dt)
+    logs  = params['node_s0']   + params['node_v_s']   * dt + 0.5 * params['node_a_s']   * (dt * dt)
+
+    if use_fourier and 'fourier_xyz_cos' in params:
+        M = params['fourier_xyz_cos'].shape[1]
+        # simple unit frequency set {1...M} (you can scale by 2π/T if you like)
+        k = torch.arange(1, M + 1, device=dt.device, dtype=dt.dtype)
+        kd = k * dt  # [M]
+        sin_kd = torch.sin(kd)
+        cos_kd = torch.cos(kd)
+        # broadcast to [Gm,M,3] * [M] -> [Gm,M,3]
+        t_i   = t_i   + (params['fourier_xyz_cos'] * cos_kd[None, :, None]).sum(1) + \
+                        (params['fourier_xyz_sin'] * sin_kd[None, :, None]).sum(1)
+        ang_i = ang_i + (params['fourier_ang_cos'] * cos_kd[None, :, None]).sum(1) + \
+                        (params['fourier_ang_sin'] * sin_kd[None, :, None]).sum(1)
+        logs  = logs  + (params['fourier_s_cos']   * cos_kd[None, :, None]).sum(1) + \
+                        (params['fourier_s_sin']   * sin_kd[None, :, None]).sum(1)
+
+    # exp map: axis-angle -> quaternion -> rotation matrix
+    # re-use your build_rotation by converting axis-angle to quat
+    aa = ang_i
+    theta = torch.norm(aa, dim=-1, keepdim=True).clamp_min(1e-12)
+    axis = aa / theta
+    half = 0.5 * theta
+    qw = torch.cos(half)
+    qxyz = axis * torch.sin(half)
+    q = torch.cat([qw, qxyz], dim=-1)  # [Gm,4]
+    R = build_rotation(q)               # [Gm,3,3]
+    return R, t_i, logs
+
 
 def get_depth_and_silhouette(pts_3D, w2c):
-    """
-    Function to compute depth and silhouette for each gaussian.
-    These are evaluated at gaussian center.
-    """
-    # Depth of each gaussian center in camera frame
-    pts4 = torch.cat((pts_3D, torch.ones_like(pts_3D[:, :1])), dim=-1)
-    pts_in_cam = (w2c @ pts4.transpose(0, 1)).transpose(0, 1)
-    depth_z = pts_in_cam[:, 2].unsqueeze(-1) # [num_gaussians, 1]
+   
+
+    # Convert to tensor, ensure float dtype
+    pts_3D = torch.as_tensor(pts_3D)
+    if not pts_3D.dtype.is_floating_point:
+        pts_3D = pts_3D.float()
+
+    # Handle empty input early
+    if pts_3D.numel() == 0:
+        # Return whatever your pipeline expects; if it expects a tensor, return an empty [0] vector
+        return torch.empty(0, device=pts_3D.device, dtype=pts_3D.dtype)
+
+    # Ensure 2D [N,3]
+    if pts_3D.dim() == 1:
+        if pts_3D.numel() % 3 != 0:
+            raise ValueError(f"get_depth_and_silhouette: 1D pts_3D length {pts_3D.numel()} "
+                             f"is not a multiple of 3")
+        pts_3D = pts_3D.view(-1, 3)
+    elif pts_3D.dim() == 2 and pts_3D.size(-1) != 3:
+        raise ValueError(f"get_depth_and_silhouette: expected last dim=3, got {pts_3D.shape}")
+
+    # Ensure w2c is a proper [4,4] (pad if [3,4] or [3,3])
+    w2c = torch.as_tensor(w2c, dtype=pts_3D.dtype, device=pts_3D.device)
+    if w2c.shape == (3, 4):
+        w2c = torch.cat([w2c, torch.tensor([[0, 0, 0, 1.0]], dtype=w2c.dtype, device=w2c.device)], dim=0)
+    elif w2c.shape == (3, 3):
+        w2c = torch.cat([w2c, torch.zeros(1, 3, dtype=w2c.dtype, device=w2c.device)], dim=0)
+        w2c = torch.cat([w2c, torch.tensor([[0, 0, 0, 1.0]], dtype=w2c.dtype, device=w2c.device)], dim=1)
+    elif w2c.shape != (4, 4):
+        raise ValueError(f"get_depth_and_silhouette: unexpected w2c shape {w2c.shape}")
+
+    # Homogenize and transform
+    ones = torch.ones((pts_3D.shape[0], 1), dtype=pts_3D.dtype, device=pts_3D.device)
+    pts4 = torch.cat([pts_3D, ones], dim=-1)      # [N,4]
+    pts_cam = (w2c @ pts4.T).T                    # [N,4]
+    depth_z = pts_cam[:, 2].unsqueeze(-1) # [num_gaussians, 1]
     depth_z_sq = torch.square(depth_z) # [num_gaussians, 1]
 
     # Depth and Silhouette
@@ -531,6 +703,56 @@ def _qmul(q1, q2):
                         w1*y2 - x1*z2 + y1*w2 + z1*x2,
                         w1*z2 + x1*y2 - y1*x2 + z1*w2], dim=-1)
 
+def arap_loss_graph(params, base_nodes=None, arap_edges_k=6):
+    """
+    ARAP on graph nodes: encourage local rigidity relative to rest graph.
+    base_nodes: [Gm,3] rest positions (if None, use params['graph_nodes'].detach()).
+    """
+    if 'graph_nodes' not in params:
+        return torch.tensor(0.0, device=params['means3D'].device)
+
+    # Rest graph
+    x0 = (base_nodes if base_nodes is not None else params['graph_nodes'].detach())
+    # Current deformed node positions at *current* dt :
+    # Reuse the most recent dt you used in deform_gaussians; or keep a scalar in params['timestep'] if you prefer.
+    # For a simple, time-agnostic ARAP, we use the current learned translation 'node_t0' only:
+    x = x0 + params['node_t0']  # small, stable variant
+
+    # Build KNN on rest graph
+    with torch.no_grad():
+        d2 = torch.cdist(x0, x0, p=2.0)
+        knn_idx = torch.topk(d2, k=min(arap_edges_k+1, x0.shape[0]), dim=1, largest=False).indices[:, 1:]  # drop self
+
+    # ARAP: sum || (x_i - x_j) - (x0_i - x0_j) ||
+    xi = x.unsqueeze(1)                 # [Gm,1,3]
+    xj = x[knn_idx]                     # [Gm,K,3]
+    xi0 = x0.unsqueeze(1)               # [Gm,1,3]
+    xj0 = x0[knn_idx]                   # [Gm,K,3]
+
+    rig = ( (xi - xj) - (xi0 - xj0) )
+    return (rig.pow(2).sum(-1).mean())
+    
+def arap_loss(params):
+    """
+    Simple ARAP: keep node-to-node edge vectors approximately rigid over time.
+    Build a kNN on graph nodes (fixed), compare lengths after node motion vs. canonical.
+    """
+    
+    nodes = params['graph_nodes']
+    with torch.no_grad():
+        # 4-NN edges
+        d = torch.cdist(nodes, nodes, p=2.0)
+        knn = torch.topk(d, k=min(4, nodes.shape[0]-1), dim=1, largest=False).indices[:, 1:]  # [Gm,3]
+    # current motion at dt read from a scalar params.get('last_dt', 0)
+    dt = getattr(params, 'last_dt', torch.tensor(0.0, device=nodes.device))
+    R_i, t_i, _ = _graph_node_motion(params, dt, use_fourier=('fourier_xyz_cos' in params))
+    # warped neighbors (rigid part only)
+    # For ARAP we compare rotated canonical edges
+    v = (nodes[knn] - nodes[:, None, :])                          # [Gm,3,3]
+    vR = (R_i[:, None, :, :] @ v.unsqueeze(-1)).squeeze(-1)       # [Gm,3,3]
+    # encourage vR ≈ v
+    return ((vR - v) ** 2).mean()
+
 def deform_gaussians(params, time, deform_grad, N=5, deformation_type='gaussian', temperature=0.5):
     """
     Gaussian deformation:
@@ -604,6 +826,52 @@ def deform_gaussians(params, time, deform_grad, N=5, deformation_type='gaussian'
         opacities = params['logit_opacities']
         colors = params['rgb_colors']
         return xyz, rots, scales, opacities, colors
+
+    elif deformation_type == 'graph':
+        """
+        Skin each Gaussian to K nearest graph nodes, transform by node motion (CA + optional Fourier),
+        then blend in Lie/log spaces.
+        """
+        
+        # dt in frames relative to 0 (if you keep absolute time indices)
+        dt = (time if torch.is_tensor(time) else torch.tensor(float(time), device=params['means3D'].device, dtype=params['means3D'].dtype)).float()
+        # node motions
+        use_fourier = ('fourier_xyz_cos' in params)
+        R_i, t_i, logs_i = _graph_node_motion(params, dt, use_fourier=use_fourier)   # [Gm,3,3], [Gm,3], [Gm,3]
+
+        x = params['means3D']                      # [G,3]
+
+        
+        device = x.device
+        idx = params['graph_idx'].to(dtype=torch.long, device=device)   # must be long on same device
+        nodes = params['graph_nodes'].to(device=device)
+        w = params['graph_w'].to(device=device)
+
+        # now safe to index
+        n_ik    = nodes[idx]           # [G,K,3]
+        t_ik    = t_i[idx]             # [G,K,3]
+        R_ik    = R_i[idx]             # [G,K,3,3]
+        logs_ik = logs_i[idx]          # [G,K,3]
+
+        # center-relative, rotate, then uncenter and translate:
+        # x'_k = R_i(t)*(x - n_i) + n_i + t_i(t)
+        x_rel = (x.unsqueeze(1) - n_ik)                         # [G,K,3]
+        x_def = (R_ik @ x_rel.unsqueeze(-1)).squeeze(-1) + n_ik + t_ik
+        x_out = (w.unsqueeze(-1) * x_def).sum(dim=1)            # [G,3]
+
+        # rotation: blend axis-angle from node rotations (small-angle OK). We reuse node ang_i used inside _graph_node_motion
+        # For stability, compute ang_i again to avoid storing; tiny overhead.
+        # If you prefer, store the ang_i in _graph_node_motion and return it.
+        # Here: approximate Gaussian rotation as identity (or keep original) — optional:
+        rots_out = params['unnorm_rotations']  # keep original per-Gaussian orientation; advanced: blend node rotvecs.
+
+        # scales: blend log-scales
+        logs_g = (w.unsqueeze(-1) * logs_ik).sum(dim=1)         # [G,3]
+        scales_out = params['log_scales'] + logs_g              # add on top of per-Gaussian log-scales (optional)
+
+        opacities = params['logit_opacities']
+        colors    = params['rgb_colors']
+        return x_out, rots_out, scales_out, opacities, colors
 
     elif deformation_type == 'simple':
 
@@ -695,7 +963,7 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis
             'rgb_colors': new_pt_cld[:, 3:6],
             'unnorm_rotations': torch.zeros_like(torch.tensor(unnorm_rots),dtype=torch.float).cuda(),
             'logit_opacities': logit_opacities,
-            'log_scales': torch.ones_like(torch.tensor(means3D),dtype=torch.float).cuda()*init_scale,
+            'log_scales': torch.ones_like(means3D, dtype=torch.float, device=means3D.device) * init_scale,
         }
     # print(f'num pts {num_pts}')
     if use_deform and deform_type == 'gaussian':
@@ -704,6 +972,8 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis
                                      total_timescale=total_timescale)
     elif use_deform and deform_type == 'cv':
         params = initialize_cv_deformations(params)
+    elif use_deform and deform_type == 'graph':
+        params = initialize_graph_deformations(params=params)
     if not use_simplification:
         params['feature_rest'] = torch.zeros(num_pts, 45) # set SH degree 3 fixed
     for k, v in params.items():

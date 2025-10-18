@@ -29,7 +29,7 @@ keyframe_every = 8
 # mapping_window_size = 24
 tracking_iters = 25
 mapping_iters = 25
-frames = 200 # adjust untill which frame
+frames = 10 # adjust untill which frame
 group_name = "C3VD_base"
 run_name = scene_name
 
@@ -221,7 +221,7 @@ config = dict(
         ),
     ),
     viz=dict(
-        render_mode='color', # ['color', 'depth' or 'centers']
+        render_mode='temporal', # ['color', 'depth' or 'centers']
         offset_first_viz_cam=True, # Offsets the view camera back by 0.5 units along the view direction (For Final Recon Viz)
         show_sil=False, # Show Silhouette instead of RGB
         visualize_cams=True, # Visualize Camera Frustums and Trajectory
@@ -231,5 +231,6 @@ config = dict(
         viz_fps=30, # FPS for Online Recon Viz
         enter_interactive_post_online=True, # Enter Interactive Mode after Online Recon Viz
         gaussian_simplification=False,
+        temporal_coloring = True
     ),
 )
