@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 from datasets.gradslam_datasets.geometryutils import relative_transformation
 from utils.recon_helpers import setup_camera, energy_mask
 from utils.slam_external import build_rotation,calc_psnr
-from utils.slam_helpers import transform_to_frame, transform_to_frame_eval, transformed_params2rendervar, transformed_params2depthplussilhouette,transformed_GRNparams2rendervar,transformed_GRNparams2depthplussilhouette,align_shift_and_scale
+from utils.slam_helpers import transform_to_frame, transform_to_frame_eval, apply_xyzt_gate, transformed_params2rendervar, transformed_params2depthplussilhouette,transformed_GRNparams2rendervar,transformed_GRNparams2depthplussilhouette,align_shift_and_scale
 from utils.slam_helpers import deform_gaussians as deform_gaussians_eval
 
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
@@ -54,7 +54,7 @@ def align(model, data):
     trans = data.mean(1).reshape((3,-1)) - rot * model.mean(1).reshape((3,-1))
 
     model_aligned = rot * model + trans
-    alignment_error = model_aligned - data
+    alignment_error = model_aligned - data[:, :100]
 
     trans_error = np.sqrt(np.sum(np.multiply(
         alignment_error, alignment_error), 0)).A[0]
@@ -119,7 +119,7 @@ def evaluate_ate(gt_traj, est_traj, plot_traj = False):
         len(gt_traj) == len(est_traj)
     """
     gt_traj_pts = [gt_traj[idx][:3,3] for idx in range(len(gt_traj))]
-    est_traj_pts = [est_traj[idx][:3,3] for idx in range(len(est_traj)-1)]
+    est_traj_pts = [est_traj[idx][:3,3] for idx in range(len(est_traj))]
 
     gt_traj_pts  = torch.stack(gt_traj_pts).detach().cpu().numpy().T
     est_traj_pts = torch.stack(est_traj_pts).detach().cpu().numpy().T
@@ -128,21 +128,21 @@ def evaluate_ate(gt_traj, est_traj, plot_traj = False):
 
     gt_traj_aligned = rot* gt_traj_pts+trans
     gt_traj_aligned = np.array(gt_traj_aligned)
-    fig = plt.figure()
+#     fig = plt.figure()
 
 # # syntax for 3-D projection
-    ax = plt.axes(projection ='3d')
-    x_gt = gt_traj_aligned[0,:]
-    y_gt = gt_traj_aligned[1,:]
-    z_gt = gt_traj_aligned[2,:]
+#     ax = plt.axes(projection ='3d')
+#     x_gt = gt_traj_aligned[0,:]
+#     y_gt = gt_traj_aligned[1,:]
+#     z_gt = gt_traj_aligned[2,:]
 
-    x_est = est_traj_pts[0,:]
-    y_est = est_traj_pts[1,:]
-    z_est = est_traj_pts[2,:]
-    print(x_gt[0])
-    ax.plot3D(x_gt, y_gt, z_gt, 'green', label='Ground Truth Trajectory')
-    ax.plot3D(x_est, y_est, z_est, 'red', label='Estimated Trajectory')
-    plt.show()
+#     x_est = est_traj_pts[0,:]
+#     y_est = est_traj_pts[1,:]
+#     z_est = est_traj_pts[2,:]
+#     print(x_gt[0])
+#     ax.plot3D(x_gt, y_gt, z_gt, 'green', label='Ground Truth Trajectory')
+#     ax.plot3D(x_est, y_est, z_est, 'red', label='Estimated Trajectory')
+#     plt.show()
 
     avg_trans_error = trans_error.mean()
 
@@ -249,6 +249,10 @@ def report_progress(params, data, i, progress_bar, iter_time_idx, sil_thres, eve
         rendervar = transformed_params2rendervar(params, transformed_pts)
         depth_sil_rendervar = transformed_params2depthplussilhouette(params, data['w2c'], 
                                                                      transformed_pts)
+        
+        if 't_mu' in params:
+            gt = xyzt_time_gate(params, float(time_idx))
+            rendervar = apply_xyzt_gate(rendervar, gt, gate_thresh=0.35)
         depth_sil, _, _ = Renderer(raster_settings=data['cam'])(**depth_sil_rendervar)
         rastered_depth = depth_sil[0, :, :].unsqueeze(0)
         valid_depth_mask = (data['depth'] > 0) & (data['depth'] < 1e10)
@@ -388,9 +392,7 @@ def deform_gaussians(params, time, deform_grad, N=5, deformation_type='gaussian'
         colors = params['rgb_colors']
         return xyz, rots, scales, opacities, colors
 
-    elif deformation_type == 'graph':
         """
-        Skin each Gaussian to K nearest graph nodes, transform by node motion (CA + optional Fourier),
         then blend in Lie/log spaces.
         """
         
@@ -441,7 +443,6 @@ def deform_gaussians(params, time, deform_grad, N=5, deformation_type='gaussian'
         colors = params['rgb_colors']
         return xyz, rots, scales, opacities, colors
 
-    elif deformation_type == 'cv':  # constant velocity (add 'ca' with t^2 terms if desired)
         t = torch.as_tensor(time, device=params['means3D'].device, dtype=params['means3D'].dtype).view(-1,1)
         v_xyz  = params['cv_vel_xyz']          # [G,3]
         v_lsg  = params['cv_vel_log_scales']   # [G,3]

@@ -18,7 +18,7 @@ from diff_gaussian_rasterization import GaussianRasterizationSettings as Camera
 
 from utils.common_utils import seed_everything
 from utils.recon_helpers import setup_camera
-from utils.slam_helpers import get_depth_and_silhouette, _graph_node_motion
+from utils.slam_helpers import get_depth_and_silhouette, _graph_node_motion, apply_svf, SVFDeformer  
 from utils.slam_external import build_rotation
 
 
@@ -157,6 +157,85 @@ def _to_torch_cuda(x, float_dtype=torch.float32):
     except Exception:
         return None  # non-numeric (dict/str/None)
 
+def _maybe_rebuild_svf(params):
+    """
+    Rebuild params['svf'] from saved svf_L* tensors if possible.
+    Falls back silently if reconstruction fails.
+    """
+    # Already usable?
+    if 'svf' in params and callable(params['svf']):
+        return
+
+    # Collect level tensors: svf_L0, svf_L1, ...
+    level_keys = [k for k in params.keys() if isinstance(k, str) and k.startswith('svf_L')]
+    if not level_keys:
+        # nothing saved; ensure no bogus 'svf'
+        if 'svf' in params and not callable(params['svf']):
+            params.pop('svf')
+        return
+
+    # sort levels by index
+    try:
+        level_keys.sort(key=lambda s: int(s.replace('svf_L', '')))
+    except Exception:
+        level_keys.sort()
+
+    levels = []
+    for k in level_keys:
+        v = params[k]
+        if isinstance(v, torch.Tensor):
+            levels.append(v)
+    if not levels:
+        return
+
+    try:
+        from utils.slam_helpers import SVFDeformer
+    except Exception as e:
+        print(f"[load_scene_data] SVFDeformer not available ({e}); rendering without SVF.")
+        return
+
+    svf = None
+    # --- Try constructor that accepts tensors directly
+    try:
+        svf = SVFDeformer(levels)  # e.g., forward expects preinit tensors
+    except TypeError:
+        # --- Try constructor that accepts integer resolutions, then load weights
+        try:
+            resolutions = []
+            for L in levels:
+                # expect shape like (C, D, H, W) or (D, H, W, C) -> normalize to (C,D,H,W)
+                shape = tuple(int(x) for x in L.shape)
+                if len(shape) == 4:
+                    # heuristics: channels last?
+                    if shape[-1] in (2,3):    # (D,H,W,2/3)
+                        C = shape[-1]; D,H,W = shape[0],shape[1],shape[2]
+                        resolutions.append((C,D,H,W))
+                    else:                     # (C,D,H,W)
+                        resolutions.append(shape)
+                else:
+                    # unexpected; bail
+                    raise ValueError(f"Unexpected SVF level tensor shape {shape}")
+            svf = SVFDeformer(resolutions=resolutions)
+            # Try to load weights into similarly named params/buffers if available
+            for i, L in enumerate(levels):
+                for name, p in list(svf.named_parameters()) + list(svf.named_buffers()):
+                    if name.endswith(f"{i}") and p.shape == L.shape:
+                        with torch.no_grad():
+                            p.copy_(L)
+                        break
+        except Exception as e2:
+            print(f"[load_scene_data] Could not reconstruct SVFDeformer: {e2}")
+            svf = None
+
+    if svf is not None:
+        svf = svf.cuda()
+        params['svf'] = svf
+        print(f"[load_scene_data] Reconstructed SVFDeformer with {len(levels)} levels.")
+    else:
+        # ensure no unusable 'svf' hangs around
+        if 'svf' in params and not callable(params['svf']):
+            params.pop('svf')
+
 def _ensure_shape_Nx3(x):
     """Force tensor/list into [N,3] float32 CUDA."""
     if isinstance(x, list):
@@ -197,149 +276,32 @@ def _qmul(q1, q2):
                         w1*y2 - x1*z2 + y1*w2 + z1*x2,
                         w1*z2 + x1*y2 - y1*x2 + z1*w2], dim=-1)
                         
-def deform_gaussians(params, time, deform_grad, N=5, deformation_type='gaussian', temperature=0.5):
-    """
-    Gaussian deformation:
-      - soft attention over basis functions (keeps gradients flowing)
-      - safe positive stds via softplus
-      - rotation update via quaternion multiplication (delta quat)
-      - scale updated additively in log domain
-    
-    """
-    if deformation_type == 'gaussian':
-        # Pull tensors with/without grad
-        if deform_grad:
-            W = params['deform_weights']      # [G,B,10]
-            S_raw = params['deform_stds']     # [G,B,10]
-            C = params['deform_biases']       # [G,B,10]
-        else:
-            W = params['deform_weights'].detach()
-            S_raw = params['deform_stds'].detach()
-            C = params['deform_biases'].detach()
+def deform_gaussians(params, time, return_all=False, deformation_type='svf', **kwargs):
+    # read n_squarings from params if present
+    n_squarings = 8
+    if 'svf_n_squarings' in params:
+        try:
+            n_squarings = int(params['svf_n_squarings'])
+        except Exception:
+            n_squarings = int(getattr(params['svf_n_squarings'], 'item', lambda: 8)())
 
-        # Make sure 'time' is a tensor on the right device/dtype and broadcastable to C
-        t = torch.as_tensor(time, device=C.device, dtype=C.dtype)
-        while t.dim() < C.dim():
-            t = t.unsqueeze(0)  # expand to match [G,B,10] by broadcasting
+    has_callable_svf = ('svf' in params) and callable(params['svf'])
 
-        # strictly positive bandwidths
-        S = F.softplus(S_raw) + 1e-3  # [G,B,10]
+    if deformation_type in ('svf', 'gaussian') and has_callable_svf:
+        local_means = apply_svf(params, time, n_squarings=n_squarings)
+    else:
+        # Either not using SVF here, or we couldn't reconstruct it from .npz
+        local_means = params['means3D']
 
-        # attention-like weights across bases (dim=1)
-        # score = - (t - C)^2 / (2*S^2)
-        score = -((t - C) ** 2) / (2.0 * (S ** 2) + 1e-12)
-        attn = F.softmax(score / max(temperature, 1e-3), dim=1)  # sum_B(attn)=1
+    local_rots      = params['unnorm_rotations']
+    local_scales    = params['log_scales']
+    local_opacities = params['logit_opacities']
+    local_colors    = params['rgb_colors']
 
-        # Optional soft top-k: keep top-N mass but renormalize (still differentiable)
-        if N is not None and isinstance(N, int) and 0 < N < attn.shape[1]:
-            topv, topi = torch.topk(attn, k=N, dim=1)
-            m = torch.zeros_like(attn)
-            m.scatter_(1, topi, 1.0)
-            attn = attn * m
-            attn = attn / (attn.sum(dim=1, keepdim=True) + 1e-12)
+    if return_all:
+        return local_means, local_rots, local_scales, local_opacities, local_colors
+    return local_means, local_rots, local_scales, local_opacities, local_colors
 
-        # Weighted sum over bases -> per-gaussian deformation vector (10)
-        deform = torch.sum(attn * W, dim=1)  # [G,10]
-
-        # Split into xyz(3), rot_quat_delta(4), dlog_scales(3)
-        deform_xyz    = deform[:, 0:3]
-        deform_rot_q  = deform[:, 3:7]   # interpret as delta quaternion
-        deform_dlogS  = deform[:, 7:10]
-
-        # Apply updates
-        # positions
-        xyz = params['means3D'] + deform_xyz
-
-        # rotations: compose base quaternion with delta quaternion
-        base_q = F.normalize(params['unnorm_rotations'], dim=-1)      # [G,4]
-        dq = F.normalize(deform_rot_q, dim=-1)                         # [G,4]
-
-        # quaternion multiply: (base_q * dq)
-        w1, x1, y1, z1 = base_q.unbind(-1)
-        w2, x2, y2, z2 = dq.unbind(-1)
-        w = w1*w2 - x1*x2 - y1*y2 - z1*z2
-        x = w1*x2 + x1*w2 + y1*z2 - z1*y2
-        y = w1*y2 - x1*z2 + y1*w2 + z1*x2
-        z = w1*z2 + x1*y2 - y1*x2 + z1*w2
-        rots = torch.stack([w, x, y, z], dim=-1)
-        rots = F.normalize(rots, dim=-1)
-
-        # scales: additive in log-domain (stays positive after exp in renderer)
-        scales = params['log_scales'] + deform_dlogS
-
-        opacities = params['logit_opacities']
-        colors = params['rgb_colors']
-        return xyz, rots, scales, opacities, colors
-
-    elif deformation_type == 'graph':
-        """
-        Skin each Gaussian to K nearest graph nodes, transform by node motion (CA + optional Fourier),
-        then blend in Lie/log spaces.
-        """
-        
-        # dt in frames relative to 0 (if you keep absolute time indices)
-        dt = (time if torch.is_tensor(time) else torch.tensor(float(time), device=params['means3D'].device, dtype=params['means3D'].dtype)).float()
-        # node motions
-        use_fourier = ('fourier_xyz_cos' in params)
-        R_i, t_i, logs_i = _graph_node_motion(params, dt, use_fourier=use_fourier)   # [Gm,3,3], [Gm,3], [Gm,3]
-
-        x = params['means3D']                      # [G,3]
-
-        
-        device = x.device
-        idx = params['graph_idx'].to(dtype=torch.long, device=device)   # must be long on same device
-        nodes = params['graph_nodes'].to(device=device)
-        w = params['graph_w'].to(device=device)
-
-        # now safe to index
-        n_ik    = nodes[idx]           # [G,K,3]
-        t_ik    = t_i[idx]             # [G,K,3]
-        R_ik    = R_i[idx]             # [G,K,3,3]
-        logs_ik = logs_i[idx]          # [G,K,3]
-
-        # center-relative, rotate, then uncenter and translate:
-        # x'_k = R_i(t)*(x - n_i) + n_i + t_i(t)
-        x_rel = (x.unsqueeze(1) - n_ik)                         # [G,K,3]
-        x_def = (R_ik @ x_rel.unsqueeze(-1)).squeeze(-1) + n_ik + t_ik
-        x_out = (w.unsqueeze(-1) * x_def).sum(dim=1)            # [G,3]
-
-        # rotation: blend axis-angle from node rotations (small-angle OK). We reuse node ang_i used inside _graph_node_motion
-        # For stability, compute ang_i again to avoid storing; tiny overhead.
-        # If you prefer, store the ang_i in _graph_node_motion and return it.
-        # Here: approximate Gaussian rotation as identity (or keep original) — optional:
-        rots_out = params['unnorm_rotations']  # keep original per-Gaussian orientation; advanced: blend node rotvecs.
-
-        # scales: blend log-scales
-        logs_g = (w.unsqueeze(-1) * logs_ik).sum(dim=1)         # [G,3]
-        scales_out = params['log_scales'] + logs_g              # add on top of per-Gaussian log-scales (optional)
-
-        opacities = params['logit_opacities']
-        colors    = params['rgb_colors']
-        return x_out, rots_out, scales_out, opacities, colors
-
-    elif deformation_type == 'simple':
-
-        xyz = params['means3D']
-        rots = params['unnorm_rotations']
-        scales = params['log_scales']
-        opacities = params['logit_opacities']
-        colors = params['rgb_colors']
-        return xyz, rots, scales, opacities, colors
-
-    elif deformation_type == 'cv':  # constant velocity (add 'ca' with t^2 terms if desired)
-        t = torch.as_tensor(time, device=params['means3D'].device, dtype=params['means3D'].dtype).view(-1,1)
-        v_xyz  = params['cv_vel_xyz']          # [G,3]
-        v_lsg  = params['cv_vel_log_scales']   # [G,3]
-        w_aa   = params['cv_angvel_aa']        # [G,3]
-
-        xyz = params['means3D'] + v_xyz * t
-        base_q = F.normalize(params['unnorm_rotations'], dim=-1)
-        dq = _aa_to_quat(w_aa * t)
-        rots = F.normalize(_qmul(base_q, dq), dim=-1)
-        scales = params['log_scales'] + v_lsg * t
-
-        opacities = params['logit_opacities']; colors = params['rgb_colors']
-        return xyz, rots, scales, opacities, colors
 
 def load_camera(cfg, scene_path):
     all_params = dict(np.load(scene_path, allow_pickle=True))
@@ -356,105 +318,144 @@ def load_camera(cfg, scene_path):
     return w2c, k
 
 
-def load_scene_data(scene_path, first_frame_w2c, intrinsics, time_idx,deformation_type = None):
-    # Load Scene Data
-    print(f"Loading data from {scene_path}")
-    raw = dict(np.load(scene_path, allow_pickle=True))
-    
+def load_scene_data(scene_path, first_frame_w2c, intrinsics, time_idx, deformation_type=None):
+    """
+    Load a saved scene for visualization.
 
-    # Only keep fields needed for rendering
-    KEEP = {
-        'means3D', 'rgb_colors', 'log_scales', 'logit_opacities',
-        'unnorm_rotations', 'cam_unnorm_rots', 'cam_trans',
-        'intrinsics', 'w2c', 'timestep'
-    }
+    Pipeline:
+      SVF(world) -> transform_to_frame(world->cam, time_idx) -> render
+      (no second W2C in the depth/silhouette path)
+    """
+    import numpy as np
+    import torch
+    import torch.nn.functional as F
+    from utils.slam_helpers import (
+        build_rotation,
+        transform_to_frame,
+        get_depth_and_silhouette,
+    )
 
-    params = {}
-    for k, v in raw.items():
-        if k not in KEEP:
-            continue  # skip graph_conf, debug blobs, etc.
-        tval = _to_torch_cuda(v)
-        if tval is None:    # non-numeric (dict/None/str) → skip
-            continue
-        params[k] = tval
-
-    intrinsics = torch.as_tensor(intrinsics, dtype=torch.float32, device='cuda')
-    first_frame_w2c = torch.as_tensor(first_frame_w2c, dtype=torch.float32, device='cuda')
-
-    # Convert everything best-effort to tensors
-    params = {}
-    for k, v in raw.items():
-        params[k] = _to_torch_cuda(v)
+    # ---------- helpers ----------
+    def _to_torch_cuda(v):
+        if isinstance(v, torch.Tensor):
+            return v.to('cuda')
+        try:
+            t = torch.as_tensor(v)
+            # only move numeric-like arrays
+            return t.to('cuda') if t.dtype != torch.bool else t.to('cuda')
+        except Exception:
+            return None
 
     def _Nx3(x):
         if isinstance(x, list):
             if len(x) == 0:
                 return torch.empty(0, 3, device='cuda', dtype=torch.float32)
-            # stack [3] vectors
-            return torch.stack([e.view(-1) for e in x], dim=0).contiguous().view(-1,3)
-        x = x.to(dtype=torch.float32, device='cuda')
-        if x.ndim == 1:
-            if x.numel() % 3 != 0:
-                raise ValueError(f"_Nx3: 1D size {x.numel()} not multiple of 3")
-            x = x.view(-1, 3)
-        elif x.ndim == 2 and x.size(-1) == 3:
-            pass
-        elif x.ndim == 2 and x.size(0) == 3:
-            x = x.t()
+            x = torch.stack([torch.as_tensor(e, device='cuda', dtype=torch.float32).view(-1) for e in x], dim=0)
         else:
-            raise ValueError(f"_Nx3: unexpected shape {tuple(x.shape)}")
+            x = x.to(dtype=torch.float32, device='cuda')
+        if x.ndim == 1:            x = x.view(-1, 3)
+        elif x.ndim == 2:
+            if x.shape[-1] == 3:   pass
+            elif x.shape[0] == 3:  x = x.t()
+            else:                  x = x.reshape(-1, 3)
+        else:                      x = x.reshape(-1, 3)
         return x.contiguous()
 
     def _Nx1(x):
         if isinstance(x, list):
             if len(x) == 0:
                 return torch.empty(0, 1, device='cuda', dtype=torch.float32)
-            x = torch.stack([e.view(-1) for e in x], dim=0)
-        x = x.to(dtype=torch.float32, device='cuda')
-        if x.ndim == 1:
-            x = x.view(-1, 1)
-        elif x.ndim == 2 and x.size(-1) == 1:
-            pass
+            x = torch.stack([torch.as_tensor(e, device='cuda', dtype=torch.float32).view(-1) for e in x], dim=0)
         else:
-            x = x.view(-1, 1)
+            x = x.to(dtype=torch.float32, device='cuda')
+        if x.ndim == 1:            x = x.view(-1, 1)
+        elif x.ndim == 2 and x.shape[-1] == 1: pass
+        else:                      x = x.view(-1, 1)
         return x.contiguous()
 
-    # Coerce fields if present
-    if 'means3D' in params:          params['means3D'] = _Nx3(params['means3D'])
-    if 'rgb_colors' in params:       params['rgb_colors'] = _Nx3(params['rgb_colors']).clamp_(0, 1)
-    if 'log_scales' in params:       params['log_scales'] = _Nx3(params['log_scales'])
-    if 'logit_opacities' in params:  params['logit_opacities'] = _Nx1(params['logit_opacities'])
-    if 'unnorm_rotations' in params: params['unnorm_rotations'] = (
-        torch.stack(params['unnorm_rotations'], dim=0).float().contiguous()
-        if isinstance(params['unnorm_rotations'], list) else params['unnorm_rotations'].float().contiguous()
-    )
+    def _maybe_rebuild_svf(params):
+        """
+        Rebuild params['svf'] from saved level tensors (svf_L0, svf_L1, ...),
+        if the callable SVF module isn't present (e.g., loaded from .npz).
+        """
+        if 'svf' in params and callable(params['svf']):
+            return  # already valid
 
-    # Intrinsics / w2c (optional)
-    if 'intrinsics' in params: params['intrinsics'] = params['intrinsics'].float().contiguous()
-    if 'w2c' in params:        params['w2c'] = params['w2c'].float().contiguous()
+        # collect level tensors
+        level_keys = sorted([k for k in params.keys() if isinstance(k, str) and k.startswith('svf_L')],
+                            key=lambda s: int(s.replace('svf_L', '')) if s.replace('svf_L', '').isdigit() else 1e9)
+        if not level_keys:
+            # nothing to rebuild from
+            if 'svf' in params and not callable(params['svf']):
+                params.pop('svf')
+            return
 
-    # Camera stacks (cam_unnorm_rots [4, T], cam_trans [3, T]) can arrive as lists or objects — coerce:
-    for key in ['cam_unnorm_rots', 'cam_trans']:
-        if key in params:
-            val = params[key]
-            if isinstance(val, list):
-                # stack list elements on last dim if each is [4] or [3]
-                elems = [e if isinstance(e, torch.Tensor) else torch.as_tensor(e, device='cuda', dtype=torch.float32) for e in val]
-                if elems[0].ndim == 1:
-                    params[key] = torch.stack(elems, dim=-1).contiguous()
-                else:
-                    params[key] = torch.stack(elems, dim=-1).contiguous()
-            else:
-                params[key] = val.to(device='cuda', dtype=torch.float32)
+        levels = [params[k] for k in level_keys if isinstance(params[k], torch.Tensor)]
+        if not levels:
+            return
 
-    # Prepare all w2c per frame
+        # Try to import the deformer class
+        try:
+            from utils.slam_helpers import SVFDeformer
+        except Exception as e:
+            print(f"[load_scene_data] SVFDeformer not available ({e}); rendering without SVF.")
+            return
+
+        # Build module (support common ctor variants)
+        svf = None
+        try:
+            svf = SVFDeformer(levels)  # most repos
+        except TypeError:
+            try:
+                svf = SVFDeformer(levels=levels)
+            except Exception as e:
+                print(f"[load_scene_data] Could not reconstruct SVFDeformer: {e}")
+                return
+
+        if svf is not None:
+            svf = svf.cuda()
+            params['svf'] = svf
+            # keep level tensors for reference; no need to delete svf_L*
+            print(f"[load_scene_data] Reconstructed SVFDeformer with {len(levels)} levels.")
+
+    # ---------- load .npz ----------
+    print(f"Loading data from {scene_path}")
+    raw = dict(np.load(scene_path, allow_pickle=True))
+
+    # Build params dict (best-effort tensors on CUDA)
+    params = {k: _to_torch_cuda(v) for k, v in raw.items()}
+
+    # coerce common arrays
+    if 'means3D'          in params and params['means3D']          is not None: params['means3D']          = _Nx3(params['means3D'])
+    if 'rgb_colors'       in params and params['rgb_colors']       is not None: params['rgb_colors']       = _Nx3(params['rgb_colors']).clamp_(0, 1)
+    if 'log_scales'       in params and params['log_scales']       is not None: params['log_scales']       = _Nx3(params['log_scales'])
+    if 'logit_opacities'  in params and params['logit_opacities']  is not None: params['logit_opacities']  = _Nx1(params['logit_opacities'])
+    if 'unnorm_rotations' in params and params['unnorm_rotations'] is not None:
+        ur = params['unnorm_rotations']
+        if isinstance(ur, list):
+            ur = torch.stack([torch.as_tensor(e, device='cuda', dtype=torch.float32) for e in ur], dim=0)
+        params['unnorm_rotations'] = ur.float().contiguous()
+
+    # intrinsics / first-frame w2c tensors
+    intrinsics      = torch.as_tensor(intrinsics, dtype=torch.float32, device='cuda')
+    first_frame_w2c = torch.as_tensor(first_frame_w2c, dtype=torch.float32, device='cuda')
+
+    # If a non-callable 'svf' snuck in (e.g., from npz), drop it BEFORE rebuild
+    if 'svf' in params and not callable(params['svf']):
+        params.pop('svf')
+
+    # Try to reconstruct the SVF module from saved levels (svf_L*)
+    _maybe_rebuild_svf(params)
+
+    # ---------- per-frame w2c stack ----------
     all_w2cs = []
-    if 'cam_unnorm_rots' in params and 'cam_trans' in params:
-        rot = params['cam_unnorm_rots']  # [4,T] or list
-        tran = params['cam_trans']       # [3,T] or list
-        if isinstance(rot, list):  rot = torch.stack(rot, dim=-1)
+    if ('cam_unnorm_rots' in params and params['cam_unnorm_rots'] is not None
+        and 'cam_trans' in params and params['cam_trans'] is not None):
+        rot  = params['cam_unnorm_rots']
+        tran = params['cam_trans']
+        if isinstance(rot, list):  rot  = torch.stack(rot,  dim=-1)
         if isinstance(tran, list): tran = torch.stack(tran, dim=-1)
-        rot = rot.to(dtype=torch.float32, device='cuda')
+        rot  = rot.to(dtype=torch.float32, device='cuda')
         tran = tran.to(dtype=torch.float32, device='cuda')
         T = rot.shape[-1]
         for t in range(T):
@@ -465,48 +466,51 @@ def load_scene_data(scene_path, first_frame_w2c, intrinsics, time_idx,deformatio
             w2c[:3, 3]  = tran[..., t]
             all_w2cs.append(w2c.cpu().numpy())
     else:
-        # fallback: use provided first frame
-        all_w2cs.append(first_frame_w2c.cpu().numpy())
+        all_w2cs.append(first_frame_w2c.detach().cpu().numpy())
 
-    all_w2cs = []
-    num_t = params['cam_unnorm_rots'].shape[-1]
-    for t_i in range(num_t):
-        cam_rot = F.normalize(params['cam_unnorm_rots'][..., t_i])
-        cam_tran = params['cam_trans'][..., t_i]
-        rel_w2c = torch.eye(4).cuda().float()
-        rel_w2c[:3, :3] = build_rotation(cam_rot)
-        rel_w2c[:3, 3] = cam_tran
-        all_w2cs.append(rel_w2c.cpu().numpy())
-        
+    # ---------- deform (world) -> single world->camera transform ----------
+    # deform_gaussians should gracefully skip SVF if params['svf'] is absent
+    local_means, local_rots, local_scales, local_opacities, local_colors = deform_gaussians(
+        params, time_idx, False, deformation_type=deformation_type
+    )
+    pts_cam = transform_to_frame(local_means, params, time_idx, gaussians_grad=False, camera_grad=False)
 
-
-    local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(params,time_idx,False,deformation_type=deformation_type)
-    transformed_pts = local_means
-
+    # ---------- build render vars ----------
     rendervar = {
-        'means3D': transformed_pts,
+        'means3D': pts_cam,
         'rotations': torch.nn.functional.normalize(local_rots),
         'opacities': torch.sigmoid(local_opacities),
-        'means2D': torch.zeros_like(local_means, device="cuda")
+        'means2D': torch.zeros_like(pts_cam, device="cuda"),
     }
-    if "feature_rest" in params:
+    if "feature_rest" in params and params["feature_rest"] is not None:
         rendervar['scales'] = torch.exp(local_scales)
-        rendervar['shs'] = torch.cat((local_colors.reshape(local_colors.shape[0], 3, -1).transpose(1, 2), params['feature_rest'].reshape(local_colors.shape[0], 3, -1).transpose(1, 2)), dim=1)
+        rendervar['shs'] = torch.cat(
+            (
+                local_colors.reshape(local_colors.shape[0], 3, -1).transpose(1, 2),
+                params['feature_rest'].reshape(local_colors.shape[0], 3, -1).transpose(1, 2),
+            ),
+            dim=1,
+        )
     elif local_scales.shape[1] == 1:
         rendervar['scales'] = torch.exp(torch.tile(local_scales, (1, 3)))
         rendervar['colors_precomp'] = local_colors
     else:
         rendervar['scales'] = local_scales
         rendervar['colors_precomp'] = local_colors
+
+    # depth/sil: points already in camera space -> identity W2C to avoid double-transform
+    I = torch.eye(4, device=pts_cam.device, dtype=pts_cam.dtype)
     depth_rendervar = {
-        'means3D': transformed_pts,
-        'colors_precomp': get_depth_and_silhouette(transformed_pts, first_frame_w2c),
+        'means3D': pts_cam,
+        'colors_precomp': get_depth_and_silhouette(pts_cam, I),
         'rotations': torch.nn.functional.normalize(local_rots),
         'opacities': torch.sigmoid(local_opacities),
         'scales': torch.exp(torch.tile(local_scales, (1, 3))),
-        'means2D': torch.zeros_like(local_means, device="cuda")
+        'means2D': torch.zeros_like(pts_cam, device="cuda"),
     }
+
     return rendervar, depth_rendervar, all_w2cs, params
+
 
 
 def deform_and_render(params,time_idx,deformation_type,w2c):

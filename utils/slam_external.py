@@ -136,86 +136,61 @@ def cat_params_to_optimizer(new_params, params, optimizer):
 
 
 def remove_points(to_remove, params, variables, optimizer):
+    """
+    Prune Gaussians indicated by boolean mask `to_remove` [G].
+    Only slices per-Gaussian tensors (first dim == G).
+    Skips modules (SVFDeformer), SVF grids, AABB buffers, camera poses, intrinsics, etc.
+    Flags the optimizer for rebuild (simplest & safest).
+    """
     import torch
-
-    # Boolean mask (True = keep)
+    assert to_remove.dtype == torch.bool
+    G = int(to_remove.numel())
     to_keep = ~to_remove
+    keep_idx = to_keep.nonzero(as_tuple=False).squeeze(1)  # [G_new]
 
-    # Per-point parameter keys (don’t touch camera pose tensors)
-    keys = [k for k in params.keys()
-            if isinstance(k, str) and k not in ['cam_unnorm_rots', 'cam_trans']]
+    def _is_pointwise_tensor(x):
+        # Accept Parameter/Tensor with first dimension == G
+        t = x.data if isinstance(x, torch.nn.Parameter) else x
+        return isinstance(t, torch.Tensor) and t.dim() >= 1 and t.shape[0] == G
 
-    for k in keys:
+    # Keys we should NEVER slice here
+    NEVER = {
+        'svf', 'svf_aabb_center', 'svf_aabb_half', 'svf_n_squarings',
+        'cam_unnorm_rots', 'cam_trans',
+    }
+
+    # Slice per-Gaussian params; skip everything else
+    for k in list(params.keys()):
+        if k in NEVER:
+            continue
         v = params[k]
-        # Find optimizer group for this key (may be missing if frozen)
-        group = next((g for g in optimizer.param_groups if g.get('name') == k), None)
-
-        if group is None:
-            # No optimizer state: just slice the tensor/param safely
-            if isinstance(v, torch.nn.Parameter):
-                req = bool(v.requires_grad)
-                # Align mask length defensively
-                min_len = min(v.shape[0], to_keep.shape[0])
-                params[k] = torch.nn.Parameter(v[:min_len][to_keep[:min_len]].detach().requires_grad_(req))
-            else:
-                min_len = min(v.shape[0], to_keep.shape[0])
-                params[k] = v[:min_len][to_keep[:min_len]]
+        if not _is_pointwise_tensor(v):
             continue
 
-        # With optimizer state
-        old_param = group['params'][0]
-        # Align lengths to avoid indexing errors
-        min_len = min(old_param.shape[0], to_keep.shape[0])
-        idx_mask = to_keep[:min_len]
-        old_param = old_param[:min_len]
-
-        stored = optimizer.state.get(old_param, None)
-
-        new_data = old_param[idx_mask]
-        new_param = torch.nn.Parameter(new_data.requires_grad_(True))
-
-        # Move Adam moments if present
-        if stored is not None:
-            if 'exp_avg' in stored:
-                stored['exp_avg'] = stored['exp_avg'][:min_len][idx_mask]
-            if 'exp_avg_sq' in stored:
-                stored['exp_avg_sq'] = stored['exp_avg_sq'][:min_len][idx_mask]
-            # Rebind state to the new param
-            del optimizer.state[group['params'][0]]
-            group['params'][0] = new_param
-            optimizer.state[new_param] = stored
+        if isinstance(v, torch.nn.Parameter):
+            req = bool(v.requires_grad)
+            new_t = v.data.index_select(0, keep_idx).contiguous()
+            params[k] = torch.nn.Parameter(new_t, requires_grad=req)
         else:
-            group['params'][0] = new_param
+            params[k] = v.index_select(0, keep_idx).contiguous()
 
-        params[k] = new_param
+    # Slice per-Gaussian variables too (if present)
+    for k in list(variables.keys()):
+        v = variables[k]
+        t = v.data if isinstance(v, torch.nn.Parameter) else v
+        if isinstance(t, torch.Tensor) and t.dim() >= 1 and t.shape[0] == G:
+            variables[k] = t.index_select(0, keep_idx).contiguous()
 
-    # --- Keep auxiliary per-point buffers in sync ---
-    # Target length = any representative per-point tensor after pruning
-    for rep_key in ('logit_opacities', 'means', 'colors', 'log_scales'):
-        if rep_key in params:
-            N = params[rep_key].shape[0]
-            break
-    else:
-        N = None  # nothing to resize
+    # Expose SVF trainable grids again (optimizer needs to see them)
+    if 'svf' in params and hasattr(params['svf'], 'levels'):
+        for i, _ in enumerate(params['svf'].levels):
+            params[f'svf_L{i}'] = getattr(params['svf'], f'svf_L{i}')
 
-    def _resize_like(v, N):
-        if N is None:
-            return v
-        # If lengths match the mask, use mask; otherwise crop/pad to N
-        if v.shape[0] == to_keep.shape[0]:
-            return v[:to_keep.shape[0]][to_keep]
-        if v.shape[0] > N:
-            return v[:N]
-        if v.shape[0] < N:
-            pad = torch.zeros((N - v.shape[0],) + v.shape[1:], dtype=v.dtype, device=v.device)
-            return torch.cat([v, pad], dim=0)
-        return v
-
-    for name in ('means2D_gradient_accum', 'denom', 'radii', 'opacity', 'visibility_filter'):
-        if name in variables:
-            variables[name] = _resize_like(variables[name], N)
+    # IMPORTANT: param objects changed – easiest is to rebuild optimizer outside
+    variables['need_optimizer_rebuild'] = True
 
     return params, variables
+
 
 
 

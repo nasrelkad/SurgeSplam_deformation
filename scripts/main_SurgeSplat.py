@@ -32,13 +32,12 @@ from utils.common_utils import seed_everything, save_params_ckpt, save_params, s
 from utils.eval_helpers import report_progress, eval_save
 from utils.keyframe_selection import keyframe_selection_overlap, keyframe_selection_distance
 from utils.recon_helpers import setup_camera, energy_mask
-from utils.slam_helpers import (
+from utils.slam_helpers import ( initialize_svf, apply_svf, svf_bending_loss,
+    deform_gaussians,
+    transform_to_frame, transform_to_frame_eval,
     transformed_params2rendervar, transformed_params2depthplussilhouette,
-    transform_to_frame, l1_loss_v1, matrix_to_quaternion,
-    transformed_GRNparams2depthplussilhouette,transformed_GRNparams2rendervar,
-    add_new_gaussians,grn_initialization,deform_gaussians,initialize_deformations,initialize_new_params,grn_initialization,
-    get_mask,align_shift_and_scale, initialize_cv_deformations, initialize_xyzt, xyzt_time_gate, apply_xyzt_gate, initialize_graph_deformations, arap_loss, arap_loss_graph,
-    rebind_graph_subset, periodic_rebind_if_far, rebind_graph, ensure_binding_buffers
+    transformed_GRNparams2rendervar, transformed_GRNparams2depthplussilhouette,
+    align_shift_and_scale, grn_initialization, initialize_xyzt, add_new_gaussians
 )
 from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, densify
 from utils.vis_utils import plot_video
@@ -441,7 +440,28 @@ def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True,
 
 #     return xyz, rots, scales,opacities, colors
 
-
+def _to_param(v, device):
+    # Already a Parameter
+    if isinstance(v, torch.nn.Parameter):
+        return v
+    # Tensor -> Parameter
+    if isinstance(v, torch.Tensor):
+        p = v.to(device).contiguous()
+        if not p.requires_grad:
+            p.requires_grad_(True)
+        return torch.nn.Parameter(p)
+    # NumPy -> Parameter
+    if isinstance(v, np.ndarray):
+        p = torch.from_numpy(v).to(device).float().contiguous()
+        p.requires_grad_(True)
+        return torch.nn.Parameter(p)
+    # Python scalars -> Parameter
+    if isinstance(v, (float, int)):
+        p = torch.tensor(v, device=device, dtype=torch.float32)
+        p.requires_grad_(True)
+        return torch.nn.Parameter(p)
+    # Anything else (modules, dicts, tuples, None, strings, etc.) -> leave as-is
+    return v
 
 def initialize_simple_deformations(params, num_frames):
     '''
@@ -465,118 +485,147 @@ def _to_tensor(v, device):
     # fallback for lists / scalars
     return torch.tensor(v, device=device)
 
-def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification=True,use_deforms = True,deform_type = 'gaussian',nr_basis = 10,use_distributed_biases = False,total_timescale = None,cam = None,random_initialization = False,init_scale = 0.1, 
-                        graph_conf = {'num_nodes':   256, 'K': 6,'sigma_mult':  0.5, 'use_fourier': True, 'M':  2}):
-    num_pts = init_pt_cld.shape[0]
-    means3D = init_pt_cld[:, :3] # [num_gaussians, 3]
-    unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1)) # [num_gaussians, 3]
-    logit_opacities = torch.zeros((num_pts, 1), dtype=torch.float, device="cuda")
-    if not random_initialization:
-        params = {
-            'means3D': means3D,
-            'rgb_colors': init_pt_cld[:, 3:6],
-            'unnorm_rotations': torch.tensor(unnorm_rots,dtype=torch.float).cuda(),
-            'logit_opacities': logit_opacities,
-            'log_scales': torch.tile(torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 1 if use_simplification else 3)),
-        }
+
+def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification,
+                      use_deforms=True, deform_type='svf', nr_basis=0, use_distributed_biases=False,
+                      total_timescale=None, cam=None, random_initialization=False, init_scale=0.1):
+    """
+    SVF-only initializer.
+    Returns:
+        params_list: list with a single params dict
+        variables: aux runtime dict
+    """
+   
+    device = init_pt_cld.device
+
+    # Expect init_pt_cld as [G,6]: xyz rgb (0..1 or 0..255)
+    means3D = init_pt_cld[:, :3].contiguous()
+    rgb = init_pt_cld[:, 3:6].contiguous()
+    if rgb.max() > 1.0:
+        rgb = rgb / 255.0
+
+    G = means3D.shape[0]
+
+    # Rotations as unit quaternions [x,y,z,w] unnormalized (we will normalize where used)
+    unnorm_rot = torch.zeros(G, 4, device=device)
+    unnorm_rot[:, 3] = 1.0  # identity quaternion
+
+    # Opacity logits moderate positive → semi-opaque
+    logit_opacities = torch.full((G, 1), 2.0, device=device)
+
+    # Scales: start proportional to mean spacing
+    if mean3_sq_dist is not None and not isinstance(mean3_sq_dist, (int, float)):
+        # handle tensor
+        try:
+            s = torch.sqrt(mean3_sq_dist).mean().clamp(min=1e-4).item()
+        except Exception:
+            s = 0.01
     else:
-        params = {
-            'means3D': means3D,
-            'rgb_colors': init_pt_cld[:, 3:6],
-            'unnorm_rotations': torch.zeros_like(torch.tensor(unnorm_rots),dtype=torch.float).cuda(),
-            'logit_opacities': logit_opacities,
-            'log_scales': torch.ones_like(means3D, dtype=torch.float, device=means3D.device) * init_scale,
-        }
+        s = 0.01 if mean3_sq_dist is None else float(mean3_sq_dist) ** 0.5
+    base_scale = max(1e-4, 0.5 * s)
+    if random_initialization:
+        log_scales = torch.log(torch.ones(G, 3, device=device) * init_scale)
+    else:
+        log_scales = torch.log(torch.ones(G, 3, device=device) * base_scale)
 
+    params = {
+        'means3D': means3D,
+        'rgb_colors': rgb,
+        'unnorm_rotations': unnorm_rot,
+        'logit_opacities': logit_opacities,
+        'log_scales': log_scales,
+    }
+
+    params = initialize_svf(params, levels=(32,64))
     
-
-
-                                                                                           
-    if not use_simplification:
-        params['feature_rest'] = torch.zeros(num_pts, 45) # set SH degree 3 fixed
-
-    
-    if use_deforms:
-        if deform_type == 'gaussian':
-            params = initialize_deformations(params,nr_basis,use_distributed_biases=use_distributed_biases,total_timescale = total_timescale)
-        elif deform_type == 'cv':
-            params = initialize_cv_deformations(params)
-        elif deform_type == 'graph':
-            
-            params = initialize_graph_deformations(params,
-                                                  num_nodes=graph_conf['num_nodes'],
-                                                  K=graph_conf['K'],
-                                                  sigma_mult=graph_conf['sigma_mult'],
-                                                  use_fourier=graph_conf['use_fourier'],
-                                                  M=graph_conf['M'])
-
-    params = ensure_binding_buffers(params, K=graph_conf['K'], tag="post-init")
-            
-            
- 
-    # Initialize a single gaussian trajectory to model the camera poses relative to the first frame
-    cam_rots = np.tile([1, 0, 0, 0], (1, 1))
-    cam_rots = np.tile(cam_rots[:, :, None], (1, 1, num_frames))
-    params['cam_unnorm_rots'] = cam_rots
-    params['cam_trans'] = np.zeros((1, 3, num_frames))
-
-
-        
-    device = init_pt_cld.device if isinstance(init_pt_cld, torch.Tensor) else (
-    torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
-
-
-    for k, v in list(params.items()):
-        v = _to_tensor(v, device)
-
-        if k == 'graph_idx':
-            params[k] = v.to(torch.long).contiguous()      # keep as long tensor (no grad)
-            continue
-        if k == 'graph_w':
-            params[k] = v.to(torch.float32).contiguous()   # keep as float tensor (no grad)
-            continue
-
-        # all others: learnable float parameters
-        params[k] = torch.nn.Parameter(
-            v.to(torch.float32).contiguous().requires_grad_(True)
-        )
-
     variables = {'max_2D_radius': torch.zeros(params['means3D'].shape[0]).cuda().float(),
                  'means2D_gradient_accum': torch.zeros(params['means3D'].shape[0]).cuda().float(),
                  'denom': torch.zeros(params['means3D'].shape[0]).cuda().float(),
                  'timestep': torch.zeros(params['means3D'].shape[0]).cuda().float()}
-    # If we use simple deformations, we want a list of all parameters for easier optimization
-    if use_deforms:
-        if deform_type =='simple':
-            param_list = [params for _ in range(num_frames)]
-        else:
-            param_list = params
-    else:
-        param_list = params
-    return param_list, variables
 
+     # Initialize a single gaussian trajectory to model the camera poses relative to the first frame
+    cam_rots = np.tile([1, 0, 0, 0], (1, 1))
+    cam_rots = np.tile(cam_rots[:, :, None], (1, 1, num_frames))
+    params['cam_unnorm_rots'] = cam_rots
+    params['cam_trans'] = np.zeros((1, 3, num_frames))
+    
+    device = init_pt_cld.device
+    for k, v in list(params.items()):
+        params[k] = _to_param(v, device)
+    
+    return params, variables
 
 def initialize_optimizer(params, lrs_dict):
+    """
+    Build Adam param groups from:
+      - plain tensors/Parameters in `params`
+      - SVF module at `params['svf']` (iterate its .parameters())
+      - exposed SVF level tensors `svf_L*` (inherit lr from 'svf' if missing)
+    Accepts either a dict or [dict].
+    """
+    import torch
+    import torch.nn as nn
+
+    # allow list-of-dicts (your pipeline sometimes keeps params in a list)
+    if isinstance(params, list):
+        assert len(params) > 0 and isinstance(params[-1], dict), "params list must end with a dict"
+        params = params[-1]
+
+    def _lr_for_key(k):
+        # keys in lrs_dict are strings; if k isn't a string, there is no LR
+        if not isinstance(k, str):
+            return None
+        if k in lrs_dict:
+            return float(lrs_dict[k])
+        # allow svf_L* to inherit lr from 'svf'
+        if k.startswith("svf_L") and ("svf" in lrs_dict):
+            return float(lrs_dict["svf"])
+        return None
+
     param_groups = []
+    seen = set()
 
     for k, v in params.items():
-        # Skip SH features if you keep them separate
-        #if k == 'feature_rest':
-        #    continue
-
-        # Guard: only accept string keys (the LR dict has string keys)
+        # --- skip non-string keys to avoid AttributeError on .startswith
         if not isinstance(k, str):
-            #print(f"[initialize_optimizer] Skipping non-string param key: {k!r}")
+            # optional: uncomment to see what it was
+            # print(f"[initialize_optimizer] Non-string key {k} ({type(k).__name__}); skipping.")
             continue
 
-        lr = lrs_dict.get(k, None)
+        # 1) SVF module: add its internal Parameters
+        if k == "svf" and isinstance(v, nn.Module):
+            lr = _lr_for_key("svf")
+            if lr is None:
+                print("[initialize_optimizer] No LR for 'svf', skipping module.")
+            else:
+                for i, p in enumerate(v.parameters()):
+                    if isinstance(p, (torch.nn.Parameter, torch.Tensor)) and p.requires_grad:
+                        if id(p) not in seen:
+                            param_groups.append({"params": [p], "name": f"svf_p{i}", "lr": lr})
+                            seen.add(id(p))
+            continue
+
+        # 2) Regular tensors / exposed SVF levels
+        lr = _lr_for_key(k)
         if lr is None:
-            # No LR provided: skip (or set lr = 0.0 to freeze instead)
-            print(f"[initialize_optimizer] No LR for '{k}', skipping this param.")
+            # optional: print
+            # print(f"[initialize_optimizer] No LR for '{k}', skipping this param.")
             continue
 
-        param_groups.append({'params': [v], 'name': k, 'lr': float(lr)})
+        if isinstance(v, (torch.nn.Parameter, torch.Tensor)) and v.requires_grad:
+            if id(v) not in seen:
+                param_groups.append({"params": [v], "name": k, "lr": lr})
+                seen.add(id(v))
+        else:
+            # ignore non-tensors (dicts, arrays, etc.)
+            pass
+
+    if len(param_groups) == 0:
+        raise RuntimeError("initialize_optimizer: no trainable parameters matched your LR dict")
+
     return torch.optim.Adam(param_groups, lr=0.0, eps=1e-15)
+
+
 
 
 # def grn_initialization(model,params,init_pt_cld,mean3_sq_dist,color,depth,mask = None,cam= None):
@@ -713,7 +762,7 @@ def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_rad
     # Initialize Parameters
 
   
-    params_list, variables = initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification,use_deforms=use_deforms,deform_type=deform_type,nr_basis = nr_basis,use_distributed_biases=use_distributed_biases,total_timescale=total_timescale,cam = cam,random_initialization=random_initialization,init_scale=init_scale, graph_conf= graph_conf)
+    params_list, variables = initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification,use_deforms=use_deforms,deform_type=deform_type,nr_basis = nr_basis,use_distributed_biases=use_distributed_biases,total_timescale=total_timescale,cam = cam,random_initialization=random_initialization,init_scale=init_scale)
     
     # bloat_params = True
     # if bloat_params:
@@ -730,23 +779,11 @@ def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_rad
     if use_grn:
         if isinstance(params_list,list):
             params = grn_initialization(grn_model,params_list[0],init_pt_cld,mean3_sq_dist,color,depth,mask,cam = cam)
-            if deform_type== 'graph':
-                params['graph_conf'] = {
-                            'num_nodes':   config['deforms']['graph']['num_nodes'],
-                            'K':           config['deforms']['graph']['K'],
-                            'sigma_mult':  config['deforms']['graph']['sigma_mult'],
-                            'use_fourier': config['deforms']['graph'].get('use_fourier', True),
-                            'M':           config['deforms']['graph'].get('M', 2)}
+            params = initialize_svf(params, (32,64))
             params_list = [params for _ in range(num_frames)]
         else:
             params = grn_initialization(grn_model,params_list,init_pt_cld,mean3_sq_dist,color,depth,mask,cam = cam)
-            if deform_type== 'graph':
-                params['graph_conf'] = {
-                            'num_nodes':   graph_conf['num_nodes'],
-                            'K':           graph_conf['K'],
-                            'sigma_mult':  graph_conf['sigma_mult'],
-                            'use_fourier': graph_conf['use_fourier'],
-                            'M':           graph_conf['M']}
+            
             params_list = params
 
     
@@ -837,19 +874,21 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
         bloat = torch.sum(bloat)
         # print(bloat.shape)
         local_opacities = local_opacities+bloat
-    # Initialize Render Variables
     # print()
+    I = torch.eye(4, device=transformed_pts.device, dtype=transformed_pts.dtype)
     if use_grn:
         rendervar = transformed_GRNparams2rendervar(params, transformed_pts,local_rots,local_scales,local_opacities,local_colors)
 
-        depth_sil_rendervar = transformed_GRNparams2depthplussilhouette(params, curr_data['w2c'],
-                                                                    transformed_pts,local_rots,local_scales,local_opacities)
+        depth_sil_rendervar = transformed_GRNparams2depthplussilhouette(
+        params, None, transformed_pts, local_rots, local_scales, local_opacities
+    )
 
     else:
         rendervar = transformed_params2rendervar(params, transformed_pts,local_rots,local_scales,local_opacities,local_colors)
 
-        depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
-                                                                    transformed_pts,local_rots,local_scales,local_opacities)
+        depth_sil_rendervar = transformed_GRNparams2depthplussilhouette(
+        params, None, transformed_pts, local_rots, local_scales, local_opacities
+    )
     
     # Visualize the Rendered Images
     if 't_mu' in params:    
@@ -882,18 +921,24 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
 
     # Mask with valid depth values (accounts for outlier depth values)
     nan_mask = (~torch.isnan(depth)) & (~torch.isnan(uncertainty))
-    bg_mask = energy_mask(curr_data['im'])
-    if ignore_outlier_depth_loss:
-        depth_error = torch.abs(curr_data['depth'] - depth) * (curr_data['depth'] > 0)
-        mask = (depth_error < 20*depth_error.mean())
-        mask = mask & (curr_data['depth'] > 0)
+    bg_mask  = energy_mask(curr_data['im'])          # your vignette/motion mask
+    presence_sil_mask = (silhouette > sil_thres)
+
+    if use_gt_depth:
+        if ignore_outlier_depth_loss:
+            depth_error = torch.abs(curr_data['depth'] - depth) * (curr_data['depth'] > 0)
+            mask = (depth_error < 20 * depth_error.mean()) & (curr_data['depth'] > 0)
+        else:
+            mask = (curr_data['depth'] > 0)
     else:
-        mask = (curr_data['depth'] > 0)
-    mask = mask & nan_mask & bg_mask
-    
-    # Mask with presence silhouette mask (accounts for empty space)
+        # No GT depth available: rely on silhouette + vignette + valid render
+        mask = presence_sil_mask & bg_mask & nan_mask
+
+    # For tracking you can be stricter
     if tracking and use_sil_for_loss:
         mask = mask & presence_sil_mask
+        color_mask = torch.tile(mask, (3, 1, 1))
+        losses['im'] = torch.abs(curr_data['im'] - im)[color_mask].sum()
     if not use_gt_depth:
         rendered_depth_aligned,predicted_depth_aligned,_,_,_,_ = align_shift_and_scale(depth,curr_data['depth'],mask)
         # rendered_depth_aligned = (depth-depth.min())/(depth.max()-depth.min())+0.1
@@ -1398,6 +1443,7 @@ def rgbd_slam(config: dict):
                                                                         use_grn = config['GRN']['use_grn'],
                                                                         graph_conf = config['deforms']['graph'])    
 
+        params = initialize_svf(params, levels=(32,64))
 
     else:
         color, depth, intrinsics, pose = dataset[0]
@@ -1465,15 +1511,9 @@ def rgbd_slam(config: dict):
                                                                             init_scale=config['GRN']['init_scale'],
                                                                             reduce_gaussians = config['gaussian_reduction']['reduce_gaussians'],
                                                                             reduction_type = config['gaussian_reduction']['reduction_type'],
-                                                                            reduction_fraction=config['gaussian_reduction']['reduction_fraction'],
-                                                                            graph_conf =  config['deforms']['graph'])        
+                                                                            reduction_fraction=config['gaussian_reduction']['reduction_fraction'])        
         
-    params = initialize_xyzt(
-            params,
-            num_frames=num_frames,   # or config['dataset']['num_frames']
-            xyzt_init_sigma=config['deforms'].get('xyzt_init_sigma', 5.0),
-            device=params['means3D'].device
-        )
+        
     # local_means,local_rots,local_scales = deform_gaussians(params,0,False,5,'simple')
     # rendervar = transformed_GRNparams2rendervar(params,local_means,local_rots,local_scales)   
 
@@ -2196,14 +2236,19 @@ def rgbd_slam(config: dict):
         params = params_save
 
     # Add Camera Parameters to Save them
+    try:
+        print(len(params))
+    except:
+        pass
+    gt_w2c_all_frames_list = []
     params['timestep'] = variables['timestep']
     params['intrinsics'] = intrinsics.detach().cpu().numpy()
     params['w2c'] = first_frame_w2c.detach().cpu().numpy()
     params['org_width'] = dataset_config["desired_image_width"]
     params['org_height'] = dataset_config["desired_image_height"]
-    params['gt_w2c_all_frames'] = []
     for gt_w2c_tensor in gt_w2c_all_frames:
-        params['gt_w2c_all_frames'].append(gt_w2c_tensor.detach().cpu().numpy())
+        gt_w2c_all_frames_list.append(gt_w2c_tensor.detach().cpu().numpy())
+    params['gt_w2c_all_frames'] = gt_w2c_all_frames_list
     params['gt_w2c_all_frames'] = np.stack(params['gt_w2c_all_frames'], axis=0)
     params['keyframe_time_indices'] = np.array(keyframe_time_indices)
     

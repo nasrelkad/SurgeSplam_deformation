@@ -132,7 +132,7 @@ def transformed_params2rendervar(params, transformed_pts,local_rots,local_scales
         'means2D': torch.zeros_like(transformed_pts, requires_grad=True, device="cuda") + 0
     }
     
-    if local_scales.shape[0] == 1:
+    if local_scales.shape[1] == 1:
         rendervar['colors_precomp'] = local_colors
         rendervar['scales'] = torch.exp(torch.tile(local_scales, (1, 3)))
         # print('using uniform scales')
@@ -187,7 +187,6 @@ def transformed_params2rendervar(params, transformed_pts,local_rots,local_scales
 #     }
 #     return rendervar
 
-# === Deformation Graph utilities ===
 def _farthest_point_sample(xyz, M):
     """
     xyz: [N,3] (cuda float)
@@ -209,7 +208,6 @@ def _farthest_point_sample(xyz, M):
 def initialize_graph_deformations(params, num_nodes=256, K=6, sigma_mult=0.5,
                                   use_fourier=True, M=2):
     """
-    Creates a deformation graph:
       - params['graph_nodes']      : [Gm,3]
       - params['graph_idx']        : [G,K] (long)  KNN node indices per Gaussian
       - params['graph_w']          : [G,K] weights per Gaussian (softmax of -dist^2/σ^2)
@@ -322,55 +320,11 @@ def ensure_binding_buffers(params, K: int | None = None, tag: str = ""):
     # print(f"[ensure_binding_buffers {tag}] gi={params['graph_idx'].dtype}, gw={params['graph_w'].dtype}")
     return params
 
-def rebind_graph(params, K=6, sigma_mult=0.5):
-    if 'graph_nodes' not in params or 'graph_idx' not in params:
-        return params  # nothing to do
-    means = params['means3D'].detach()
-    nodes = params['graph_nodes'].detach()
-    K = K or params['graph_idx'].shape[1]
 
-    d2 = torch.cdist(means, nodes, p=2.0) ** 2
-    knn_d2, knn_idx = torch.topk(d2, k=min(K, nodes.shape[0]), dim=1, largest=False)
+# removed: rebind_graph*
 
-    # recompute σ from nodes
-    nn_nodes = torch.topk(torch.cdist(nodes, nodes, p=2.0), k=2, dim=1, largest=False).values[:, 1]
-    sigma = (sigma_mult or 0.5) * torch.median(nn_nodes).clamp_min(1e-6)
 
-    w = torch.softmax(-knn_d2 / (sigma * sigma), dim=1)
-    params['graph_idx'] = knn_idx.to(torch.long)
-    params['graph_w']   = w.detach()
-    return params
-
-def rebind_graph_subset(params, inds, K=None, sigma_mult=None):
-    """
-    Recompute KNN graph bindings **only** for a subset of Gaussians (inds: 1D long Tensor).
-    Keeps the rest untouched. Useful right after densification.
-    """
-    params = ensure_binding_buffers(params, K=K, tag="rebind-entry")
-
-    if 'graph_nodes' not in params or 'graph_idx' not in params:
-        return params
-    if inds is None or len(inds) == 0:
-        return params
-
-    means = params['means3D'].detach()
-    nodes = params['graph_nodes'].detach()
-    K = K or params['graph_idx'].shape[1]
-
-    # distances from the subset to nodes
-    d2 = torch.cdist(means[inds], nodes, p=2.0) ** 2  # [|inds|, Gm]
-    knn_d2, knn_idx = torch.topk(d2, k=min(K, nodes.shape[0]), dim=1, largest=False)
-
-    # σ from node spacing (same recipe as init)
-    nn_nodes = torch.topk(torch.cdist(nodes, nodes, p=2.0), k=2, dim=1, largest=False).values[:, 1]
-    sigma = (sigma_mult or 0.5) * torch.median(nn_nodes).clamp_min(1e-6)
-    w = torch.softmax(-knn_d2 / (sigma * sigma), dim=1)
-
-    with torch.no_grad():
-        params['graph_idx'][inds] = knn_idx.to(torch.long)
-        params['graph_w'][inds]   = w.detach()
-    return params
-
+# removed: rebind_graph*
 
 def periodic_rebind_if_far(params, tau_mult=2.0, K=None, sigma_mult=None, stride_tag=None):
     """
@@ -443,7 +397,7 @@ def _graph_node_motion(params, dt, use_fourier=True):
     return R, t_i, logs
 
 
-def get_depth_and_silhouette(pts_3D, w2c):
+def get_depth_and_silhouette(pts_3D, w2c=None):
    
 
     # Convert to tensor, ensure float dtype
@@ -465,20 +419,25 @@ def get_depth_and_silhouette(pts_3D, w2c):
     elif pts_3D.dim() == 2 and pts_3D.size(-1) != 3:
         raise ValueError(f"get_depth_and_silhouette: expected last dim=3, got {pts_3D.shape}")
 
+    if w2c is None:
+        pts_cam = pts_3D  # already in camera space
+    else:
     # Ensure w2c is a proper [4,4] (pad if [3,4] or [3,3])
-    w2c = torch.as_tensor(w2c, dtype=pts_3D.dtype, device=pts_3D.device)
-    if w2c.shape == (3, 4):
-        w2c = torch.cat([w2c, torch.tensor([[0, 0, 0, 1.0]], dtype=w2c.dtype, device=w2c.device)], dim=0)
-    elif w2c.shape == (3, 3):
-        w2c = torch.cat([w2c, torch.zeros(1, 3, dtype=w2c.dtype, device=w2c.device)], dim=0)
-        w2c = torch.cat([w2c, torch.tensor([[0, 0, 0, 1.0]], dtype=w2c.dtype, device=w2c.device)], dim=1)
-    elif w2c.shape != (4, 4):
-        raise ValueError(f"get_depth_and_silhouette: unexpected w2c shape {w2c.shape}")
+        w2c = torch.as_tensor(w2c, dtype=pts_3D.dtype, device=pts_3D.device)
+        if w2c.shape == (3, 4):
+            w2c = torch.cat([w2c, torch.tensor([[0, 0, 0, 1.0]], dtype=w2c.dtype, device=w2c.device)], dim=0)
+        elif w2c.shape == (3, 3):
+            w2c = torch.cat([w2c, torch.zeros(1, 3, dtype=w2c.dtype, device=w2c.device)], dim=0)
+            w2c = torch.cat([w2c, torch.tensor([[0, 0, 0, 1.0]], dtype=w2c.dtype, device=w2c.device)], dim=1)
+        elif w2c.shape != (4, 4):
+            raise ValueError(f"get_depth_and_silhouette: unexpected w2c shape {w2c.shape}")
 
-    # Homogenize and transform
-    ones = torch.ones((pts_3D.shape[0], 1), dtype=pts_3D.dtype, device=pts_3D.device)
-    pts4 = torch.cat([pts_3D, ones], dim=-1)      # [N,4]
-    pts_cam = (w2c @ pts4.T).T                    # [N,4]
+        # Homogenize and transform
+        ones = torch.ones((pts_3D.shape[0], 1), dtype=pts_3D.dtype, device=pts_3D.device)
+        pts4 = torch.cat([pts_3D, ones], dim=-1)      # [N,4]
+        pts_cam = (w2c @ pts4.T).T                    # [N,4]
+
+
     depth_z = pts_cam[:, 2].unsqueeze(-1) # [num_gaussians, 1]
     depth_z_sq = torch.square(depth_z) # [num_gaussians, 1]
 
@@ -512,7 +471,7 @@ def transformed_params2depthplussilhouette(params, w2c, transformed_pts,local_ro
         # 'scales': torch.exp(torch.tile(params['log_scales'], (1, 3))),
         'means2D': torch.zeros_like(transformed_pts, requires_grad=True, device="cuda") + 0
     }
-    if local_scales.shape[0] == 1:
+    if local_scales.shape[1] == 1:
         rendervar['scales'] = torch.exp(torch.tile(local_scales, (1, 3)))
     else:
         rendervar['scales'] = torch.exp(local_scales)
@@ -704,7 +663,7 @@ def transformed_GRNparams2rendervar(params, transformed_pts,local_rots,local_sca
         # 'scales': torch.exp(torch.tile(params['log_scales'], (1, 3))),
         'means2D': torch.zeros_like(transformed_pts, requires_grad=True, device="cuda") + 0
     }
-    if local_scales.shape[0] == 1:
+    if local_scales.shape[1] == 1:
         rendervar['colors_precomp'] = local_colors
         rendervar['scales'] = torch.tile(local_scales, (1, 3))
         # print('using uniform scales')
@@ -741,7 +700,7 @@ def transformed_GRNparams2depthplussilhouette(params, w2c, transformed_pts,local
         # 'scales': torch.exp(torch.tile(params['log_scales'], (1, 3))),
         'means2D': torch.zeros_like(transformed_pts, requires_grad=True, device="cuda") + 0
     }
-    if local_scales.shape[0] == 1:
+    if local_scales.shape[1] == 1:
         rendervar['scales'] = torch.tile(local_scales, (1, 3))
     else:
         rendervar['scales'] = local_scales
@@ -818,20 +777,17 @@ def _qmul(q1, q2):
 
 def arap_loss_graph(params, base_nodes=None, arap_edges_k=6):
     """
-    ARAP on graph nodes: encourage local rigidity relative to rest graph.
     base_nodes: [Gm,3] rest positions (if None, use params['graph_nodes'].detach()).
     """
     if 'graph_nodes' not in params:
         return torch.tensor(0.0, device=params['means3D'].device)
 
-    # Rest graph
     x0 = (base_nodes if base_nodes is not None else params['graph_nodes'].detach())
     # Current deformed node positions at *current* dt :
     # Reuse the most recent dt you used in deform_gaussians; or keep a scalar in params['timestep'] if you prefer.
     # For a simple, time-agnostic ARAP, we use the current learned translation 'node_t0' only:
     x = x0 + params['node_t0']  # small, stable variant
 
-    # Build KNN on rest graph
     with torch.no_grad():
         d2 = torch.cdist(x0, x0, p=2.0)
         knn_idx = torch.topk(d2, k=min(arap_edges_k+1, x0.shape[0]), dim=1, largest=False).indices[:, 1:]  # drop self
@@ -848,7 +804,6 @@ def arap_loss_graph(params, base_nodes=None, arap_edges_k=6):
 def arap_loss(params):
     """
     Simple ARAP: keep node-to-node edge vectors approximately rigid over time.
-    Build a kNN on graph nodes (fixed), compare lengths after node motion vs. canonical.
     """
     
     nodes = params['graph_nodes']
@@ -866,190 +821,24 @@ def arap_loss(params):
     # encourage vR ≈ v
     return ((vR - v) ** 2).mean()
 
-def deform_gaussians(params, time, deform_grad, N=5, deformation_type='gaussian', temperature=0.5):
+
+def deform_gaussians(params, time, return_all=False, deformation_type='svf', **kwargs):
     """
-    Gaussian deformation:
-      - soft attention over basis functions (keeps gradients flowing)
-      - safe positive stds via softplus
-      - rotation update via quaternion multiplication (delta quat)
-      - scale updated additively in log domain
-    
+    SVF-only deformation.
     """
-    if deformation_type == 'gaussian':
-        # Pull tensors with/without grad
-        if deform_grad:
-            W = params['deform_weights']      # [G,B,10]
-            S_raw = params['deform_stds']     # [G,B,10]
-            C = params['deform_biases']       # [G,B,10]
-        else:
-            W = params['deform_weights'].detach()
-            S_raw = params['deform_stds'].detach()
-            C = params['deform_biases'].detach()
-
-        # Make sure 'time' is a tensor on the right device/dtype and broadcastable to C
-        t = torch.as_tensor(time, device=C.device, dtype=C.dtype)
-        while t.dim() < C.dim():
-            t = t.unsqueeze(0)  # expand to match [G,B,10] by broadcasting
-
-        # strictly positive bandwidths
-        S = F.softplus(S_raw) + 1e-3  # [G,B,10]
-
-        # attention-like weights across bases (dim=1)
-        # score = - (t - C)^2 / (2*S^2)
-        score = -((t - C) ** 2) / (2.0 * (S ** 2) + 1e-12)
-        attn = F.softmax(score / max(temperature, 1e-3), dim=1)  # sum_B(attn)=1
-
-        # Optional soft top-k: keep top-N mass but renormalize (still differentiable)
-        if N is not None and isinstance(N, int) and 0 < N < attn.shape[1]:
-            topv, topi = torch.topk(attn, k=N, dim=1)
-            m = torch.zeros_like(attn)
-            m.scatter_(1, topi, 1.0)
-            attn = attn * m
-            attn = attn / (attn.sum(dim=1, keepdim=True) + 1e-12)
-
-        # Weighted sum over bases -> per-gaussian deformation vector (10)
-        deform = torch.sum(attn * W, dim=1)  # [G,10]
-
-        # Split into xyz(3), rot_quat_delta(4), dlog_scales(3)
-        deform_xyz    = deform[:, 0:3]
-        deform_rot_q  = deform[:, 3:7]   # interpret as delta quaternion
-        deform_dlogS  = deform[:, 7:10]
-
-        # Apply updates
-        # positions
-        xyz = params['means3D'] + deform_xyz
-
-        # rotations: compose base quaternion with delta quaternion
-        base_q = F.normalize(params['unnorm_rotations'], dim=-1)      # [G,4]
-        dq = F.normalize(deform_rot_q, dim=-1)                         # [G,4]
-
-        # quaternion multiply: (base_q * dq)
-        w1, x1, y1, z1 = base_q.unbind(-1)
-        w2, x2, y2, z2 = dq.unbind(-1)
-        w = w1*w2 - x1*x2 - y1*y2 - z1*z2
-        x = w1*x2 + x1*w2 + y1*z2 - z1*y2
-        y = w1*y2 - x1*z2 + y1*w2 + z1*x2
-        z = w1*z2 + x1*y2 - y1*x2 + z1*w2
-        rots = torch.stack([w, x, y, z], dim=-1)
-        rots = F.normalize(rots, dim=-1)
-
-        # scales: additive in log-domain (stays positive after exp in renderer)
-        scales = params['log_scales'] + deform_dlogS
-
-        opacities = params['logit_opacities']
-        colors = params['rgb_colors']
-        return xyz, rots, scales, opacities, colors
-
-    elif deformation_type == 'graph':
-        """
-        Skin each Gaussian to K nearest graph nodes, transform by node motion (CA + optional Fourier),
-        then blend in Lie/log spaces.
-        """
-        
-        # dt in frames relative to 0 (if you keep absolute time indices)
-        dt = (time if torch.is_tensor(time) else torch.tensor(float(time), device=params['means3D'].device, dtype=params['means3D'].dtype)).float()
-        # node motions
-        use_fourier = ('fourier_xyz_cos' in params)
-        R_i, t_i, logs_i = _graph_node_motion(params, dt, use_fourier=use_fourier)   # [Gm,3,3], [Gm,3], [Gm,3]
-
-        x = params['means3D']                      # [G,3]
-
-        
-        device = x.device
-        idx = params['graph_idx'].to(dtype=torch.long, device=device)   # must be long on same device
-        nodes = params['graph_nodes'].to(device=device)
-        w = params['graph_w'].to(device=device)
-
-        # now safe to index
-        n_ik    = nodes[idx]           # [G,K,3]
-        t_ik    = t_i[idx]             # [G,K,3]
-        R_ik    = R_i[idx]             # [G,K,3,3]
-        logs_ik = logs_i[idx]          # [G,K,3]
-
-        # center-relative, rotate, then uncenter and translate:
-        # x'_k = R_i(t)*(x - n_i) + n_i + t_i(t)
-        x_rel = (x.unsqueeze(1) - n_ik)                         # [G,K,3]
-        x_def = (R_ik @ x_rel.unsqueeze(-1)).squeeze(-1) + n_ik + t_ik
-        x_out = (w.unsqueeze(-1) * x_def).sum(dim=1)            # [G,3]
-
-        # rotation: blend axis-angle from node rotations (small-angle OK). We reuse node ang_i used inside _graph_node_motion
-        # For stability, compute ang_i again to avoid storing; tiny overhead.
-        # If you prefer, store the ang_i in _graph_node_motion and return it.
-        # Here: approximate Gaussian rotation as identity (or keep original) — optional:
-        rots_out = params['unnorm_rotations']  # keep original per-Gaussian orientation; advanced: blend node rotvecs.
-
-        # scales: blend log-scales
-        logs_g = (w.unsqueeze(-1) * logs_ik).sum(dim=1)         # [G,3]
-        scales_out = params['log_scales'] + logs_g              # add on top of per-Gaussian log-scales (optional)
-
-        opacities = params['logit_opacities']
-        colors    = params['rgb_colors']
-        return x_out, rots_out, scales_out, opacities, colors
-
-    elif deformation_type == 'simple':
-
-        xyz = params['means3D']
-        rots = params['unnorm_rotations']
-        scales = params['log_scales']
-        opacities = params['logit_opacities']
-        colors = params['rgb_colors']
-        return xyz, rots, scales, opacities, colors
-
-    elif deformation_type == 'cv':  # constant velocity (add 'ca' with t^2 terms if desired)
-        t = torch.as_tensor(time, device=params['means3D'].device, dtype=params['means3D'].dtype).view(-1,1)
-        v_xyz  = params['cv_vel_xyz']          # [G,3]
-        v_lsg  = params['cv_vel_log_scales']   # [G,3]
-        w_aa   = params['cv_angvel_aa']        # [G,3]
-
-        xyz = params['means3D'] + v_xyz * t
-        base_q = F.normalize(params['unnorm_rotations'], dim=-1)
-        dq = _aa_to_quat(w_aa * t)
-        rots = F.normalize(_qmul(base_q, dq), dim=-1)
-        scales = params['log_scales'] + v_lsg * t
-
-        opacities = params['logit_opacities']; colors = params['rgb_colors']
-        return xyz, rots, scales, opacities, colors
-
-def initialize_cv_deformations(params):
-    """Adds per-Gaussian constant-velocity params (very memory efficient)."""
-    G      = params['means3D'].shape[0]
-    device = params['means3D'].device
-    zeros3 = torch.zeros(G, 3, device=device)
-
-    params['cv_vel_xyz']        = torch.nn.Parameter(zeros3.clone(), requires_grad=True)
-    params['cv_vel_log_scales'] = torch.nn.Parameter(zeros3.clone(), requires_grad=True)
-    params['cv_angvel_aa']      = torch.nn.Parameter(zeros3.clone(), requires_grad=True)
-    return params
+    n_squarings = int(params.get('svf_n_squarings', 8)) if isinstance(params, dict) else 8
+    local_means = apply_svf(params, time, n_squarings=8)
+    local_rots = params['unnorm_rotations']
+    local_scales = params['log_scales']
+    local_opacities = params['logit_opacities']
+    local_colors = params['rgb_colors']
+    if return_all:
+        return local_means, local_rots, local_scales, local_opacities, local_colors
+    return local_means, local_rots, local_scales, local_opacities, local_colors
 
 
-def initialize_deformations(params, nr_basis, use_distributed_biases, total_timescale=None):
-    """Initialize Gaussian-basis deformation parameters (lean on memory)."""
-    N = params['means3D'].shape[0]
-    device = 'cuda'
+# removed: initialize_cv_deformations
 
-    # weights/stds need grads; biases often don't
-    weights = torch.randn([N, nr_basis, 10], device=device, dtype=torch.float16) * 0.0
-    stds    = torch.ones([N, nr_basis, 10],  device=device, dtype=torch.float16) / 0.1
-
-    weights = torch.nn.Parameter(weights, requires_grad=True)
-    stds    = torch.nn.Parameter(stds,    requires_grad=True)
-
-    if not use_distributed_biases:
-        biases = torch.randn([N, nr_basis, 10], device=device, dtype=torch.float16) * 0.0
-        biases = torch.nn.Parameter(biases, requires_grad=True)
-    else:
-        # evenly distributed biases across the timespan; no need to backprop through these
-        interval = torch.ceil(torch.tensor(total_timescale / nr_basis, device=device))
-        arange   = torch.arange(0, total_timescale, interval, device=device).unsqueeze(0).unsqueeze(-1)
-        biases   = torch.tile(arange, (N, 1, 10)).to(dtype=torch.float16)
-        # keep as plain Tensor (no grad buffers)
-        # if your code expects Parameter type, you can still wrap with requires_grad=False
-        biases   = torch.nn.Parameter(biases, requires_grad=False)
-
-    params['deform_weights'] = weights
-    params['deform_stds']    = stds
-    params['deform_biases']  = biases
-    return params
 
 
 def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis = 10,use_distributed_biases = False, total_timescale = None,use_deform = True,deform_type = 'gaussian',num_frames = 1,
@@ -1083,9 +872,7 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis
         params = initialize_deformations(params, nr_basis=nr_basis,
                                      use_distributed_biases=use_distributed_biases,
                                      total_timescale=total_timescale)
-    elif use_deform and deform_type == 'cv':
         params = initialize_cv_deformations(params)
-    elif use_deform and deform_type == 'graph':
         params = initialize_graph_deformations(params=params)
     if not use_simplification:
         params['feature_rest'] = torch.zeros(num_pts, 45) # set SH degree 3 fixed
@@ -1293,6 +1080,12 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
             params_iter[k] = torch.nn.Parameter(torch.cat((params[k], v), dim=0).requires_grad_(True))
         params_iter['cam_unnorm_rots'] = params['cam_unnorm_rots']
         params_iter['cam_trans'] = params['cam_trans']
+        params_iter['svf'] = params['svf']
+        params_iter['svf_aabb_center'] = params['svf_aabb_center']
+        params_iter['svf_aabb_half'] = params['svf_aabb_half']
+        params_iter['svf_L0'] = params['svf_L0']
+        params_iter['svf_L1'] = params['svf_L1']
+        params_iter['svf_n_squarings'] = params['svf_n_squarings']
         num_pts = params_iter['means3D'].shape[0]
         variables['means2D_gradient_accum'] = torch.zeros(num_pts, device="cuda").float()
         variables['denom'] = torch.zeros(num_pts, device="cuda").float()
@@ -1356,3 +1149,145 @@ def align_shift_and_scale(gt_disp, pred_disp,mask):
     return  gt_disp_aligned, pred_disp_aligned,t_gt, s_gt, t_pred, s_pred
 
     """
+
+# ========================= SVF (Stationary Velocity Field) Deformer =========================
+class SVFDeformer(torch.nn.Module):
+    """
+    Multi-level stationary velocity field over an AABB. Each level is a 3D grid (C=3).
+    Coordinates are mapped from world space to [-1,1]^3 using params['svf_aabb'] = (center[3], half[3]).
+    """
+    def __init__(self, levels=(32, 64)):
+        super().__init__()
+        self.levels = list(levels)
+        # Create learnable velocity fields per level: [1,3,D,H,W]
+        fields = []
+        for i, d in enumerate(self.levels):
+            p = torch.nn.Parameter(torch.zeros(1, 3, d, d, d, dtype=torch.float32))
+            self.register_parameter(f"svf_L{i}", p)
+            fields.append(p)
+        self._fields = fields  # keep refs for iteration
+
+    def iter_fields(self):
+        for i, _ in enumerate(self.levels):
+            yield getattr(self, f"svf_L{i}")
+
+    def forward(self, x_world, center, half):
+        """
+        x_world: [G,3] world coordinates
+        center: [3], half: [3] defining the AABB
+        returns v(x): [G,3]
+        """
+        # normalize to [-1,1]
+        x = (x_world - center[None, :]) / (half[None, :] + 1e-8)
+        x = torch.clamp(x, -1.5, 1.5)  # allow mild extrapolation
+        # Sample each level with grid_sample; build a fake "volume" of points
+        pts = x.view(1, 1, x.shape[0], 1, 3)  # [N=1, D'=1, H'=G, W'=1, 3]
+        v = 0.0
+        for F_l in self.iter_fields():
+            v_l = torch.nn.functional.grid_sample(
+                F_l, pts, mode="bilinear", padding_mode="border", align_corners=True
+            )  # [1,3,1,G,1]
+            v_l = v_l.view(3, x.shape[0]).T  # [G,3]
+            v = v + v_l
+        return v
+
+def initialize_svf(params, levels=(32,64)):
+    """
+    Create an SVFDeformer and attach params:
+      - params['svf'] = SVFDeformer(levels)
+      - params['svf_aabb_center'], params['svf_aabb_half']
+      - Also expose each level tensor as a top-level param 'svf_L{i}' so your existing optimizer picks it up.
+    """
+    
+    means = params['means3D'].detach()
+    center = means.mean(0)
+    span = means.max(0).values - means.min(0).values
+    half = span.clamp(min=1e-2) * 0.75  # slightly inside the current spread
+
+    svf = SVFDeformer(levels=levels).to(means.device)
+    params['svf'] = svf
+    params['svf_aabb_center'] = torch.nn.Parameter(center.clone(), requires_grad=False)
+    params['svf_aabb_half'] = torch.nn.Parameter(half.clone(), requires_grad=False)
+    # expose fields at top-level for optimizer lr mapping
+    for i, F_l in enumerate(svf.iter_fields()):
+        params[f'svf_L{i}'] = F_l
+    # optional: number of squarings
+    if 'svf_n_squarings' not in params:
+        params['svf_n_squarings'] = 8
+    return params
+
+@torch.no_grad()
+def update_svf_aabb(params, momentum=0.05):
+    """Slowly update the SVF AABB to follow the cloud without jitter."""
+    means = params['means3D'].detach()
+    center = means.mean(0)
+    span = means.max(0).values - means.min(0).values
+    half = span.clamp(min=1e-2) * 0.75
+    # EMA
+    params['svf_aabb_center'].data = (1 - momentum) * params['svf_aabb_center'].data + momentum * center
+    params['svf_aabb_half'].data   = (1 - momentum) * params['svf_aabb_half'].data   + momentum * half
+
+def apply_svf(params, time_idx=None, n_squarings=8):
+    """
+    Stationary velocity field integration (scaling-and-squaring style Euler).
+    Deforms Gaussian means in *world* coordinates. Other attributes unchanged.
+
+    Tunables (optional, set in params):
+      - params['svf_scale']           : float factor to amplify the velocity (default 3.0)
+      - params['svf_n_squarings']     : int number of squarings / Euler refinements (default 8)
+      - params['svf_step_clip_ratio'] : max per-step |u| as a fraction of AABB half extent (default 0.05)
+    """
+    assert 'svf' in params, "SVF not initialized. Call initialize_svf."
+
+    # --- read hyperparams from params when available
+    # n_squarings may be stored as tensor; make it a python int
+    if 'svf_n_squarings' in params:
+        try:
+            n_squarings = int(params['svf_n_squarings'])
+        except Exception:
+            n_squarings = int(getattr(params['svf_n_squarings'], 'item', lambda: 8)())
+    svf_scale = float(3.0)
+    step_clip_ratio = float(0.05)  # 5% of box size per substep
+
+    x0     = params['means3D']                      # (N,3) world coords
+    center = params['svf_aabb_center']              # (3,)
+    half   = params['svf_aabb_half']                # (3,)
+
+    # size-based clip to avoid folding; scalar in world units
+    # (use largest half-extent so it's safe in all axes)
+    step_clip = step_clip_ratio * torch.as_tensor(half, device=x0.device, dtype=x0.dtype).abs().max()
+
+    # scale per substep (classic scaling-and-squaring)
+    substep_scale = svf_scale / (2.0 ** n_squarings)
+
+    # first substep
+    u = params['svf'](x0, center, half) * substep_scale
+    if step_clip > 0:
+        u = u.clamp(min=-step_clip, max=step_clip)
+    y = x0 + u
+
+    # refine with additional squarings (Euler composition)
+    for _ in range(n_squarings):
+        u = params['svf'](y, center, half) * substep_scale
+        if step_clip > 0:
+            u = u.clamp(min=-step_clip, max=step_clip)
+        y = y + u
+
+    return y
+
+def svf_bending_loss(params):
+    """
+    Bending energy ||∇v||^2 over all levels.
+    """
+    if 'svf' not in params:
+        return torch.tensor(0.0, device=params['means3D'].device if 'means3D' in params else 'cpu')
+
+    loss = 0.0
+    for p in params['svf'].iter_fields():
+        # finite diffs
+        dx = (p[:, :, 1:, :, :] - p[:, :, :-1, :, :]).pow(2).mean()
+        dy = (p[:, :, :, 1:, :] - p[:, :, :, :-1, :]).pow(2).mean()
+        dz = (p[:, :, :, :, 1:] - p[:, :, :, :, :-1]).pow(2).mean()
+        loss = loss + (dx + dy + dz)
+    return loss
+# ============================================================================================
