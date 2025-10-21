@@ -37,7 +37,8 @@ from utils.slam_helpers import (
     transform_to_frame, l1_loss_v1, matrix_to_quaternion,
     transformed_GRNparams2depthplussilhouette,transformed_GRNparams2rendervar,
     add_new_gaussians,grn_initialization,deform_gaussians,initialize_deformations,initialize_new_params,grn_initialization,
-    get_mask,align_shift_and_scale, initialize_cv_deformations, initialize_xyzt, xyzt_time_gate, apply_xyzt_gate, initialize_graph_deformations, arap_loss, arap_loss_graph
+    get_mask,align_shift_and_scale, initialize_cv_deformations, initialize_xyzt, xyzt_time_gate, apply_xyzt_gate, initialize_graph_deformations, arap_loss, arap_loss_graph,
+    rebind_graph_subset, periodic_rebind_if_far, rebind_graph, ensure_binding_buffers
 )
 from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, densify
 from utils.vis_utils import plot_video
@@ -142,6 +143,8 @@ class DecoderBlock(nn.Module):
         
         x = torch.cat([x, skip], axis=1)
         return self.conv(x)
+
+
 
 def get_dataset(config_dict, basedir, sequence, **kwargs):
     if config_dict["dataset_name"].lower() in ["endoslam_unity"]:
@@ -438,12 +441,7 @@ def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True,
 
 #     return xyz, rots, scales,opacities, colors
 
-def to01(t):
-    t = t.permute(2, 0, 1).float()
-    # only divide if data is 0..255
-    if t.max() > 1.5:
-        t = t / 255.0
-    return t.clamp_(0, 1)
+
 
 def initialize_simple_deformations(params, num_frames):
     '''
@@ -458,6 +456,14 @@ def initialize_simple_deformations(params, num_frames):
 
 
     return params
+
+def _to_tensor(v, device):
+    if isinstance(v, torch.Tensor):
+        return v.to(device)
+    if isinstance(v, np.ndarray):
+        return torch.from_numpy(v).to(device)
+    # fallback for lists / scalars
+    return torch.tensor(v, device=device)
 
 def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification=True,use_deforms = True,deform_type = 'gaussian',nr_basis = 10,use_distributed_biases = False,total_timescale = None,cam = None,random_initialization = False,init_scale = 0.1, 
                         graph_conf = {'num_nodes':   256, 'K': 6,'sigma_mult':  0.5, 'use_fourier': True, 'M':  2}):
@@ -504,6 +510,7 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification
                                                   use_fourier=graph_conf['use_fourier'],
                                                   M=graph_conf['M'])
 
+    params = ensure_binding_buffers(params, K=graph_conf['K'], tag="post-init")
             
             
  
@@ -515,12 +522,24 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification
 
 
         
-    for k, v in params.items():
-        # Check if value is already a torch tensor
-        if not isinstance(v, torch.Tensor):
-            params[k] = torch.nn.Parameter(torch.tensor(v).cuda().float().contiguous().requires_grad_(True))
-        else:
-            params[k] = torch.nn.Parameter(v.cuda().float().contiguous().requires_grad_(True))
+    device = init_pt_cld.device if isinstance(init_pt_cld, torch.Tensor) else (
+    torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
+
+
+    for k, v in list(params.items()):
+        v = _to_tensor(v, device)
+
+        if k == 'graph_idx':
+            params[k] = v.to(torch.long).contiguous()      # keep as long tensor (no grad)
+            continue
+        if k == 'graph_w':
+            params[k] = v.to(torch.float32).contiguous()   # keep as float tensor (no grad)
+            continue
+
+        # all others: learnable float parameters
+        params[k] = torch.nn.Parameter(
+            v.to(torch.float32).contiguous().requires_grad_(True)
+        )
 
     variables = {'max_2D_radius': torch.zeros(params['means3D'].shape[0]).cuda().float(),
                  'means2D_gradient_accum': torch.zeros(params['means3D'].shape[0]).cuda().float(),
@@ -744,7 +763,7 @@ def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_rad
 def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_weights, use_sil_for_loss, 
              sil_thres, use_l1,ignore_outlier_depth_loss, tracking=False, 
              mapping=False, do_ba=False, plot_dir=None, visualize_tracking_loss=False, tracking_iteration=None,use_gt_depth = True,gaussian_deformations = True,save_idx=0,
-             use_grn = False,deformation_type = 'gaussian'):
+             use_grn = False,deformation_type = 'gaussian', gate_thresh = 0.35):
 
     global w2cs, w2ci
     # Initialize Loss Dictionary
@@ -836,7 +855,7 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
     if 't_mu' in params:    
         gt = xyzt_time_gate(params, float(iter_time_idx))     # time index of this frame
         rendervar = apply_xyzt_gate(
-            rendervar, gt, gate_thresh=0.35)
+            rendervar, gt, gate_thresh=gate_thresh)
         
 
     # RGB Rendering
@@ -972,11 +991,11 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
         nr_gauss = min(nr_initial_gauss,nr_current_gauss)
         losses['deform'] = torch.sum(torch.square(params_initial['means3D'][:nr_gauss]-local_means[:nr_gauss]))/nr_gauss
     elif tracking and gaussian_deformations and deformation_type == 'graph':
-        w = 1e-3
+        w = 3e-3
         if w > 0.0 and 'graph_nodes' in params:
             arap = arap_loss_graph(params, arap_edges_k=6)
            
-            losses['arap'] = float(arap.detach())
+            losses['arap'] = arap
 
    
 
@@ -1187,7 +1206,7 @@ def optimize_initialization(params,params_init,curr_data,num_iters_initializatio
                     config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True,
                     visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
                     tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=None,gaussian_deformations=config['deforms']['use_deformations'],
-                    use_grn = config['GRN']['use_grn'],deformation_type = config['deforms']['deform_type'])
+                    use_grn = config['GRN']['use_grn'],deformation_type = config['deforms']['deform_type'], gate_thresh = config['deforms']['xyzt_gate_thresh'])
         loss.backward()
         optimizer.step()
         _clamp_cv_deform(params)
@@ -1847,6 +1866,7 @@ def rgbd_slam(config: dict):
             if time_idx == 0 or (time_idx+1) % config['map_every'] == 0:
                 # Densification
                 if config['mapping']['add_new_gaussians'] and time_idx > 0:
+                    G0 = params_iter['means3D'].shape[0]
                     # Setup Data for Densification
                     if seperate_densification_res:
                         # Load RGBD frames incrementally instead of all frames
@@ -1881,6 +1901,31 @@ def rgbd_slam(config: dict):
                                                         reduction_type = config['gaussian_reduction']['reduction_type'],
                                                         reduction_fraction=config['gaussian_reduction']['reduction_fraction'] )                     # if config['GRN']['random_initialization']:
 
+                    if config['deforms']['use_deformations'] and config['deforms']['deform_type'] == 'graph':
+                        G1 = params_iter['means3D'].shape[0]
+                        if G1 > G0:
+                            new_inds = torch.arange(G0, G1, device=params_iter['means3D'].device)
+                            K = config['deforms'].get('graph_conf', {}).get('K', 6)
+                            if 'graph_idx' in params_iter:
+                                if params_iter['graph_idx'].shape[0] < G1:
+                                    pad = G1 - params_iter['graph_idx'].shape[0]
+                                    params_iter['graph_idx'] = torch.cat(
+                                        [params_iter['graph_idx'],
+                                        torch.zeros(pad, K, device=params_iter['graph_idx'].device, dtype=torch.long)],
+                                        dim=0
+                                    )
+                                    params_iter['graph_w'] = torch.cat(
+                                        [params_iter['graph_w'],
+                                        torch.zeros(pad, K, device=params_iter['graph_w'].device, dtype=params_iter['graph_w'].dtype)],
+                                        dim=0
+                                    )
+                            graph_conf = config['deforms'].get('graph_conf', {'K': 6, 'sigma_mult': 0.5})
+                            params_iter = ensure_binding_buffers(params_iter, K=graph_conf.get('K', 6), tag=f"pre-rebind@frame{time_idx}")
+                            params_iter = rebind_graph_subset(
+                                params_iter, new_inds,
+                                K=graph_conf.get('K', 6),
+                                sigma_mult=graph_conf.get('sigma_mult', 0.5)
+                            )
                     post_num_pts = params_iter['means3D'].shape[0]-params_init['means3D'].shape[0]
                     added_new_gaussians.append(post_num_pts)
                     densification_end_time = time.time()
@@ -2012,7 +2057,18 @@ def rgbd_slam(config: dict):
                         ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
                         save_params_ckpt(params_iter, ckpt_output_dir, time_idx)
                         print('Failed to evaluate trajectory.')
-            
+
+                if config['deforms']['use_deformations'] and config['deforms']['deform_type'] == 'graph':
+                    stride = config['deforms'].get('rebind_stride', 10)
+                    if (time_idx % stride) == 0:
+                        graph_conf = config['deforms'].get('graph_conf', {'K': 6, 'sigma_mult': 0.5})
+                        params_iter = periodic_rebind_if_far(
+                            params_iter,
+                            tau_mult=config['deforms'].get('rebind_tau_mult', 2.5),
+                            K=graph_conf.get('K', 8),                 # K=8 is usually more stable than 6
+                            sigma_mult=graph_conf.get('sigma_mult', 0.8),
+                            stride_tag=time_idx
+        )
             # timer.lap('Mapping Done.', 4)
 
 

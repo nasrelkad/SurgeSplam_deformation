@@ -8,6 +8,8 @@ import numpy as np
 import cv2
 import math
 from utils.slam_external import build_rotation
+from torch import nn
+
 def l1_loss_v1(x, y):
     return torch.abs((x - y)).mean()
 
@@ -269,6 +271,57 @@ def initialize_graph_deformations(params, num_nodes=256, K=6, sigma_mult=0.5,
         params['timestep'] = torch.zeros(G, device=means.device)
     return params
 
+def ensure_binding_buffers(params, K: int | None = None, tag: str = ""):
+    """
+    Force params['graph_idx'] to Long, params['graph_w'] to Float32 (no grad),
+    grow rows to match means3D, and fix column count to K if provided.
+    Safe to call anytime. Leaves other tensors unchanged.
+    """
+    if 'graph_idx' not in params or 'graph_w' not in params or 'means3D' not in params:
+        return params
+
+    device = params['means3D'].device
+    with torch.no_grad():
+        gi = params['graph_idx']
+        gw = params['graph_w']
+
+        # strip Parameter wrappers
+        if isinstance(gi, nn.Parameter): gi = gi.detach()
+        if isinstance(gw, nn.Parameter): gw = gw.detach()
+
+        # coerce dtypes/devices
+        if gi.dtype != torch.long:       gi = gi.to(torch.long)
+        if gi.device != device:          gi = gi.to(device)
+        if gw.dtype != torch.float32:    gw = gw.to(torch.float32)
+        if gw.device != device:          gw = gw.to(device)
+        gi = gi.contiguous(); gw = gw.contiguous()
+
+        # grow rows to match number of gaussians
+        G = int(params['means3D'].shape[0])
+        curG, curK = gi.shape
+        need = G - curG
+        if need > 0:
+            padK = curK if K is None else int(K)
+            gi = torch.cat([gi, torch.zeros(need, padK, dtype=torch.long, device=device)], dim=0)
+            gw = torch.cat([gw, torch.zeros(need, padK, dtype=torch.float32, device=device)], dim=0)
+
+        # fix K (columns) if requested
+        if K is not None and gi.shape[1] != int(K):
+            newK = int(K)
+            new_gi = torch.zeros(G, newK, dtype=torch.long, device=device)
+            new_gw = torch.zeros(G, newK, dtype=torch.float32, device=device)
+            common = min(gi.shape[1], newK)
+            new_gi[:, :common] = gi[:G, :common]
+            new_gw[:, :common] = gw[:G, :common]
+            gi, gw = new_gi, new_gw
+
+        params['graph_idx'] = gi
+        params['graph_w']   = gw
+
+    # optional probe
+    # print(f"[ensure_binding_buffers {tag}] gi={params['graph_idx'].dtype}, gw={params['graph_w'].dtype}")
+    return params
+
 def rebind_graph(params, K=6, sigma_mult=0.5):
     if 'graph_nodes' not in params or 'graph_idx' not in params:
         return params  # nothing to do
@@ -287,6 +340,66 @@ def rebind_graph(params, K=6, sigma_mult=0.5):
     params['graph_idx'] = knn_idx.to(torch.long)
     params['graph_w']   = w.detach()
     return params
+
+def rebind_graph_subset(params, inds, K=None, sigma_mult=None):
+    """
+    Recompute KNN graph bindings **only** for a subset of Gaussians (inds: 1D long Tensor).
+    Keeps the rest untouched. Useful right after densification.
+    """
+    params = ensure_binding_buffers(params, K=K, tag="rebind-entry")
+
+    if 'graph_nodes' not in params or 'graph_idx' not in params:
+        return params
+    if inds is None or len(inds) == 0:
+        return params
+
+    means = params['means3D'].detach()
+    nodes = params['graph_nodes'].detach()
+    K = K or params['graph_idx'].shape[1]
+
+    # distances from the subset to nodes
+    d2 = torch.cdist(means[inds], nodes, p=2.0) ** 2  # [|inds|, Gm]
+    knn_d2, knn_idx = torch.topk(d2, k=min(K, nodes.shape[0]), dim=1, largest=False)
+
+    # σ from node spacing (same recipe as init)
+    nn_nodes = torch.topk(torch.cdist(nodes, nodes, p=2.0), k=2, dim=1, largest=False).values[:, 1]
+    sigma = (sigma_mult or 0.5) * torch.median(nn_nodes).clamp_min(1e-6)
+    w = torch.softmax(-knn_d2 / (sigma * sigma), dim=1)
+
+    with torch.no_grad():
+        params['graph_idx'][inds] = knn_idx.to(torch.long)
+        params['graph_w'][inds]   = w.detach()
+    return params
+
+
+def periodic_rebind_if_far(params, tau_mult=2.0, K=None, sigma_mult=None, stride_tag=None):
+    """
+    Cheap coverage check: if a Gaussian is far from its current node barycenter,
+    rebind it. tau = tau_mult * median node spacing.
+    Optional stride_tag lets you call this every N frames w/o extra state.
+    """
+    if 'graph_nodes' not in params or 'graph_idx' not in params or 'graph_w' not in params:
+        return params
+
+    means = params['means3D'].detach()          # [G,3]
+    nodes = params['graph_nodes'].detach()      # [Gm,3]
+    gi = params['graph_idx']                    # [G,K]
+    gw = params['graph_w']                      # [G,K]
+
+    # barycenter of current bindings
+    bary = (nodes[gi] * gw[..., None]).sum(dim=1)   # [G,3]
+    d = torch.norm(means - bary, dim=-1)            # [G]
+
+    # node spacing → tau
+    nn_nodes = torch.topk(torch.cdist(nodes, nodes, p=2.0), k=2, dim=1, largest=False).values[:, 1]
+    sigma = torch.median(nn_nodes).clamp_min(1e-6)
+    tau = tau_mult * sigma
+
+    to_fix = (d > tau).nonzero().flatten()
+    if to_fix.numel() > 0:
+        rebind_graph_subset(params, to_fix, K=K, sigma_mult=sigma_mult)
+    return params
+
 
 def _graph_node_motion(params, dt, use_fourier=True):
     """

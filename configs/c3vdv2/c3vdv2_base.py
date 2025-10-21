@@ -18,7 +18,7 @@ keyframe_every = 8
 # mapping_window_size = 24
 tracking_iters = 20
 mapping_iters = 20
-frames = 60 # adjust untill which frame
+frames = 49 # adjust untill which frame
 group_name = "C3VDv2_base"
 run_name = scene_name
 
@@ -74,9 +74,11 @@ config = dict(
         sigma_mult = 0.5,  # σ ≈ 0.5 * median node spacing
         use_fourier = True,
         M = 2,   ),          # 2–4 Fourier modes per node is enough
+        rebind_stride = 10,
+        rebind_tau_mult = 2.5,
         xyzt_init_sigma=30,
         use_distributed_biases = True,
-        xyzt_gate_thresh=0.0,
+        xyzt_gate_thresh=0.35,
         total_timescale = 50,
         max_vel_xyz=0.01,         # scene units / frame (tight)
         max_ang_vel=0.016,         # rad / frame (~8.6°/frame)
@@ -127,7 +129,7 @@ config = dict(
             fourier_ang_sin=  0.00002,
             fourier_s_cos=    0.00002,
             fourier_s_sin=    0.00002,
-            arap=1e-3,
+            arap=5e-3,
         ),
         # grn_hidden_dim = 128,
         # grn_out_dim = 3,
@@ -147,7 +149,7 @@ config = dict(
             im=0.5,
             depth=0.5,
             deform = 0.0,
-            arap=1e-3,         # graph rigidity
+            arap=5e-3,         # graph rigidity
             node_vel_l2=1e-4,
             node_acc_l2=1e-5,  # CA regularizer
             fourier_l2=1e-5,
@@ -202,7 +204,7 @@ config = dict(
             im=1.0,
             depth=0.5,
             deform = 0.0,
-            arap=1e-3, node_vel_l2=1e-4, node_acc_l2=1e-5, fourier_l2=1e-5
+            arap=5e-3, node_vel_l2=1e-4, node_acc_l2=1e-5, fourier_l2=1e-5
         ),
         lrs=dict(
             means3D=0.0001,
@@ -233,7 +235,7 @@ config = dict(
             fourier_ang_sin=  0.00002,
             fourier_s_cos=    0.00002,
             fourier_s_sin=    0.00002,
-            arap=1e-3,
+            arap=5e-3,
         ),
         prune_gaussians=True, # Prune Gaussians during Mapping
         pruning_dict=dict( # Needs to be updated based on the number of mapping iterations
