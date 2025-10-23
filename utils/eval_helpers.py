@@ -9,8 +9,18 @@ import matplotlib.pyplot as plt
 from datasets.gradslam_datasets.geometryutils import relative_transformation
 from utils.recon_helpers import setup_camera, energy_mask
 from utils.slam_external import build_rotation,calc_psnr
-from utils.slam_helpers import (transform_to_frame, transform_to_frame_eval, transformed_params2rendervar, transformed_params2depthplussilhouette,
-      transformed_GRNparams2rendervar,transformed_GRNparams2depthplussilhouette,align_shift_and_scale, deform_gaussians, apply_svf  )
+from utils.slam_helpers import (
+    transform_to_frame,
+    transform_to_frame_eval,
+    transformed_params2rendervar,
+    transformed_params2depthplussilhouette,
+    transformed_GRNparams2rendervar,
+    transformed_GRNparams2depthplussilhouette,
+    align_shift_and_scale,
+    deform_gaussians,
+    apply_mlp_deformation,
+    maybe_rebuild_mlp,
+)
 
 
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
@@ -24,41 +34,31 @@ def _locals_from_params(params, t, use_deform=True, deformation_type='svf', n_sq
     """
     Returns per-frame gaussian attributes at time index t:
       local_means, local_rots, local_scales, local_opacities, local_colors
-
-    If use_deform and deformation_type == 'svf', we call your SVF path.
-    Otherwise we slice the static/time-stacked tensors.
     """
-    if use_deform and (deformation_type == 'svf'):
-        # Prefer centralized entrypoint
-        try:
-            # Newer deform_gaussians supports deformation_type='svf' (and sometimes n_squarings)
-            try:
-                return deform_gaussians(params, t, False, deformation_type='svf', n_squarings=n_squarings)
-            except TypeError:
-                # Older signature without n_squarings
-                return deform_gaussians(params, t, False, deformation_type='svf')
-        except Exception:
-            # Fallback to direct SVF if you exported it
-            if apply_svf is None:
-                raise
-            local_means = apply_svf(params, t, n_squarings=n_squarings)
-            # For SVF we usually keep rots/scales/opacities/colors unchanged per t
-            def _pick(x):
-                return x[..., t] if hasattr(x, "dim") and x.dim() == 3 else x
-            local_rots      = _pick(params['unnorm_rotations'])
-            local_scales    = _pick(params['log_scales'])
-            local_opacities = _pick(params['logit_opacities'])
-            local_colors    = _pick(params['rgb_colors'])
-            return local_means, local_rots, local_scales, local_opacities, local_colors
+    deform_mode = params.get('_deform_type', deformation_type).lower()
+    if use_deform and deform_mode == 'mlp' and 'mlp_deformer' in params:
+        local_means = apply_mlp_deformation(params, t, allow_gaussian_grad=False)
+        return (
+            local_means,
+            params['unnorm_rotations'],
+            params['log_scales'],
+            params['logit_opacities'],
+            params['rgb_colors'],
+        )
 
-    # ---------- No deformation path ----------
+    if use_deform and deform_mode == 'svf' and 'svf' in params:
+        try:
+            return deform_gaussians(params, t, False, deformation_type='svf', n_squarings=n_squarings)
+        except TypeError:
+            return deform_gaussians(params, t, False, deformation_type='svf')
+
     def _pick(x):
         return x[..., t] if hasattr(x, "dim") and x.dim() == 3 else x
-    local_means     = _pick(params['means3D'])
-    local_rots      = _pick(params['unnorm_rotations'])
-    local_scales    = _pick(params['log_scales'])
+    local_means = _pick(params['means3D'])
+    local_rots = _pick(params['unnorm_rotations'])
+    local_scales = _pick(params['log_scales'])
     local_opacities = _pick(params['logit_opacities'])
-    local_colors    = _pick(params['rgb_colors'])
+    local_colors = _pick(params['rgb_colors'])
     return local_means, local_rots, local_scales, local_opacities, local_colors
 
 def align(model, data):
@@ -130,42 +130,46 @@ def align(model, data):
 #     gt_disp_aligned = gt_disp_aligned.view(gt_disp.shape[0],gt_disp.shape[1],gt_disp.shape[2])
 #     return  gt_disp_aligned, pred_disp_aligned,t_gt, s_gt, t_pred, s_pred
 
-def evaluate_ate(gt_traj, est_traj, plot_traj = False):
+def evaluate_ate(gt_traj, est_traj, plot_traj=False, save_path=None, title="Camera Trajectory"):
     """
-    Input : 
-        gt_traj: list of 4x4 matrices 
-        est_traj: list of 4x4 matrices
-        len(gt_traj) == len(est_traj)
+    Compute ATE RMSE between two trajectories (lists of 4x4 poses).
+    Optionally plot the aligned trajectories in 3D.
     """
-    gt_traj_pts = [gt_traj[idx][:3,3] for idx in range(len(gt_traj))]
-    est_traj_pts = [est_traj[idx][:3,3] for idx in range(len(est_traj))]
+    assert len(gt_traj) == len(est_traj), "Trajectories must have same length"
+    gt_traj_pts = [gt_traj[idx][:3, 3] for idx in range(len(gt_traj))]
+    est_traj_pts = [est_traj[idx][:3, 3] for idx in range(len(est_traj))]
 
-    gt_traj_pts  = torch.stack(gt_traj_pts).detach().cpu().numpy().T
+    gt_traj_pts = torch.stack(gt_traj_pts).detach().cpu().numpy().T  # [3, N]
     est_traj_pts = torch.stack(est_traj_pts).detach().cpu().numpy().T
 
     rot, trans, trans_error = align(gt_traj_pts, est_traj_pts)
+    gt_traj_aligned = np.asarray(rot * gt_traj_pts + trans)
 
-    gt_traj_aligned = rot* gt_traj_pts+trans
-    gt_traj_aligned = np.array(gt_traj_aligned)
-    fig = plt.figure()
+    ate_rmse = float(np.sqrt((trans_error ** 2).mean()))
 
-# # syntax for 3-D projection
-    ax = plt.axes(projection ='3d')
-    x_gt = gt_traj_aligned[0,:]
-    y_gt = gt_traj_aligned[1,:]
-    z_gt = gt_traj_aligned[2,:]
-
-    x_est = est_traj_pts[0,:]
-    y_est = est_traj_pts[1,:]
-    z_est = est_traj_pts[2,:]
-    print(x_gt[0])
-    ax.plot3D(x_gt, y_gt, z_gt, 'green', label='Ground Truth Trajectory')
-    ax.plot3D(x_est, y_est, z_est, 'red', label='Estimated Trajectory')
-    plt.show()
-
-    avg_trans_error = trans_error.mean()
-
-    return avg_trans_error
+    if plot_traj:
+        fig = plt.figure(figsize=(8, 6))
+        ax = fig.add_subplot(111, projection='3d')
+        if isinstance(gt_traj, list) and len(gt_traj) > 0:
+            timestamps = np.arange(len(gt_traj))
+            ax.plot(gt_traj_aligned[0, :], gt_traj_aligned[1, :], gt_traj_aligned[2, :], 'g-', label='GT (aligned)')
+            ax.plot(est_traj_pts[0, :], est_traj_pts[1, :], est_traj_pts[2, :], 'r--', label='Estimated')
+            ax.scatter(gt_traj_aligned[0, 0], gt_traj_aligned[1, 0], gt_traj_aligned[2, 0], c='g', marker='o')
+            ax.scatter(est_traj_pts[0, 0], est_traj_pts[1, 0], est_traj_pts[2, 0], c='r', marker='^')
+        ax.set_title(f"{title}\nATE RMSE: {ate_rmse:.4f}")
+        ax.set_xlabel("X (m)")
+        ax.set_ylabel("Y (m)")
+        ax.set_zlabel("Z (m)")
+        ax.legend()
+        ax.grid(True)
+        fig.tight_layout()
+        if save_path is not None:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            plt.savefig(save_path, bbox_inches='tight')
+            plt.close(fig)
+        else:
+            plt.show()
+    return ate_rmse
         
 
 def plot_rgbd_silhouette(color, depth, rastered_color, rastered_depth, presence_sil_mask, diff_depth_l1,

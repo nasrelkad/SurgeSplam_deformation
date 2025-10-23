@@ -817,16 +817,27 @@ def arap_loss(params):
     return ((vR - v) ** 2).mean()
 
 
-def deform_gaussians(params, time, return_all=False, deformation_type='svf', **kwargs):
+def deform_gaussians(params, time, return_all=False, deformation_type='svf', deform_grad=True, **kwargs):
     """
-    SVF-only deformation.
+    Deform Gaussians according to the configured deformation type.
+    Supports 'svf', 'mlp', and the legacy fallbacks ('gaussian', 'cv', 'simple').
     """
-    n_squarings = int(params.get('svf_n_squarings', 8)) if isinstance(params, dict) else 8
-    local_means = apply_svf(params, time_idx=time, n_squarings=n_squarings)
+    deformation_type = (deformation_type or params.get('_deform_type', 'svf')).lower()
+    params['_deform_type'] = deformation_type
+
     local_rots = params['unnorm_rotations']
     local_scales = params['log_scales']
     local_opacities = params['logit_opacities']
     local_colors = params['rgb_colors']
+
+    if deformation_type == 'svf' and ('svf' in params):
+        n_squarings = int(params.get('svf_n_squarings', 8))
+        local_means = apply_svf(params, time_idx=time, n_squarings=n_squarings)
+    elif deformation_type == 'mlp' and ('mlp_deformer' in params):
+        local_means = apply_mlp_deformation(params, time_idx=time, allow_gaussian_grad=deform_grad)
+    else:
+        local_means = params['means3D']
+
     if return_all:
         return local_means, local_rots, local_scales, local_opacities, local_colors
     return local_means, local_rots, local_scales, local_opacities, local_colors
@@ -1075,12 +1086,17 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
             params_iter[k] = torch.nn.Parameter(torch.cat((params[k], v), dim=0).requires_grad_(True))
         params_iter['cam_unnorm_rots'] = params['cam_unnorm_rots']
         params_iter['cam_trans'] = params['cam_trans']
-        params_iter['svf'] = params['svf']
-        params_iter['svf_aabb_center'] = params['svf_aabb_center']
-        params_iter['svf_aabb_half'] = params['svf_aabb_half']
-        params_iter['svf_L0'] = params['svf_L0']
-        params_iter['svf_L1'] = params['svf_L1']
-        params_iter['svf_n_squarings'] = params['svf_n_squarings']
+        if 'svf' in params:
+            params_iter['svf'] = params['svf']
+        if 'svf_aabb_center' in params:
+            params_iter['svf_aabb_center'] = params['svf_aabb_center']
+        if 'svf_aabb_half' in params:
+            params_iter['svf_aabb_half'] = params['svf_aabb_half']
+        for key in list(params.keys()):
+            if isinstance(key, str) and key.startswith('svf_L'):
+                params_iter[key] = params[key]
+        if 'svf_n_squarings' in params:
+            params_iter['svf_n_squarings'] = params['svf_n_squarings']
         if 'svf_scale' in params:
             params_iter['svf_scale'] = params['svf_scale']
         if 'svf_step_clip_ratio' in params:
@@ -1089,7 +1105,29 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
             params_iter['svf_time_scale'] = params['svf_time_scale']
         if 'svf_reference_time' in params:
             params_iter['svf_reference_time'] = params['svf_reference_time']
-        update_svf_aabb(params_iter, momentum=0.0)
+        if 'mlp_deformer' in params:
+            params_iter['mlp_deformer'] = params['mlp_deformer']
+        if 'mlp_time_count' in params:
+            params_iter['mlp_time_count'] = params['mlp_time_count']
+        if 'mlp_time_offset' in params:
+            params_iter['mlp_time_offset'] = params['mlp_time_offset']
+        if 'mlp_disp_scale' in params:
+            params_iter['mlp_disp_scale'] = params['mlp_disp_scale']
+        if 'mlp_arch' in params:
+            params_iter['mlp_arch'] = params['mlp_arch']
+        if 'mlp_activation' in params:
+            params_iter['mlp_activation'] = params['mlp_activation']
+        if 'mlp_arch' in params:
+            params_iter['mlp_arch'] = params['mlp_arch']
+        if 'mlp_time_scale' in params:
+            params_iter['mlp_time_scale'] = params['mlp_time_scale']
+        if 'mlp_aabb_center' in params and 'mlp_aabb_half' in params:
+            params_iter['mlp_aabb_center'] = params['mlp_aabb_center']
+            params_iter['mlp_aabb_half'] = params['mlp_aabb_half']
+        if 'svf_aabb_center' in params and 'svf_aabb_half' in params:
+            update_svf_aabb(params_iter, momentum=0.0)
+        if 'mlp_aabb_center' in params_iter and 'mlp_aabb_half' in params_iter:
+            update_mlp_aabb(params_iter, momentum=0.0)
         num_pts = params_iter['means3D'].shape[0]
         variables['means2D_gradient_accum'] = torch.zeros(num_pts, device="cuda").float()
         variables['denom'] = torch.zeros(num_pts, device="cuda").float()
@@ -1196,6 +1234,289 @@ class SVFDeformer(torch.nn.Module):
         return v
 
 
+class NeuralDeformer(nn.Module):
+    """
+    Positional-encoding MLP for time-conditioned displacements.
+    """
+    def __init__(
+        self,
+        hidden_dim: int = 128,
+        num_layers: int = 5,
+        activation: str = 'silu',
+        posenc_xyz_freqs: int = 6,
+        posenc_t_freqs: int = 4,
+        skip_interval: int | None = 2,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.activation = activation
+        self.xyz_freqs = max(0, int(posenc_xyz_freqs))
+        self.t_freqs = max(0, int(posenc_t_freqs))
+        self.skip_interval = None
+        if skip_interval is not None and skip_interval > 0:
+            self.skip_interval = int(skip_interval)
+        self.dropout = nn.Dropout(dropout) if dropout > 0.0 else None
+
+        self.act_fn = nn.SiLU() if activation.lower() == 'silu' else nn.ReLU()
+
+        in_dim_xyz = 3 * (1 + 2 * self.xyz_freqs)
+        in_dim_t = 1 * (1 + 2 * self.t_freqs)
+        self.input_dim = in_dim_xyz + in_dim_t
+
+        self.layers = nn.ModuleList()
+        for layer_idx in range(num_layers):
+            layer_in_dim = self.hidden_dim if layer_idx > 0 else self.input_dim
+            if self.skip_interval and layer_idx > 0 and (layer_idx % self.skip_interval == 0):
+                layer_in_dim += self.input_dim
+            linear = nn.Linear(layer_in_dim, self.hidden_dim)
+            nn.init.xavier_uniform_(linear.weight)
+            nn.init.zeros_(linear.bias)
+            self.layers.append(linear)
+
+        self.out_layer = nn.Linear(self.hidden_dim, 3)
+        nn.init.zeros_(self.out_layer.weight)
+        nn.init.zeros_(self.out_layer.bias)
+
+    def _posenc(self, x: torch.Tensor, num_freqs: int) -> torch.Tensor:
+        if num_freqs <= 0:
+            return x
+        enc = [x]
+        for k in range(num_freqs):
+            freq = 2.0 ** k * torch.pi
+            enc.append(torch.sin(freq * x))
+            enc.append(torch.cos(freq * x))
+        return torch.cat(enc, dim=-1)
+
+    def _encode_inputs(self, points: torch.Tensor, t_norm: torch.Tensor) -> torch.Tensor:
+        if points.dim() != 2 or points.shape[-1] != 3:
+            pts = points.view(points.shape[0], -1)
+        else:
+            pts = points
+
+        if t_norm.dim() == 0:
+            t = torch.full((pts.shape[0], 1), float(t_norm), device=pts.device, dtype=pts.dtype)
+        elif t_norm.dim() == 1:
+            t = t_norm.view(-1, 1).expand(pts.shape[0], 1)
+        else:
+            t = t_norm
+
+        pts_enc = self._posenc(pts, self.xyz_freqs)
+        t_enc = self._posenc(t, self.t_freqs)
+        return torch.cat([pts_enc, t_enc], dim=-1)
+
+    def forward(self, points: torch.Tensor, t_norm: torch.Tensor) -> torch.Tensor:
+        x = self._encode_inputs(points, t_norm)
+        h = x
+        for layer_idx, layer in enumerate(self.layers):
+            if self.skip_interval and layer_idx > 0 and (layer_idx % self.skip_interval == 0):
+                h = torch.cat([h, x], dim=-1)
+            h = layer(h)
+            h = self.act_fn(h)
+            if self.dropout is not None:
+                h = self.dropout(h)
+        disp = self.out_layer(h)
+        return disp
+
+
+def initialize_mlp_deformer(params, mlp_cfg=None, num_frames=1, device='cuda'):
+    """Attach a neural deformation field to params and record its metadata."""
+    mlp_cfg = mlp_cfg or {}
+    hidden_dim = int(mlp_cfg.get('hidden_dim', 128))
+    num_layers = int(mlp_cfg.get('num_layers', 5))
+    activation = mlp_cfg.get('activation', 'silu')
+    posenc_xyz = int(mlp_cfg.get('posenc_xyz_freqs', 6))
+    posenc_t = int(mlp_cfg.get('posenc_t_freqs', 4))
+    skip_interval = mlp_cfg.get('skip_interval', 2)
+    skip_interval = None if skip_interval in (None, 0, 'none') else int(skip_interval)
+    dropout = float(mlp_cfg.get('dropout', 0.0))
+    disp_scale = float(mlp_cfg.get('disp_scale', 0.05))
+    time_offset = float(mlp_cfg.get('time_offset', 0.0))
+
+    mlp = NeuralDeformer(
+        hidden_dim=hidden_dim,
+        num_layers=num_layers,
+        activation=activation,
+        posenc_xyz_freqs=posenc_xyz,
+        posenc_t_freqs=posenc_t,
+        skip_interval=skip_interval,
+        dropout=dropout,
+    ).to(device)
+
+    means = params['means3D']
+    if not isinstance(means, torch.Tensor):
+        means_detached = torch.as_tensor(means, device=device, dtype=torch.float32)
+    else:
+        means_detached = means.detach().to(device)
+    center = means_detached.mean(0)
+    span = means_detached.max(0).values - means_detached.min(0).values
+    half = (span * 0.15).clamp(min=0.05, max=2.0)
+
+    params['mlp_deformer'] = mlp
+    params['mlp_time_count'] = int(num_frames)
+    params['mlp_time_offset'] = time_offset
+    params['mlp_disp_scale'] = disp_scale
+    arch_vec = np.array([
+        float(hidden_dim),
+        float(num_layers),
+        float(posenc_xyz),
+        float(posenc_t),
+        float(skip_interval if skip_interval is not None else 0),
+        float(dropout),
+    ], dtype=np.float32)
+    params['mlp_arch'] = arch_vec
+    params['mlp_activation'] = activation
+    params['mlp_aabb_center'] = torch.nn.Parameter(center.clone(), requires_grad=False)
+    params['mlp_aabb_half'] = torch.nn.Parameter(half.clone(), requires_grad=False)
+    time_scale_mult = float(mlp_cfg.get('time_scale_mult', 1.0))
+    time_scale = time_scale_mult / max(1, num_frames - 1)
+    params['mlp_time_scale'] = torch.nn.Parameter(torch.tensor(time_scale, device=device, dtype=torch.float32), requires_grad=False)
+    params['_deform_type'] = 'mlp'
+    return params
+
+
+def apply_mlp_deformation(params, time_idx, allow_gaussian_grad=True):
+    assert 'mlp_deformer' in params, "MLP deformer not initialized."
+    base = params['means3D']
+    if not isinstance(base, torch.Tensor):
+        base = torch.as_tensor(base, device='cuda', dtype=torch.float32)
+    device = base.device
+    dtype = base.dtype
+
+    mlp = params['mlp_deformer']
+    if not allow_gaussian_grad:
+        base_in = base.detach()
+    else:
+        base_in = base
+
+    center = params.get('mlp_aabb_center')
+    half = params.get('mlp_aabb_half')
+    if center is None or half is None:
+        with torch.no_grad():
+            pts = base.detach()
+            c = pts.mean(0)
+            span = pts.max(0).values - pts.min(0).values
+            h = span.clamp(min=1e-3) * 0.5
+        center = torch.nn.Parameter(c, requires_grad=False)
+        half = torch.nn.Parameter(h, requires_grad=False)
+        params['mlp_aabb_center'] = center
+        params['mlp_aabb_half'] = half
+    center = center.to(device=device, dtype=dtype)
+    half = half.to(device=device, dtype=dtype)
+
+    norm_pts = (base_in - center) / (half + 1e-6)
+    norm_pts = norm_pts.clamp(min=-1.5, max=1.5)
+
+    num_frames = max(1, int(params.get('mlp_time_count', 1)))
+    offset = float(params.get('mlp_time_offset', 0.0))
+    time_scale = params.get('mlp_time_scale', torch.tensor(1.0, device=device, dtype=dtype))
+    if not isinstance(time_scale, torch.Tensor):
+        time_scale = torch.tensor(float(time_scale), device=device, dtype=dtype)
+    else:
+        time_scale = time_scale.to(device=device, dtype=dtype)
+    t_norm = (float(time_idx) - offset) * time_scale
+    if not isinstance(t_norm, torch.Tensor):
+        t_tensor = torch.tensor(t_norm, device=device, dtype=dtype)
+    else:
+        t_tensor = t_norm.to(device=device, dtype=dtype)
+
+    disp = mlp(norm_pts, t_tensor)
+    scale_vec = half * float(params.get('mlp_disp_scale', 0.05))
+    scale_vec = scale_vec.clamp(min=0.0, max=0.5)
+    disp = disp * scale_vec.view(1, 3)
+    params['mlp_last_disp'] = disp.detach()
+    return base_in + disp
+
+
+def mlp_l2_regularizer(params):
+    if 'mlp_deformer' not in params:
+        device = params['means3D'].device if isinstance(params['means3D'], torch.Tensor) else 'cuda'
+        return torch.tensor(0.0, device=device)
+    loss = 0.0
+    for p in params['mlp_deformer'].parameters():
+        loss = loss + (p ** 2).mean()
+    return loss
+
+
+def maybe_rebuild_mlp(params, device='cuda'):
+    if 'mlp_deformer' in params and isinstance(params['mlp_deformer'], nn.Module):
+        return params
+
+    prefix = 'mlp_state_'
+    state_keys = [k for k in params.keys() if isinstance(k, str) and k.startswith(prefix)]
+    if not state_keys:
+        return params
+
+    arch = params.get('mlp_arch', (128, 5, 6, 4, 2, 0.0))
+    if isinstance(arch, torch.Tensor):
+        arch = arch.detach().cpu().flatten().tolist()
+    elif isinstance(arch, np.ndarray):
+        arch = arch.flatten().tolist()
+    if isinstance(arch, (list, tuple)):
+        if len(arch) >= 6:
+            hidden_dim, num_layers, posenc_xyz, posenc_t, skip_interval, dropout = arch[:6]
+        else:
+            hidden_dim, num_layers = arch[:2]
+            posenc_xyz = 6
+            posenc_t = 4
+            skip_interval = 2
+            dropout = 0.0
+    else:
+        hidden_dim = int(arch)
+        num_layers = 5
+        posenc_xyz = 6
+        posenc_t = 4
+        skip_interval = 2
+        dropout = 0.0
+    hidden_dim = int(hidden_dim)
+    num_layers = int(num_layers)
+    posenc_xyz = int(posenc_xyz)
+    posenc_t = int(posenc_t)
+    skip_interval = int(skip_interval)
+    dropout = float(dropout)
+
+    activation = params.get('mlp_activation', 'silu')
+    if isinstance(activation, torch.Tensor):
+        activation = str(activation.detach().cpu().item())
+    elif isinstance(activation, np.ndarray):
+        activation = str(activation.flatten()[0])
+    elif not isinstance(activation, str):
+        activation = str(activation)
+
+    mlp = NeuralDeformer(
+        hidden_dim=hidden_dim,
+        num_layers=num_layers,
+        activation=activation,
+        posenc_xyz_freqs=posenc_xyz,
+        posenc_t_freqs=posenc_t,
+        skip_interval=skip_interval if skip_interval > 0 else None,
+        dropout=dropout,
+    )
+    state_dict = {}
+    for key in state_keys:
+        tensor = params[key]
+        state_key = key[len(prefix):]
+        if not isinstance(tensor, torch.Tensor):
+            tensor = torch.as_tensor(tensor)
+        state_dict[state_key] = tensor
+    mlp.load_state_dict({k: v.to(dtype=mlp.state_dict()[k].dtype) for k, v in state_dict.items()})
+    mlp.to(device)
+    params['mlp_deformer'] = mlp
+    params['_deform_type'] = 'mlp'
+    if 'mlp_aabb_center' in params and not isinstance(params['mlp_aabb_center'], torch.Tensor):
+        params['mlp_aabb_center'] = torch.nn.Parameter(torch.as_tensor(params['mlp_aabb_center'], device=device, dtype=torch.float32), requires_grad=False)
+    if 'mlp_aabb_half' in params and not isinstance(params['mlp_aabb_half'], torch.Tensor):
+        half = torch.as_tensor(params['mlp_aabb_half'], device=device, dtype=torch.float32)
+        half = half.clamp(min=0.05, max=2.0)
+        params['mlp_aabb_half'] = torch.nn.Parameter(half, requires_grad=False)
+    if 'mlp_time_scale' in params and not isinstance(params['mlp_time_scale'], torch.Tensor):
+        params['mlp_time_scale'] = torch.nn.Parameter(torch.as_tensor(params['mlp_time_scale'], device=device, dtype=torch.float32), requires_grad=False)
+    if 'mlp_disp_scale' in params and not isinstance(params['mlp_disp_scale'], float):
+        params['mlp_disp_scale'] = float(np.asarray(params['mlp_disp_scale']).item())
+    return params
+
+
 def initialize_svf(params, levels=(32,64), n_squarings=8, scale=3.0, step_clip_ratio=0.05, time_scale=1.0):
     """
     Create an SVFDeformer and attach params:
@@ -1262,6 +1583,26 @@ def update_svf_aabb(params, momentum=0.05):
     # EMA
     params['svf_aabb_center'].data = (1 - momentum) * params['svf_aabb_center'].data + momentum * center
     params['svf_aabb_half'].data   = (1 - momentum) * params['svf_aabb_half'].data   + momentum * half
+
+
+@torch.no_grad()
+def update_mlp_aabb(params, momentum=0.05):
+    if 'mlp_aabb_center' not in params or 'mlp_aabb_half' not in params:
+        return
+    means = params['means3D'].detach()
+    center = means.mean(0)
+    span = means.max(0).values - means.min(0).values
+    half = span.clamp(min=1e-3) * 0.5
+    center_param = params['mlp_aabb_center']
+    half_param = params['mlp_aabb_half']
+    if not isinstance(center_param, torch.Tensor):
+        center_param = torch.nn.Parameter(torch.as_tensor(center, device=means.device), requires_grad=False)
+        params['mlp_aabb_center'] = center_param
+    if not isinstance(half_param, torch.Tensor):
+        half_param = torch.nn.Parameter(torch.as_tensor(half, device=means.device), requires_grad=False)
+        params['mlp_aabb_half'] = half_param
+    params['mlp_aabb_center'].data = (1 - momentum) * params['mlp_aabb_center'].data + momentum * center
+    params['mlp_aabb_half'].data = (1 - momentum) * params['mlp_aabb_half'].data + momentum * half
 
 def apply_svf(params, time_idx=None, n_squarings=8):
     """

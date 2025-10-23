@@ -33,7 +33,7 @@ from utils.eval_helpers import report_progress, eval_save
 from utils.keyframe_selection import keyframe_selection_overlap, keyframe_selection_distance
 from utils.recon_helpers import setup_camera, energy_mask
 from utils.slam_helpers import ( initialize_svf, apply_svf, svf_bending_loss,
-    deform_gaussians,
+    deform_gaussians, initialize_mlp_deformer, mlp_l2_regularizer,
     transform_to_frame, transform_to_frame_eval,
     transformed_params2rendervar, transformed_params2depthplussilhouette,
     transformed_GRNparams2rendervar, transformed_GRNparams2depthplussilhouette,
@@ -490,7 +490,7 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification
                       use_deforms=True, deform_type='svf', nr_basis=0, use_distributed_biases=False,
                       total_timescale=None, cam=None, random_initialization=False, init_scale=0.1,
                       svf_levels=(32, 64), svf_n_squarings=8, svf_scale=3.0, svf_step_clip_ratio=0.05,
-                      svf_time_scale=1.0):
+                      svf_time_scale=1.0, mlp_cfg=None):
     """
     SVF-only initializer.
     Returns:
@@ -548,14 +548,23 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification
     for k, v in list(params.items()):
         params[k] = _to_param(v, device)
     
-    params = initialize_svf(
-        params,
-        levels=svf_levels,
-        n_squarings=svf_n_squarings,
-        scale=svf_scale,
-        step_clip_ratio=svf_step_clip_ratio,
-        time_scale=svf_time_scale,
-    )
+    deform_type_norm = (deform_type or 'svf').lower()
+    if deform_type_norm == 'mlp':
+        params = initialize_mlp_deformer(
+            params,
+            mlp_cfg=mlp_cfg,
+            num_frames=num_frames,
+            device=device,
+        )
+    else:
+        params = initialize_svf(
+            params,
+            levels=svf_levels,
+            n_squarings=svf_n_squarings,
+            scale=svf_scale,
+            step_clip_ratio=svf_step_clip_ratio,
+            time_scale=svf_time_scale,
+        )
 
     variables = {'max_2D_radius': torch.zeros(params['means3D'].shape[0]).cuda().float(),
                  'means2D_gradient_accum': torch.zeros(params['means3D'].shape[0]).cuda().float(),
@@ -611,6 +620,18 @@ def initialize_optimizer(params, lrs_dict):
                     if isinstance(p, (torch.nn.Parameter, torch.Tensor)) and p.requires_grad:
                         if id(p) not in seen:
                             param_groups.append({"params": [p], "name": f"svf_p{i}", "lr": lr})
+                            seen.add(id(p))
+            continue
+
+        if k == "mlp_deformer" and isinstance(v, nn.Module):
+            lr = _lr_for_key("mlp")
+            if lr is None:
+                print("[initialize_optimizer] No LR for 'mlp', skipping module.")
+            else:
+                for i, p in enumerate(v.parameters()):
+                    if isinstance(p, (torch.nn.Parameter, torch.Tensor)) and p.requires_grad:
+                        if id(p) not in seen:
+                            param_groups.append({"params": [p], "name": f"mlp_p{i}", "lr": lr})
                             seen.add(id(p))
             continue
 
@@ -727,6 +748,7 @@ def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_rad
                               use_deforms=True,deform_type='gaussian',nr_basis = 10,use_distributed_biases = False,total_timescale=None,use_grn=False,grn_model=None,
                               random_initialization=False,init_scale=0.1,reduce_gaussians= True,reduction_type = 'laplace',reduction_fraction = 0.8,
                               svf_levels=(32, 64), svf_n_squarings=8, svf_scale=3.0, svf_step_clip_ratio=0.05, svf_time_scale=1.0,
+                              mlp_cfg=None,
                               graph_conf = {'num_nodes':   256, 'K': 6,'sigma_mult':  0.5, 'use_fourier': True, 'M':  2}):
     # Get RGB-D Data & Camera Parameters
     # color, depth, intrinsics, pose = dataset[0]
@@ -790,6 +812,7 @@ def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_rad
         svf_scale=svf_scale,
         svf_step_clip_ratio=svf_step_clip_ratio,
         svf_time_scale=svf_time_scale,
+        mlp_cfg=mlp_cfg,
     )
     
     # bloat_params = True
@@ -1079,6 +1102,9 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
 
     if gaussian_deformations and loss_weights.get('svf_bending', 0.0) > 0.0:
         losses['svf_bending'] = svf_bending_loss(params)
+
+    if gaussian_deformations and deformation_type == 'mlp' and ('mlp_reg' in loss_weights):
+        losses['mlp_reg'] = mlp_l2_regularizer(params)
 
 
     weighted_losses = {k: v * loss_weights[k] for k, v in losses.items()}
@@ -1486,6 +1512,7 @@ def rgbd_slam(config: dict):
                 svf_scale=config['tracking'].get('svf_scale', 3.0),
                 svf_step_clip_ratio=config['tracking'].get('svf_step_clip_ratio', 0.05),
                 svf_time_scale=config['tracking'].get('svf_time_scale', 1.0),
+                mlp_cfg=config['deforms'].get('mlp', {}),
                 graph_conf=config['deforms']['graph'],
             )    
 
@@ -1537,7 +1564,7 @@ def rgbd_slam(config: dict):
             # depth = depth.permute(1,2,0)*10 # CxWxH --> WxHxC to align with rest of the pipeline    
             # print(depth.min())
             depth = 1/(output_norm)
-            depth = depth.permute(1,2,0)*10
+            depth = depth.permute(1,2,0)
 
         # plt.imshow(depth.squeeze().cpu().detach())
         # plt.title('predicted depth')
@@ -1569,7 +1596,8 @@ def rgbd_slam(config: dict):
                                                                             svf_n_squarings=config['tracking'].get('svf_n_squarings', 8),
                                                                             svf_scale=config['tracking'].get('svf_scale', 3.0),
                                                                             svf_step_clip_ratio=config['tracking'].get('svf_step_clip_ratio', 0.05),
-                                                                            svf_time_scale=config['tracking'].get('svf_time_scale', 1.0))        
+                                                                            svf_time_scale=config['tracking'].get('svf_time_scale', 1.0),
+                                                                            mlp_cfg=config['deforms'].get('mlp', {}))        
         
         
     # local_means,local_rots,local_scales = deform_gaussians(params,0,False,5,'simple')
@@ -2313,6 +2341,12 @@ def rgbd_slam(config: dict):
     # Save Parameters
     params_no_ints = {k: v for k, v in params.items() if not isinstance(k, int)}
     params_no_ints.pop('svf', None)
+    params_no_ints.pop('mlp_last_disp', None)
+    if 'mlp_deformer' in params_no_ints:
+        mlp_state = params['mlp_deformer'].state_dict()
+        for name, tensor in mlp_state.items():
+            params_no_ints[f'mlp_state_{name}'] = tensor.detach().cpu().numpy()
+        params_no_ints.pop('mlp_deformer', None)
     save_params(params_no_ints, output_dir)
     # save_means3D(params['means3D'], output_dir)
 

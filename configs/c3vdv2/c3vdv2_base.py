@@ -16,9 +16,9 @@ except KeyError:
 map_every = 1
 keyframe_every = 8
 # mapping_window_size = 24
-tracking_iters = 20
-mapping_iters = 20
-frames = 150 # adjust untill which frame
+tracking_iters = 35
+mapping_iters = 50
+frames = 40 # adjust untill which frame
 group_name = "C3VDv2_base"
 run_name = scene_name
 
@@ -65,7 +65,7 @@ config = dict(
     ), 
     deforms = dict(
     use_deformations=True,
-    deform_type='svf',
+    deform_type='mlp',
     nr_basis=0,
     use_xyzt=True,
     num_nodes=0,
@@ -82,7 +82,18 @@ config = dict(
     max_vel_xyz=0.0,
     max_ang_vel=0.0,
     max_logscale_vel=0.0,
-    
+    mlp=dict(
+        hidden_dim=128,
+        num_layers=5,
+        activation='silu',
+        posenc_xyz_freqs=6,
+        posenc_t_freqs=4,
+        skip_interval=2,
+        dropout=0.0,
+        disp_scale=0.05,
+        time_offset=0.0,
+        time_scale_mult=1.0,
+    ),
     ),
     gaussian_reduction = dict(
         reduce_gaussians = False,
@@ -121,6 +132,7 @@ config = dict(
             svf_L0=1e-3,
             svf_L1=1e-3,
             arap=5e-3,
+            mlp=5e-4,
         ),
         # grn_hidden_dim = 128,
         # grn_out_dim = 3,
@@ -151,7 +163,7 @@ config = dict(
             fourier_l2=1e-5,
             xyzt_compact=0.0002,
             xyzt_center=0.0002,
-            
+            mlp_reg=1e-4,
         ),
         lrs=dict(
             svf=5e-4,
@@ -189,6 +201,7 @@ config = dict(
             fourier_ang_sin=  0.00002,
             fourier_s_cos=    0.00002,
             fourier_s_sin=    0.00002,
+            mlp=5e-4,
 
         ),
     ),
@@ -206,7 +219,8 @@ config = dict(
             im=1.0,
             depth=0.3,
             deform = 0.0,
-            arap=5e-3, node_vel_l2=1e-4, node_acc_l2=1e-5, fourier_l2=1e-5
+            arap=5e-3, node_vel_l2=1e-4, node_acc_l2=1e-5, fourier_l2=1e-5,
+            mlp_reg=1e-4,
         ),
         lrs=dict(
             svf_L0=0.001,
@@ -241,6 +255,7 @@ config = dict(
             fourier_s_cos=    0.00002,
             fourier_s_sin=    0.00002,
             arap=5e-3,
+            mlp=5e-4,
         ),
         prune_gaussians=True, # Prune Gaussians during Mapping
         pruning_dict=dict( # Needs to be updated based on the number of mapping iterations

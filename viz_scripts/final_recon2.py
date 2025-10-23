@@ -18,7 +18,7 @@ from diff_gaussian_rasterization import GaussianRasterizationSettings as Camera
 
 from utils.common_utils import seed_everything
 from utils.recon_helpers import setup_camera
-from utils.slam_helpers import get_depth_and_silhouette, transform_to_frame, apply_svf, SVFDeformer
+from utils.slam_helpers import get_depth_and_silhouette, transform_to_frame, maybe_rebuild_mlp, apply_mlp_deformation
 from utils.slam_external import build_rotation
 
 w2cs = []
@@ -30,181 +30,20 @@ def _to_cuda_tensor(x, dtype=torch.float32):
         return x.to(device='cuda', dtype=dtype)
     arr = torch.as_tensor(x, dtype=dtype)
     return arr.to('cuda')
-
-
-def _maybe_rebuild_svf(params: dict, device: str = 'cuda') -> dict:
-    """Rebuild an SVFDeformer from saved svf_L* tensors in params.npz.
-    Expects levels shaped [1,3,D,D,D]. Copies weights and restores AABB.
-    Sets params['svf'] callable and ensures params['svf_n_squarings'] exists.
-    """
-    # already callable? done
-    if 'svf' in params and callable(params['svf']):
-        return params
-
-    # drop non-callable placeholders
-    if 'svf' in params and not callable(params['svf']):
-        params.pop('svf')
-
-    level_keys = sorted([k for k in params.keys() if isinstance(k, str) and k.startswith('svf_L')],
-                        key=lambda s: int(s.replace('svf_L', '')) if s.replace('svf_L', '').isdigit() else 1e9)
-    if not level_keys:
-        return params  # nothing to rebuild
-
-    # infer per-level grid sizes from [1,3,D,D,D]
-    Ds = []
-    for k in level_keys:
-        L = params[k]
-        if not isinstance(L, torch.Tensor):
-            L = torch.as_tensor(L)
-            params[k] = L
-        if L.ndim != 5 or L.shape[1] != 3:
-            raise ValueError(f"{k} has shape {tuple(L.shape)}, expected [1,3,D,D,D]")
-        Ds.append(int(L.shape[2]))
-    levels = tuple(Ds)
-
-    svf = SVFDeformer(levels=levels).to(device)
-    with torch.no_grad():
-        for i, k in enumerate(level_keys):
-            getattr(svf, f"svf_L{i}").copy_(params[k].to(device=device, dtype=torch.float32))
-
-        if 'svf_aabb_center' in params and 'svf_aabb_half' in params:
-            svf.register_buffer('aabb_center', torch.as_tensor(params['svf_aabb_center'], device=device, dtype=torch.float32), persistent=True)
-            svf.register_buffer('aabb_half',   torch.as_tensor(params['svf_aabb_half'],   device=device, dtype=torch.float32), persistent=True)
-
-    params['svf'] = svf
-    params['svf_n_squarings'] = int(params.get('svf_n_squarings', 8))
-    print(f"[SVF] Rebuilt with levels={levels}, n_squarings={params['svf_n_squarings']}")
-    return params
-
-
-def _aa_to_quat(aa: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
-    """Convert axis-angle vectors to quaternions."""
-    theta = torch.linalg.norm(aa, dim=-1, keepdim=True).clamp_min(eps)
-    half = 0.5 * theta
-    k = torch.sin(half) / theta
-    xyz = aa * k
-    w = torch.cos(half)
-    return torch.cat([w, xyz], dim=-1)
-
-
-def _qmul(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
-    """Quaternion multiplication with layout [w,x,y,z]."""
-    w1, x1, y1, z1 = q1.unbind(-1)
-    w2, x2, y2, z2 = q2.unbind(-1)
-    return torch.stack([
-        w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
-        w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
-        w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
-        w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
-    ], dim=-1)
-
-
-def _select_time_component(value, time_idx: int):
-    """Extract per-frame tensor for 'simple' deformation storage formats."""
-    if isinstance(value, (list, tuple)):
-        if len(value) == 0:
-            raise ValueError("Encountered empty sequence while selecting time component.")
-        idx = min(time_idx, len(value) - 1)
-        return _to_cuda_tensor(value[idx])
-
-    if isinstance(value, torch.Tensor):
-        v = value
-        if v.dim() >= 3 and v.shape[-1] > time_idx:
-            return v[..., time_idx]
-        if v.dim() >= 3 and v.shape[0] > time_idx and v.shape[1] in (1, 3, 4):
-            return v[time_idx]
-        if v.dim() == 2 and v.shape[0] > time_idx and v.shape[1] in (1, 3, 4):
-            return v[time_idx]
-        return v
-
-    return _select_time_component(_to_cuda_tensor(value), time_idx)
-
-
 # ---------------------- deformation wrapper ----------------------
 
-def deform_gaussians(params: dict, time_idx: int, deform_type: str = 'svf'):
-    """Return time-deformed gaussian attributes depending on stored deformation model."""
-    deform_type = (deform_type or 'svf').lower()
-    params['_deform_type'] = deform_type
-
-    def _fallback():
-        means = params['means3D']
-        if not isinstance(means, torch.Tensor):
-            means = _to_cuda_tensor(means)
-        return (
-            means,
-            _to_cuda_tensor(params['unnorm_rotations']),
-            _to_cuda_tensor(params['log_scales']),
-            _to_cuda_tensor(params['logit_opacities']),
-            _to_cuda_tensor(params['rgb_colors']),
-        )
-
-    if deform_type == 'svf' and ('svf' in params) and callable(params['svf']):
-        local_means = apply_svf(params, time_idx, n_squarings=int(params['svf_n_squarings']))
-        return (
-            local_means,
-            params['unnorm_rotations'],
-            params['log_scales'],
-            params['logit_opacities'],
-            params['rgb_colors'],
-        )
-
-    if deform_type == 'gaussian' and all(k in params for k in ['deform_weights', 'deform_stds', 'deform_biases']):
-        weights = params['deform_weights']
-        stds = params['deform_stds']
-        biases = params['deform_biases']
-        if not isinstance(weights, torch.Tensor):
-            return _fallback()
-        time_val = torch.tensor(float(time_idx), device=weights.device, dtype=weights.dtype)
-        time_diff = torch.abs(time_val - biases)
-        N = min(5, biases.shape[-1])
-        _, top_indices = torch.topk(-time_diff, N, dim=1)
-        mask = torch.zeros_like(time_diff, dtype=weights.dtype)
-        mask.scatter_(1, top_indices, 1.0)
-
-        masked_weights = weights * mask
-        masked_biases = biases * mask
-        gaussian_term = torch.exp(-0.5 * ((time_val - masked_biases) / (stds + 1e-8)) ** 2)
-        deform = torch.sum(masked_weights * gaussian_term, dim=1)
-
-        deform_xyz = deform[:, :3]
-        deform_rots = deform[:, 3:7]
-        deform_scales = deform[:, 7:10]
-
-        xyz = params['means3D'] + deform_xyz
-        rots = params['unnorm_rotations'] + deform_rots
-        scales = params['log_scales'] + deform_scales
-        opacities = params['logit_opacities']
-        colors = params['rgb_colors']
-        return xyz, rots, scales, opacities, colors
-
-    if deform_type == 'cv' and all(k in params for k in ['cv_vel_xyz', 'cv_vel_log_scales', 'cv_angvel_aa']):
-        means = _to_cuda_tensor(params['means3D'])
-        dtype = means.dtype
-        device = means.device
-        t = torch.tensor(float(time_idx), device=device, dtype=dtype)
-        xyz = means + params['cv_vel_xyz'] * t
-        base_q = F.normalize(params['unnorm_rotations'], dim=-1)
-        dq = _aa_to_quat(params['cv_angvel_aa'] * t)
-        rots = F.normalize(_qmul(base_q, dq), dim=-1)
-        scales = params['log_scales'] + params['cv_vel_log_scales'] * t
-        return xyz, rots, scales, params['logit_opacities'], params['rgb_colors']
-
-    if deform_type == 'simple':
-        means = _select_time_component(params['means3D'], time_idx)
-        rots = _select_time_component(params['unnorm_rotations'], time_idx)
-        scales = _select_time_component(params['log_scales'], time_idx)
-        opacities = _select_time_component(params['logit_opacities'], time_idx)
-        colors = _select_time_component(params['rgb_colors'], time_idx)
-        return (
-            _to_cuda_tensor(means),
-            _to_cuda_tensor(rots),
-            _to_cuda_tensor(scales),
-            _to_cuda_tensor(opacities),
-            _to_cuda_tensor(colors),
-        )
-
-    return _fallback()
+def deform_gaussians(params: dict, time_idx: int):
+    """Return time-deformed gaussian attributes using the saved MLP deformation."""
+    if 'mlp_deformer' not in params:
+        raise RuntimeError("This viewer expects params saved with an MLP deformer.")
+    local_means = apply_mlp_deformation(params, time_idx, allow_gaussian_grad=False)
+    return (
+        local_means,
+        params['unnorm_rotations'],
+        params['log_scales'],
+        params['logit_opacities'],
+        params['rgb_colors'],
+    )
 
 
 # ---------------------- camera / scene loading ----------------------
@@ -237,7 +76,7 @@ def _load_params_cuda(scene_path: str) -> dict:
     return params
 
 
-def load_scene_data(scene_path: str, first_frame_w2c, K_np, time_idx: int, deform_type: str = 'svf'):
+def load_scene_data(scene_path: str, first_frame_w2c, K_np, time_idx: int):
     print(f"Loading data from {scene_path}")
     params = _load_params_cuda(scene_path)
 
@@ -255,22 +94,12 @@ def load_scene_data(scene_path: str, first_frame_w2c, K_np, time_idx: int, defor
     else:
         all_w2cs.append(np.asarray(first_frame_w2c))
 
-    # rebuild SVF if present in the .npz
-    params = _maybe_rebuild_svf(params, device='cuda')
-    loaded_type = deform_type
-    if 'deform_type' in params:
-        raw = params['deform_type']
-        if isinstance(raw, (str, bytes)):
-            loaded_type = str(raw)
-        elif isinstance(raw, np.ndarray):
-            try:
-                loaded_type = str(raw.item())
-            except Exception:
-                loaded_type = deform_type
-    deform_type = (loaded_type or 'svf')
+    params = maybe_rebuild_mlp(params, device='cuda')
+    params['_deform_type'] = 'mlp'
+    if 'mlp_deformer' not in params:
+        raise RuntimeError("params.npz does not contain an MLP deformation field.")
 
-    # initial deformation at given time
-    local_means, local_rots, local_scales, local_opacities, local_colors = deform_gaussians(params, time_idx, deform_type=deform_type)
+    local_means, local_rots, local_scales, local_opacities, local_colors = deform_gaussians(params, time_idx)
 
     # camera-space points for depth/silhouette path expect identity W2C
     pts_cam = transform_to_frame(local_means, params, time_idx, gaussians_grad=False, camera_grad=False)
@@ -309,9 +138,9 @@ def load_scene_data(scene_path: str, first_frame_w2c, K_np, time_idx: int, defor
 # ---------------------- per-frame path ----------------------
 
 def deform_for_frame(params: dict, time_idx: int):
-    deform_type = params.get('_deform_type', 'svf')
-    # WORLD → deformed
-    local_means, local_rots, local_scales, local_opacities, local_colors = deform_gaussians(params, time_idx, deform_type=deform_type)
+    if 'mlp_deformer' not in params:
+        raise RuntimeError("MLP deformer missing in params; this viewer only supports the MLP variant.")
+    local_means, local_rots, local_scales, local_opacities, local_colors = deform_gaussians(params, time_idx)
     # WORLD → CAMERA for depth/silhouette
     pts_cam = transform_to_frame(local_means, params, time_idx, gaussians_grad=False, camera_grad=False)
 
@@ -410,11 +239,7 @@ def rgbd2pcd(color, depth, w2c, K, cfg):
 def visualize(scene_path, cfg, experiment):
     time_idx = 0
     w2c_0, K_np = load_camera(cfg, scene_path)
-    deform_type = experiment.config.get('deforms', {}).get('deform_type', 'svf')
-
-    # initial load (also rebuilds SVF)
-    scene_data, scene_depth_data, all_w2cs, params, K_np = load_scene_data(scene_path, w2c_0, K_np, time_idx, deform_type=deform_type)
-    deform_type = params.get('_deform_type', deform_type)
+    scene_data, scene_depth_data, all_w2cs, params, K_np = load_scene_data(scene_path, w2c_0, K_np, time_idx)
 
     # persist intrinsics for the loop
     base_K = torch.as_tensor(K_np, device='cuda', dtype=torch.float32)
