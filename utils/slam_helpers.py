@@ -321,12 +321,7 @@ def ensure_binding_buffers(params, K: int | None = None, tag: str = ""):
     return params
 
 
-# removed: rebind_graph*
-
-
-# removed: rebind_graph*
-
-def periodic_rebind_if_far(params, tau_mult=2.0, K=None, sigma_mult=None, stride_tag=None):
+def periodic_rebind_if_far(params, tau_mult=1.5, K=8, sigma_mult=None, stride_tag=None):
     """
     Cheap coverage check: if a Gaussian is far from its current node barycenter,
     rebind it. tau = tau_mult * median node spacing.
@@ -827,7 +822,7 @@ def deform_gaussians(params, time, return_all=False, deformation_type='svf', **k
     SVF-only deformation.
     """
     n_squarings = int(params.get('svf_n_squarings', 8)) if isinstance(params, dict) else 8
-    local_means = apply_svf(params, time, n_squarings=8)
+    local_means = apply_svf(params, time_idx=time, n_squarings=n_squarings)
     local_rots = params['unnorm_rotations']
     local_scales = params['log_scales']
     local_opacities = params['logit_opacities']
@@ -1086,6 +1081,15 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
         params_iter['svf_L0'] = params['svf_L0']
         params_iter['svf_L1'] = params['svf_L1']
         params_iter['svf_n_squarings'] = params['svf_n_squarings']
+        if 'svf_scale' in params:
+            params_iter['svf_scale'] = params['svf_scale']
+        if 'svf_step_clip_ratio' in params:
+            params_iter['svf_step_clip_ratio'] = params['svf_step_clip_ratio']
+        if 'svf_time_scale' in params:
+            params_iter['svf_time_scale'] = params['svf_time_scale']
+        if 'svf_reference_time' in params:
+            params_iter['svf_reference_time'] = params['svf_reference_time']
+        update_svf_aabb(params_iter, momentum=0.0)
         num_pts = params_iter['means3D'].shape[0]
         variables['means2D_gradient_accum'] = torch.zeros(num_pts, device="cuda").float()
         variables['denom'] = torch.zeros(num_pts, device="cuda").float()
@@ -1191,29 +1195,61 @@ class SVFDeformer(torch.nn.Module):
             v = v + v_l
         return v
 
-def initialize_svf(params, levels=(32,64)):
+
+def initialize_svf(params, levels=(32,64), n_squarings=8, scale=3.0, step_clip_ratio=0.05, time_scale=1.0):
     """
     Create an SVFDeformer and attach params:
       - params['svf'] = SVFDeformer(levels)
       - params['svf_aabb_center'], params['svf_aabb_half']
       - Also expose each level tensor as a top-level param 'svf_L{i}' so your existing optimizer picks it up.
     """
-    
-    means = params['means3D'].detach()
-    center = means.mean(0)
-    span = means.max(0).values - means.min(0).values
+    means = params['means3D']
+    if isinstance(means, torch.Tensor):
+        device = means.device
+        means_flat = means.detach()
+    else:
+        means_flat = torch.as_tensor(means)
+        device = means_flat.device
+    center = means_flat.mean(0)
+    span = means_flat.max(0).values - means_flat.min(0).values
     half = span.clamp(min=1e-2) * 0.75  # slightly inside the current spread
 
-    svf = SVFDeformer(levels=levels).to(means.device)
+    existing = params.get('svf', None)
+    rebuild = True
+    if isinstance(existing, SVFDeformer):
+        if levels is None or list(existing.levels) == list(levels):
+            svf = existing.to(device)
+            rebuild = False
+        else:
+            svf = SVFDeformer(levels=levels).to(device)
+    else:
+        svf = SVFDeformer(levels=levels).to(device)
+
+    if rebuild:
+        for i in range(len(svf.levels)):
+            key = f"svf_L{i}"
+            if key in params:
+                src = params[key]
+                if isinstance(src, torch.Tensor):
+                    src_t = src.to(device=device, dtype=torch.float32)
+                else:
+                    src_t = torch.as_tensor(src, device=device, dtype=torch.float32)
+                if src_t.shape == getattr(svf, key).shape:
+                    getattr(svf, key).data.copy_(src_t)
+
     params['svf'] = svf
-    params['svf_aabb_center'] = torch.nn.Parameter(center.clone(), requires_grad=False)
-    params['svf_aabb_half'] = torch.nn.Parameter(half.clone(), requires_grad=False)
-    # expose fields at top-level for optimizer lr mapping
     for i, F_l in enumerate(svf.iter_fields()):
         params[f'svf_L{i}'] = F_l
-    # optional: number of squarings
-    if 'svf_n_squarings' not in params:
-        params['svf_n_squarings'] = 8
+
+    center_t = center.to(device=device, dtype=torch.float32)
+    half_t = half.to(device=device, dtype=torch.float32)
+    params['svf_aabb_center'] = torch.nn.Parameter(center_t.clone(), requires_grad=False)
+    params['svf_aabb_half'] = torch.nn.Parameter(half_t.clone(), requires_grad=False)
+    params['svf_n_squarings'] = int(n_squarings)
+    params['svf_scale'] = float(scale)
+    params['svf_step_clip_ratio'] = float(step_clip_ratio)
+    params['svf_time_scale'] = float(time_scale)
+    params.setdefault('svf_reference_time', 0.0)
     return params
 
 @torch.no_grad()
@@ -1246,30 +1282,88 @@ def apply_svf(params, time_idx=None, n_squarings=8):
             n_squarings = int(params['svf_n_squarings'])
         except Exception:
             n_squarings = int(getattr(params['svf_n_squarings'], 'item', lambda: 8)())
-    svf_scale = float(3.0)
-    step_clip_ratio = float(0.05)  # 5% of box size per substep
+    n_squarings = max(int(n_squarings), 0)
 
-    x0     = params['means3D']                      # (N,3) world coords
-    center = params['svf_aabb_center']              # (3,)
-    half   = params['svf_aabb_half']                # (3,)
+    x0 = params['means3D']
+    if not isinstance(x0, torch.Tensor):
+        x0 = torch.as_tensor(x0, device='cuda', dtype=torch.float32)
+    device = x0.device
+    dtype = x0.dtype
 
-    # size-based clip to avoid folding; scalar in world units
-    # (use largest half-extent so it's safe in all axes)
-    step_clip = step_clip_ratio * torch.as_tensor(half, device=x0.device, dtype=x0.dtype).abs().max()
+    def _to_tensor(value, default):
+        if value is None:
+            return torch.tensor(default, device=device, dtype=dtype)
+        if isinstance(value, torch.Tensor):
+            return value.to(device=device, dtype=dtype)
+        if isinstance(value, (float, int)):
+            return torch.tensor(float(value), device=device, dtype=dtype)
+        return torch.as_tensor(value, device=device, dtype=dtype)
+
+    svf_scale = _to_tensor(params.get('svf_scale', 3.0), 3.0)
+    step_clip_ratio = float(params.get('svf_step_clip_ratio', 0.05))
+    time_scale_raw = params.get('svf_time_scale', 1.0)
+
+    if isinstance(time_scale_raw, torch.Tensor):
+        if time_idx is not None and time_scale_raw.ndim > 0 and time_idx < time_scale_raw.shape[0]:
+            time_scale = time_scale_raw[time_idx].to(device=device, dtype=dtype)
+        else:
+            time_scale = time_scale_raw.mean().to(device=device, dtype=dtype)
+    else:
+        time_scale = _to_tensor(time_scale_raw, 1.0)
+
+    cam_trans = params.get('cam_trans', None)
+    num_frames = None
+    if isinstance(cam_trans, torch.Tensor):
+        num_frames = cam_trans.shape[-1]
+    elif isinstance(cam_trans, np.ndarray):
+        num_frames = cam_trans.shape[-1]
+
+    if time_idx is None:
+        dt_scalar = 1.0
+    else:
+        dt_scalar = float(time_idx)
+        if num_frames is not None and num_frames > 1:
+            dt_scalar = dt_scalar / float(max(1, num_frames - 1))
+        ref_time = params.get('svf_reference_time', 0.0)
+        if isinstance(ref_time, torch.Tensor):
+            ref_time = float(ref_time.detach().cpu().item())
+        dt_scalar = max(dt_scalar - float(ref_time), 0.0)
+    dt = torch.tensor(dt_scalar, device=device, dtype=dtype)
+
+    effective_scale = svf_scale * time_scale * dt
+    if torch.abs(effective_scale).item() < 1e-8:
+        return x0
+
+    center = params.get('svf_aabb_center')
+    half = params.get('svf_aabb_half')
+    if isinstance(center, torch.Tensor):
+        center = center.to(device=device, dtype=dtype)
+    else:
+        center = torch.as_tensor(center, device=device, dtype=dtype)
+    if isinstance(half, torch.Tensor):
+        half = half.to(device=device, dtype=dtype)
+    else:
+        half = torch.as_tensor(half, device=device, dtype=dtype)
+
+    step_clip = None
+    if step_clip_ratio > 0:
+        step_clip = torch.as_tensor(step_clip_ratio, device=device, dtype=dtype) * half.abs().max()
 
     # scale per substep (classic scaling-and-squaring)
-    substep_scale = svf_scale / (2.0 ** n_squarings)
+    substep_scale = effective_scale / (2.0 ** n_squarings if n_squarings > 0 else 1.0)
+
+    svf_module = params['svf']
 
     # first substep
-    u = params['svf'](x0, center, half) * substep_scale
-    if step_clip > 0:
+    u = svf_module(x0, center, half) * substep_scale
+    if step_clip is not None:
         u = u.clamp(min=-step_clip, max=step_clip)
     y = x0 + u
 
     # refine with additional squarings (Euler composition)
     for _ in range(n_squarings):
-        u = params['svf'](y, center, half) * substep_scale
-        if step_clip > 0:
+        u = svf_module(y, center, half) * substep_scale
+        if step_clip is not None:
             u = u.clamp(min=-step_clip, max=step_clip)
         y = y + u
 

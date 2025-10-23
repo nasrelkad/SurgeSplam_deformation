@@ -9,8 +9,9 @@ import matplotlib.pyplot as plt
 from datasets.gradslam_datasets.geometryutils import relative_transformation
 from utils.recon_helpers import setup_camera, energy_mask
 from utils.slam_external import build_rotation,calc_psnr
-from utils.slam_helpers import transform_to_frame, transform_to_frame_eval, apply_xyzt_gate, transformed_params2rendervar, transformed_params2depthplussilhouette,transformed_GRNparams2rendervar,transformed_GRNparams2depthplussilhouette,align_shift_and_scale
-from utils.slam_helpers import deform_gaussians as deform_gaussians_eval
+from utils.slam_helpers import (transform_to_frame, transform_to_frame_eval, transformed_params2rendervar, transformed_params2depthplussilhouette,
+      transformed_GRNparams2rendervar,transformed_GRNparams2depthplussilhouette,align_shift_and_scale, deform_gaussians, apply_svf  )
+
 
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 
@@ -19,11 +20,46 @@ from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from utils.time_helper import Timer
 loss_fn_alex = LearnedPerceptualImagePatchSimilarity(net_type='alex', normalize=True).cuda()
 
-def to01(t):
-    t = t.permute(2, 0, 1).float()
-    if t.max() > 1.5:      # only divide if the data is 0..255
-        t = t / 255.0
-    return t.clamp_(0, 1)
+def _locals_from_params(params, t, use_deform=True, deformation_type='svf', n_squarings=8):
+    """
+    Returns per-frame gaussian attributes at time index t:
+      local_means, local_rots, local_scales, local_opacities, local_colors
+
+    If use_deform and deformation_type == 'svf', we call your SVF path.
+    Otherwise we slice the static/time-stacked tensors.
+    """
+    if use_deform and (deformation_type == 'svf'):
+        # Prefer centralized entrypoint
+        try:
+            # Newer deform_gaussians supports deformation_type='svf' (and sometimes n_squarings)
+            try:
+                return deform_gaussians(params, t, False, deformation_type='svf', n_squarings=n_squarings)
+            except TypeError:
+                # Older signature without n_squarings
+                return deform_gaussians(params, t, False, deformation_type='svf')
+        except Exception:
+            # Fallback to direct SVF if you exported it
+            if apply_svf is None:
+                raise
+            local_means = apply_svf(params, t, n_squarings=n_squarings)
+            # For SVF we usually keep rots/scales/opacities/colors unchanged per t
+            def _pick(x):
+                return x[..., t] if hasattr(x, "dim") and x.dim() == 3 else x
+            local_rots      = _pick(params['unnorm_rotations'])
+            local_scales    = _pick(params['log_scales'])
+            local_opacities = _pick(params['logit_opacities'])
+            local_colors    = _pick(params['rgb_colors'])
+            return local_means, local_rots, local_scales, local_opacities, local_colors
+
+    # ---------- No deformation path ----------
+    def _pick(x):
+        return x[..., t] if hasattr(x, "dim") and x.dim() == 3 else x
+    local_means     = _pick(params['means3D'])
+    local_rots      = _pick(params['unnorm_rotations'])
+    local_scales    = _pick(params['log_scales'])
+    local_opacities = _pick(params['logit_opacities'])
+    local_colors    = _pick(params['rgb_colors'])
+    return local_means, local_rots, local_scales, local_opacities, local_colors
 
 def align(model, data):
     """Align two trajectories using the method of Horn (closed-form).
@@ -54,30 +90,13 @@ def align(model, data):
     trans = data.mean(1).reshape((3,-1)) - rot * model.mean(1).reshape((3,-1))
 
     model_aligned = rot * model + trans
-    alignment_error = model_aligned - data[:, :100]
+    alignment_error = model_aligned - data
 
     trans_error = np.sqrt(np.sum(np.multiply(
         alignment_error, alignment_error), 0)).A[0]
 
     return rot, trans, trans_error
 
-def align_sim3(model, data):
-    """
-    Umeyama similarity alignment (Sim(3)): returns s, R, t
-    model, data: 3 x N
-    """
-    mu_m = model.mean(axis=1, keepdims=True)
-    mu_d = data.mean(axis=1, keepdims=True)
-    X = model - mu_m
-    Y = data - mu_d
-
-    cov = X @ Y.T / model.shape[1]
-    U, S, Vt = np.linalg.svd(cov)
-    R = U @ np.diag([1,1,np.sign(np.linalg.det(U @ Vt))]) @ Vt
-    var = (X**2).sum() / model.shape[1]
-    s = np.trace(np.diag(S) @ np.diag([1,1,np.sign(np.linalg.det(U @ Vt))])) / var
-    t = mu_d - s * R @ mu_m
-    return s, R, t
 # def align_shift_and_scale(gt_disp, pred_disp):
 
 #     t_gt = np.median(gt_disp)
@@ -128,21 +147,21 @@ def evaluate_ate(gt_traj, est_traj, plot_traj = False):
 
     gt_traj_aligned = rot* gt_traj_pts+trans
     gt_traj_aligned = np.array(gt_traj_aligned)
-#     fig = plt.figure()
+    fig = plt.figure()
 
 # # syntax for 3-D projection
-#     ax = plt.axes(projection ='3d')
-#     x_gt = gt_traj_aligned[0,:]
-#     y_gt = gt_traj_aligned[1,:]
-#     z_gt = gt_traj_aligned[2,:]
+    ax = plt.axes(projection ='3d')
+    x_gt = gt_traj_aligned[0,:]
+    y_gt = gt_traj_aligned[1,:]
+    z_gt = gt_traj_aligned[2,:]
 
-#     x_est = est_traj_pts[0,:]
-#     y_est = est_traj_pts[1,:]
-#     z_est = est_traj_pts[2,:]
-#     print(x_gt[0])
-#     ax.plot3D(x_gt, y_gt, z_gt, 'green', label='Ground Truth Trajectory')
-#     ax.plot3D(x_est, y_est, z_est, 'red', label='Estimated Trajectory')
-#     plt.show()
+    x_est = est_traj_pts[0,:]
+    y_est = est_traj_pts[1,:]
+    z_est = est_traj_pts[2,:]
+    print(x_gt[0])
+    ax.plot3D(x_gt, y_gt, z_gt, 'green', label='Ground Truth Trajectory')
+    ax.plot3D(x_est, y_est, z_est, 'red', label='Estimated Trajectory')
+    plt.show()
 
     avg_trans_error = trans_error.mean()
 
@@ -193,6 +212,8 @@ def plot_rgbd_silhouette(color, depth, rastered_color, rastered_depth, presence_
     plt.close()
 
 
+
+
 def report_progress(params, data, i, progress_bar, iter_time_idx, sil_thres, every_i=1, qual_every_i=1, 
                     tracking=False, mapping=False, online_time_idx=None,
                     global_logging=True):
@@ -240,19 +261,20 @@ def report_progress(params, data, i, progress_bar, iter_time_idx, sil_thres, eve
             ate_rmse = evaluate_ate(gt_w2c_list, latest_est_w2c_list)
             ate_rmse = np.round(ate_rmse, decimals=6)
 
-        # Get current frame Gaussians
-        transformed_pts = transform_to_frame(local_means, params, iter_time_idx, 
-                                             gaussians_grad=False,
-                                             camera_grad=False)
+        # 1) Collect local (per-frame) attributes at t = iter_time_idx
+        local_means, local_rots, local_scales, local_opacities, local_colors = _locals_from_params(params, iter_time_idx)
 
-        # Initialize Render Variables
-        rendervar = transformed_params2rendervar(params, transformed_pts)
+        # 2) Transform to camera frame using the new signature:
+        #    transform_to_frame(local_means, params, time_idx, gaussians_grad, camera_grad)
+        transformed_pts = transform_to_frame(local_means, params, iter_time_idx,
+                                            gaussians_grad=False, camera_grad=False)  # new order
+
+        # 3) Build render vars with the new signature (you must pass locals):
+        rendervar = transformed_params2rendervar(
+            params, transformed_pts, local_rots, local_scales, local_opacities, local_colors
+        )
         depth_sil_rendervar = transformed_params2depthplussilhouette(params, data['w2c'], 
                                                                      transformed_pts)
-        
-        if 't_mu' in params:
-            gt = xyzt_time_gate(params, float(time_idx))
-            rendervar = apply_xyzt_gate(rendervar, gt, gate_thresh=0.35)
         depth_sil, _, _ = Renderer(raster_settings=data['cam'])(**depth_sil_rendervar)
         rastered_depth = depth_sil[0, :, :].unsqueeze(0)
         valid_depth_mask = (data['depth'] > 0) & (data['depth'] < 1e10)
@@ -279,11 +301,6 @@ def report_progress(params, data, i, progress_bar, iter_time_idx, sil_thres, eve
             diff_depth_l1 = torch.abs((rastered_depth - data['depth']))
             diff_depth_l1 = diff_depth_l1 * valid_depth_mask
             depth_l1 = diff_depth_l1.sum() / valid_depth_mask.sum()
-
-        print("GT  im min/max/mean:", float(data['im'].min()), float(data['im'].max()), float(data['im'].mean()))
-        print("REN im min/max/mean:", float(im.min()), float(im.max()), float(im.mean()))
-        nonzero_ratio = (im>1e-6).float().mean().item()
-        print("Rendered nonzero ratio:", nonzero_ratio)
 
         if not (tracking or mapping):
             progress_bar.set_postfix({f"Time-Step: {iter_time_idx} | PSNR: {psnr:.{7}} | Depth RMSE: {rmse:.{7}} | L1": f"{depth_l1:.{7}}"})
@@ -318,144 +335,7 @@ def report_progress(params, data, i, progress_bar, iter_time_idx, sil_thres, eve
 
 #     return xyz,rots,scales
 
-def deform_gaussians(params, time, deform_grad, N=5, deformation_type='gaussian', temperature=0.5):
-    """
-    Gaussian deformation:
-      - soft attention over basis functions (keeps gradients flowing)
-      - safe positive stds via softplus
-      - rotation update via quaternion multiplication (delta quat)
-      - scale updated additively in log domain
-    
-    """
-    if deformation_type == 'gaussian':
-        # Pull tensors with/without grad
-        if deform_grad:
-            W = params['deform_weights']      # [G,B,10]
-            S_raw = params['deform_stds']     # [G,B,10]
-            C = params['deform_biases']       # [G,B,10]
-        else:
-            W = params['deform_weights'].detach()
-            S_raw = params['deform_stds'].detach()
-            C = params['deform_biases'].detach()
 
-        # Make sure 'time' is a tensor on the right device/dtype and broadcastable to C
-        t = torch.as_tensor(time, device=C.device, dtype=C.dtype)
-        while t.dim() < C.dim():
-            t = t.unsqueeze(0)  # expand to match [G,B,10] by broadcasting
-
-        # strictly positive bandwidths
-        S = F.softplus(S_raw) + 1e-3  # [G,B,10]
-
-        # attention-like weights across bases (dim=1)
-        # score = - (t - C)^2 / (2*S^2)
-        score = -((t - C) ** 2) / (2.0 * (S ** 2) + 1e-12)
-        attn = F.softmax(score / max(temperature, 1e-3), dim=1)  # sum_B(attn)=1
-
-        # Optional soft top-k: keep top-N mass but renormalize (still differentiable)
-        if N is not None and isinstance(N, int) and 0 < N < attn.shape[1]:
-            topv, topi = torch.topk(attn, k=N, dim=1)
-            m = torch.zeros_like(attn)
-            m.scatter_(1, topi, 1.0)
-            attn = attn * m
-            attn = attn / (attn.sum(dim=1, keepdim=True) + 1e-12)
-
-        # Weighted sum over bases -> per-gaussian deformation vector (10)
-        deform = torch.sum(attn * W, dim=1)  # [G,10]
-
-        # Split into xyz(3), rot_quat_delta(4), dlog_scales(3)
-        deform_xyz    = deform[:, 0:3]
-        deform_rot_q  = deform[:, 3:7]   # interpret as delta quaternion
-        deform_dlogS  = deform[:, 7:10]
-
-        # Apply updates
-        # positions
-        xyz = params['means3D'] + deform_xyz
-
-        # rotations: compose base quaternion with delta quaternion
-        base_q = F.normalize(params['unnorm_rotations'], dim=-1)      # [G,4]
-        dq = F.normalize(deform_rot_q, dim=-1)                         # [G,4]
-
-        # quaternion multiply: (base_q * dq)
-        w1, x1, y1, z1 = base_q.unbind(-1)
-        w2, x2, y2, z2 = dq.unbind(-1)
-        w = w1*w2 - x1*x2 - y1*y2 - z1*z2
-        x = w1*x2 + x1*w2 + y1*z2 - z1*y2
-        y = w1*y2 - x1*z2 + y1*w2 + z1*x2
-        z = w1*z2 + x1*y2 - y1*x2 + z1*w2
-        rots = torch.stack([w, x, y, z], dim=-1)
-        rots = F.normalize(rots, dim=-1)
-
-        # scales: additive in log-domain (stays positive after exp in renderer)
-        scales = params['log_scales'] + deform_dlogS
-
-        opacities = params['logit_opacities']
-        colors = params['rgb_colors']
-        return xyz, rots, scales, opacities, colors
-
-        """
-        then blend in Lie/log spaces.
-        """
-        
-        # dt in frames relative to 0 (if you keep absolute time indices)
-        dt = (time if torch.is_tensor(time) else torch.tensor(float(time), device=params['means3D'].device, dtype=params['means3D'].dtype)).float()
-        # node motions
-        use_fourier = ('fourier_xyz_cos' in params)
-        R_i, t_i, logs_i = _graph_node_motion(params, dt, use_fourier=use_fourier)   # [Gm,3,3], [Gm,3], [Gm,3]
-
-        # gather neighbors for each Gaussian
-        idx = params['graph_idx']     # [G,K] long
-        w   = params['graph_w']       # [G,K] float
-        nodes = params['graph_nodes'] # [Gm,3]
-        x = params['means3D']         # [G,3]
-
-        # [G,K,3]
-        n_ik = nodes[idx]         # neighbor node positions
-        t_ik = t_i[idx]           # node translations at t
-        R_ik = R_i[idx]           # node rotations at t
-        logs_ik = logs_i[idx]     # node log-scales at t
-
-        # center-relative, rotate, then uncenter and translate:
-        # x'_k = R_i(t)*(x - n_i) + n_i + t_i(t)
-        x_rel = (x.unsqueeze(1) - n_ik)                         # [G,K,3]
-        x_def = (R_ik @ x_rel.unsqueeze(-1)).squeeze(-1) + n_ik + t_ik
-        x_out = (w.unsqueeze(-1) * x_def).sum(dim=1)            # [G,3]
-
-        # rotation: blend axis-angle from node rotations (small-angle OK). We reuse node ang_i used inside _graph_node_motion
-        # For stability, compute ang_i again to avoid storing; tiny overhead.
-        # If you prefer, store the ang_i in _graph_node_motion and return it.
-        # Here: approximate Gaussian rotation as identity (or keep original) — optional:
-        rots_out = params['unnorm_rotations']  # keep original per-Gaussian orientation; advanced: blend node rotvecs.
-
-        # scales: blend log-scales
-        logs_g = (w.unsqueeze(-1) * logs_ik).sum(dim=1)         # [G,3]
-        scales_out = params['log_scales'] + logs_g              # add on top of per-Gaussian log-scales (optional)
-
-        opacities = params['logit_opacities']
-        colors    = params['rgb_colors']
-        return x_out, rots_out, scales_out, opacities, colors
-
-    elif deformation_type == 'simple':
-
-        xyz = params['means3D']
-        rots = params['unnorm_rotations']
-        scales = params['log_scales']
-        opacities = params['logit_opacities']
-        colors = params['rgb_colors']
-        return xyz, rots, scales, opacities, colors
-
-        t = torch.as_tensor(time, device=params['means3D'].device, dtype=params['means3D'].dtype).view(-1,1)
-        v_xyz  = params['cv_vel_xyz']          # [G,3]
-        v_lsg  = params['cv_vel_log_scales']   # [G,3]
-        w_aa   = params['cv_angvel_aa']        # [G,3]
-
-        xyz = params['means3D'] + v_xyz * t
-        base_q = F.normalize(params['unnorm_rotations'], dim=-1)
-        dq = _aa_to_quat(w_aa * t)
-        rots = F.normalize(_qmul(base_q, dq), dim=-1)
-        scales = params['log_scales'] + v_lsg * t
-
-        opacities = params['logit_opacities']; colors = params['rgb_colors']
-        return xyz, rots, scales, opacities, colors
 
 
 def compute_errors(gt, pred):
@@ -481,7 +361,7 @@ def compute_errors(gt, pred):
     return abs_rel, sq_rel, rmse, rmse_log, a1, a2, a3, psnr
 
 def eval_save(dataset, final_params, eval_dir, sil_thres, 
-         mapping_iters, add_new_gaussians, save_renders=True,use_grn = True, deformation_type='simple'):
+         mapping_iters, add_new_gaussians, save_renders=True,use_grn = True):
     # timer = Timer()
     # timer.start()
     split = False
@@ -527,8 +407,8 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
             _dataset = dataset
             time_idx = total_time_idx
         return dataset_type, _dataset, time_idx
-    #for total_time_idx in tqdm(range(num_frames)):
-    for total_time_idx in range(num_frames):
+    
+    for total_time_idx in tqdm(range(num_frames)):
         dataset_type, dataset, time_idx = get_idx(total_time_idx)
         gt_w2c_list.append(torch.linalg.inv(dataset.get_pose(time_idx).cpu()))
         gt_position_list.append(gt_w2c_list[-1][:3, 3])
@@ -548,8 +428,7 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
         # horn gt w2c for nvs render. Nothing to do with metrics like ate
         rot, trans, _ = align(torch.stack(gt_position_list)[train_idx].detach().cpu().numpy().T, torch.stack(est_position_list).detach().cpu().numpy().T)
         horn_gt_position = [rot @ gt_position.numpy()+trans.squeeze() for gt_position in gt_position_list]
-    
-
+        
     for total_time_idx in tqdm(range(num_frames)):
         dataset_type, dataset, time_idx = get_idx(total_time_idx)
         # print(time_idx)
@@ -558,13 +437,7 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
         intrinsics = intrinsics[:3, :3]
 
         # Process RGB-D Data
-        #color = color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
-        color = to01(color)
-
-        if depth.ndim > 3:
-            depth = depth.squeeze(-1)  
-
-        
+        color = color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
         depth = depth.permute(2, 0, 1) # (H, W, C) -> (C, H, W)
         
         # if torch.max(depth) > 1.0:
@@ -575,9 +448,9 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
             first_frame_w2c = torch.linalg.inv(pose)
             # Setup Camera
             cam = setup_camera(color.shape[2], color.shape[1], intrinsics.cpu().numpy(), first_frame_w2c.detach().cpu().numpy())
-        
+
         # Get current frame Gaussians
-        local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians_eval(final_params,total_time_idx,False,deformation_type = deformation_type)
+        local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(final_params,total_time_idx)
         if dataset_type == 'train':
             cam_rot = F.normalize(final_params['cam_unnorm_rots'][..., time_idx].detach())
             cam_tran = final_params['cam_trans'][..., time_idx].detach()
@@ -591,7 +464,6 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
         # Define current frame data
         curr_data = {'cam': cam, 'im': color, 'depth': depth, 'id': time_idx, 'intrinsics': intrinsics, 'w2c': first_frame_w2c}
 
-        
         # visall = False # NOTE: for debug
         # if not visall and dataset_type == 'train':
         #     continue
@@ -601,12 +473,12 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
             # depth_sil_rendervar = transformed_params2depthplussilhouette(final_params, curr_data['w2c'],
             #                                                              transformed_pts,local_rots,local_scales)
             if use_grn:
+                _locals_from_params(final_params, time_idx)
                 rendervar = transformed_GRNparams2rendervar(final_params, transformed_pts,local_rots,local_scales,local_opacities,local_colors)
 
                 depth_sil_rendervar = transformed_GRNparams2depthplussilhouette(final_params, curr_data['w2c'],
                                                                             transformed_pts,local_rots,local_scales,local_opacities)
             else:
-                print(local_scales.shape)
                 rendervar = transformed_params2rendervar(final_params, transformed_pts,local_rots,local_scales,local_opacities,local_colors)
 
                 depth_sil_rendervar = transformed_params2depthplussilhouette(final_params, curr_data['w2c'],
@@ -614,13 +486,11 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
 
             # Render Depth & Silhouette
             depth_sil, _, _ = Renderer(raster_settings=curr_data['cam'])(**depth_sil_rendervar)
-            
             rastered_depth = depth_sil[0, :, :].unsqueeze(0)
             
             # if rastered_depth.max() > 1.0:
             #     rastered_depth = rastered_depth / 100.0
-            if curr_data['depth'].shape[0] == 3:
-                curr_data['depth'] = curr_data['depth'][0:1,:,:]
+            
             # Mask invalid depth in GT
             valid_depth_mask = (curr_data['depth'] > 0) & (curr_data['depth'] < 1e10)
             rastered_depth_viz = rastered_depth.detach()
@@ -650,7 +520,7 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
             psnr_list.append(psnr.cpu().numpy())
             ssim_list.append(ssim.cpu().numpy())
             lpips_list.append(lpips_score)
-            nr_gaussians_list.append(transformed_pts.shape[0])
+            nr_gaussians_list.append(local_scales.shape[0])
             # Compute Depth RMSE
 
             # gt_depth_aligned,rastered_depth_aligned,t_gt,s_gt,t_pred,s_pred = align_shift_and_scale( curr_data['depth'].cpu().detach(),rastered_depth_viz.cpu().detach())
@@ -659,8 +529,6 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
             # gt_depth_aligned[gt_depth_aligned>150] = 150
             # rastered_depth_aligned[rastered_depth_aligned>150] = 150
             gt_depth_aligned = curr_data['depth']
-            
-
             _,_,t_gt,s_gt,t_pred,s_pred = align_shift_and_scale(curr_data['depth'], rastered_depth_viz,valid_depth_mask)
             rastered_depth_aligned = (rastered_depth_viz-t_pred)*(s_gt/s_pred)+t_gt
 
@@ -744,8 +612,7 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
     latest_est_w2c_list.append(latest_est_w2c)
     valid_gt_w2c_list = []
     valid_gt_w2c_list.append(gt_w2c_list[0])
-    
-    for idx in range(len(gt_w2c_list)):
+    for idx in range(1, num_frames):
         interm_cam_rot = F.normalize(final_params['cam_unnorm_rots'][..., idx].detach())
         interm_cam_trans = final_params['cam_trans'][..., idx].detach()
         intermrel_w2c = torch.eye(4).cuda().float()
@@ -758,7 +625,7 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
     # save poses for ate eval
     # if split:
     with open(os.path.join(eval_dir, 'gt_train_w2c.txt'), 'w') as f:
-        for tensor in [gt_w2c_list[idx] for idx in range(len(gt_w2c_list))]:
+        for tensor in [gt_w2c_list[idx] for idx in range(num_frames)]:
             line = ''
             for v in tensor.reshape(-1).numpy():
                 line += str(v) + ','

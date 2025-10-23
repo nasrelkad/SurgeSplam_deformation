@@ -488,7 +488,9 @@ def _to_tensor(v, device):
 
 def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification,
                       use_deforms=True, deform_type='svf', nr_basis=0, use_distributed_biases=False,
-                      total_timescale=None, cam=None, random_initialization=False, init_scale=0.1):
+                      total_timescale=None, cam=None, random_initialization=False, init_scale=0.1,
+                      svf_levels=(32, 64), svf_n_squarings=8, svf_scale=3.0, svf_step_clip_ratio=0.05,
+                      svf_time_scale=1.0):
     """
     SVF-only initializer.
     Returns:
@@ -536,13 +538,6 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification
         'log_scales': log_scales,
     }
 
-    params = initialize_svf(params, levels=(32,64))
-    
-    variables = {'max_2D_radius': torch.zeros(params['means3D'].shape[0]).cuda().float(),
-                 'means2D_gradient_accum': torch.zeros(params['means3D'].shape[0]).cuda().float(),
-                 'denom': torch.zeros(params['means3D'].shape[0]).cuda().float(),
-                 'timestep': torch.zeros(params['means3D'].shape[0]).cuda().float()}
-
      # Initialize a single gaussian trajectory to model the camera poses relative to the first frame
     cam_rots = np.tile([1, 0, 0, 0], (1, 1))
     cam_rots = np.tile(cam_rots[:, :, None], (1, 1, num_frames))
@@ -552,6 +547,20 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification
     device = init_pt_cld.device
     for k, v in list(params.items()):
         params[k] = _to_param(v, device)
+    
+    params = initialize_svf(
+        params,
+        levels=svf_levels,
+        n_squarings=svf_n_squarings,
+        scale=svf_scale,
+        step_clip_ratio=svf_step_clip_ratio,
+        time_scale=svf_time_scale,
+    )
+
+    variables = {'max_2D_radius': torch.zeros(params['means3D'].shape[0]).cuda().float(),
+                 'means2D_gradient_accum': torch.zeros(params['means3D'].shape[0]).cuda().float(),
+                 'denom': torch.zeros(params['means3D'].shape[0]).cuda().float(),
+                 'timestep': torch.zeros(params['means3D'].shape[0]).cuda().float()}
     
     return params, variables
 
@@ -717,6 +726,7 @@ def to01(t):
 def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_radius_depth_ratio, mean_sq_dist_method, densify_dataset=None, use_simplification=True,use_gt_depth = True,
                               use_deforms=True,deform_type='gaussian',nr_basis = 10,use_distributed_biases = False,total_timescale=None,use_grn=False,grn_model=None,
                               random_initialization=False,init_scale=0.1,reduce_gaussians= True,reduction_type = 'laplace',reduction_fraction = 0.8,
+                              svf_levels=(32, 64), svf_n_squarings=8, svf_scale=3.0, svf_step_clip_ratio=0.05, svf_time_scale=1.0,
                               graph_conf = {'num_nodes':   256, 'K': 6,'sigma_mult':  0.5, 'use_fourier': True, 'M':  2}):
     # Get RGB-D Data & Camera Parameters
     # color, depth, intrinsics, pose = dataset[0]
@@ -762,7 +772,25 @@ def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_rad
     # Initialize Parameters
 
   
-    params_list, variables = initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification,use_deforms=use_deforms,deform_type=deform_type,nr_basis = nr_basis,use_distributed_biases=use_distributed_biases,total_timescale=total_timescale,cam = cam,random_initialization=random_initialization,init_scale=init_scale)
+    params_list, variables = initialize_params(
+        init_pt_cld,
+        num_frames,
+        mean3_sq_dist,
+        use_simplification,
+        use_deforms=use_deforms,
+        deform_type=deform_type,
+        nr_basis=nr_basis,
+        use_distributed_biases=use_distributed_biases,
+        total_timescale=total_timescale,
+        cam=cam,
+        random_initialization=random_initialization,
+        init_scale=init_scale,
+        svf_levels=svf_levels,
+        svf_n_squarings=svf_n_squarings,
+        svf_scale=svf_scale,
+        svf_step_clip_ratio=svf_step_clip_ratio,
+        svf_time_scale=svf_time_scale,
+    )
     
     # bloat_params = True
     # if bloat_params:
@@ -779,7 +807,14 @@ def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_rad
     if use_grn:
         if isinstance(params_list,list):
             params = grn_initialization(grn_model,params_list[0],init_pt_cld,mean3_sq_dist,color,depth,mask,cam = cam)
-            params = initialize_svf(params, (32,64))
+            params = initialize_svf(
+                params,
+                levels=svf_levels,
+                n_squarings=svf_n_squarings,
+                scale=svf_scale,
+                step_clip_ratio=svf_step_clip_ratio,
+                time_scale=svf_time_scale,
+            )
             params_list = [params for _ in range(num_frames)]
         else:
             params = grn_initialization(grn_model,params_list,init_pt_cld,mean3_sq_dist,color,depth,mask,cam = cam)
@@ -1042,7 +1077,8 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
            
             losses['arap'] = arap
 
-   
+    if gaussian_deformations and loss_weights.get('svf_bending', 0.0) > 0.0:
+        losses['svf_bending'] = svf_bending_loss(params)
 
 
     weighted_losses = {k: v * loss_weights[k] for k, v in losses.items()}
@@ -1430,20 +1466,37 @@ def rgbd_slam(config: dict):
         )
         # Initialize Parameters, Canonical & Densification Camera parameters
         params, variables, intrinsics, first_frame_w2c, cam, \
-            densify_intrinsics, densify_cam = initialize_first_timestep(dataset, num_frames,
-                                                                        config['scene_radius_depth_ratio'],
-                                                                        config['mean_sq_dist_method'],
-                                                                        densify_dataset=densify_dataset, 
-                                                                        use_simplification=config['gaussian_simplification'],
-                                                                        nr_basis=config['deforms']['nr_basis'],
-                                                                        use_distributed_biases=config['deforms']['use_distributed_biases'],
-                                                                        total_timescale=config['deforms']['total_timescale'],
-                                                                        use_deforms=config['deforms']['use_deformations'],
-                                                                        deform_type=config['deforms']['deform_type'],
-                                                                        use_grn = config['GRN']['use_grn'],
-                                                                        graph_conf = config['deforms']['graph'])    
+            densify_intrinsics, densify_cam = initialize_first_timestep(
+                dataset,
+                num_frames,
+                config['scene_radius_depth_ratio'],
+                config['mean_sq_dist_method'],
+                densify_dataset=densify_dataset,
+                use_simplification=config['gaussian_simplification'],
+                nr_basis=config['deforms']['nr_basis'],
+                use_distributed_biases=config['deforms']['use_distributed_biases'],
+                total_timescale=config['deforms']['total_timescale'],
+                use_deforms=config['deforms']['use_deformations'],
+                deform_type=config['deforms']['deform_type'],
+                use_grn=config['GRN']['use_grn'],
+                random_initialization=config['GRN']['random_initialization'],
+                init_scale=config['GRN']['init_scale'],
+                svf_levels=config['tracking'].get('svf_levels', (32, 64)),
+                svf_n_squarings=config['tracking'].get('svf_n_squarings', 8),
+                svf_scale=config['tracking'].get('svf_scale', 3.0),
+                svf_step_clip_ratio=config['tracking'].get('svf_step_clip_ratio', 0.05),
+                svf_time_scale=config['tracking'].get('svf_time_scale', 1.0),
+                graph_conf=config['deforms']['graph'],
+            )    
 
-        params = initialize_svf(params, levels=(32,64))
+        params = initialize_svf(
+            params,
+            levels=config['tracking'].get('svf_levels', (32, 64)),
+            n_squarings=config['tracking'].get('svf_n_squarings', 8),
+            scale=config['tracking'].get('svf_scale', 3.0),
+            step_clip_ratio=config['tracking'].get('svf_step_clip_ratio', 0.05),
+            time_scale=config['tracking'].get('svf_time_scale', 1.0),
+        )
 
     else:
         color, depth, intrinsics, pose = dataset[0]
@@ -1511,7 +1564,12 @@ def rgbd_slam(config: dict):
                                                                             init_scale=config['GRN']['init_scale'],
                                                                             reduce_gaussians = config['gaussian_reduction']['reduce_gaussians'],
                                                                             reduction_type = config['gaussian_reduction']['reduction_type'],
-                                                                            reduction_fraction=config['gaussian_reduction']['reduction_fraction'])        
+                                                                            reduction_fraction=config['gaussian_reduction']['reduction_fraction'],
+                                                                            svf_levels=config['tracking'].get('svf_levels', (32, 64)),
+                                                                            svf_n_squarings=config['tracking'].get('svf_n_squarings', 8),
+                                                                            svf_scale=config['tracking'].get('svf_scale', 3.0),
+                                                                            svf_step_clip_ratio=config['tracking'].get('svf_step_clip_ratio', 0.05),
+                                                                            svf_time_scale=config['tracking'].get('svf_time_scale', 1.0))        
         
         
     # local_means,local_rots,local_scales = deform_gaussians(params,0,False,5,'simple')
@@ -1959,8 +2017,8 @@ def rgbd_slam(config: dict):
                                         torch.zeros(pad, K, device=params_iter['graph_w'].device, dtype=params_iter['graph_w'].dtype)],
                                         dim=0
                                     )
-                            graph_conf = config['deforms'].get('graph_conf', {'K': 6, 'sigma_mult': 0.5})
-                            params_iter = ensure_binding_buffers(params_iter, K=graph_conf.get('K', 6), tag=f"pre-rebind@frame{time_idx}")
+                            graph_conf = config['deforms'].get('graph_conf', {'K': 8, 'sigma_mult': 0.5})
+                            params_iter = ensure_binding_buffers(params_iter, K=graph_conf.get('K', 8), tag=f"pre-rebind@frame{time_idx}")
                             params_iter = rebind_graph_subset(
                                 params_iter, new_inds,
                                 K=graph_conf.get('K', 6),
@@ -2099,12 +2157,12 @@ def rgbd_slam(config: dict):
                         print('Failed to evaluate trajectory.')
 
                 if config['deforms']['use_deformations'] and config['deforms']['deform_type'] == 'graph':
-                    stride = config['deforms'].get('rebind_stride', 10)
+                    stride = config['deforms'].get('rebind_stride', 5)
                     if (time_idx % stride) == 0:
                         graph_conf = config['deforms'].get('graph_conf', {'K': 6, 'sigma_mult': 0.5})
                         params_iter = periodic_rebind_if_far(
                             params_iter,
-                            tau_mult=config['deforms'].get('rebind_tau_mult', 2.5),
+                            tau_mult=config['deforms'].get('rebind_tau_mult', 1.5),
                             K=graph_conf.get('K', 8),                 # K=8 is usually more stable than 6
                             sigma_mult=graph_conf.get('sigma_mult', 0.8),
                             stride_tag=time_idx
@@ -2254,6 +2312,7 @@ def rgbd_slam(config: dict):
     
     # Save Parameters
     params_no_ints = {k: v for k, v in params.items() if not isinstance(k, int)}
+    params_no_ints.pop('svf', None)
     save_params(params_no_ints, output_dir)
     # save_means3D(params['means3D'], output_dir)
 
@@ -2261,7 +2320,7 @@ def rgbd_slam(config: dict):
     dataset = [dataset, eval_dataset, 'C3VD'] if dataset_config["train_or_test"] == 'train' else dataset
     with torch.no_grad():
         eval_save(dataset, params, eval_dir, sil_thres=config['mapping']['sil_thres'],
-                mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],use_grn = config['GRN']['use_grn'], deformation_type = config['deforms']['deform_type'])
+                mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],use_grn = config['GRN']['use_grn'])
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
