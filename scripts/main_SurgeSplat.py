@@ -502,15 +502,27 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification
         elif deform_type == 'cv':
             params = initialize_cv_deformations(params)
         elif deform_type == 'graph':
-            
-            params = initialize_graph_deformations(params,
-                                                  num_nodes=graph_conf['num_nodes'],
-                                                  K=graph_conf['K'],
-                                                  sigma_mult=graph_conf['sigma_mult'],
-                                                  use_fourier=graph_conf['use_fourier'],
-                                                  M=graph_conf['M'])
+            params = initialize_graph_deformations(
+                params,
+                num_nodes=graph_conf['num_nodes'],
+                K=graph_conf['K'],
+                sigma_mult=graph_conf['sigma_mult'],
+                use_fourier=graph_conf['use_fourier'],
+                M=graph_conf['M'],
+            )
+        elif deform_type == 'hybrid':
+            params = initialize_cv_deformations(params)
+            params = initialize_graph_deformations(
+                params,
+                num_nodes=graph_conf['num_nodes'],
+                K=graph_conf['K'],
+                sigma_mult=graph_conf['sigma_mult'],
+                use_fourier=graph_conf['use_fourier'],
+                M=graph_conf['M'],
+            )
 
-    params = ensure_binding_buffers(params, K=graph_conf['K'], tag="post-init")
+    if use_deforms and deform_type in ('graph', 'hybrid'):
+        params = ensure_binding_buffers(params, K=graph_conf['K'], tag="post-init")
             
             
  
@@ -730,7 +742,7 @@ def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_rad
     if use_grn:
         if isinstance(params_list,list):
             params = grn_initialization(grn_model,params_list[0],init_pt_cld,mean3_sq_dist,color,depth,mask,cam = cam)
-            if deform_type== 'graph':
+            if deform_type in ('graph', 'hybrid'):
                 params['graph_conf'] = {
                             'num_nodes':   config['deforms']['graph']['num_nodes'],
                             'K':           config['deforms']['graph']['K'],
@@ -740,7 +752,7 @@ def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_rad
             params_list = [params for _ in range(num_frames)]
         else:
             params = grn_initialization(grn_model,params_list,init_pt_cld,mean3_sq_dist,color,depth,mask,cam = cam)
-            if deform_type== 'graph':
+            if deform_type in ('graph', 'hybrid'):
                 params['graph_conf'] = {
                             'num_nodes':   graph_conf['num_nodes'],
                             'K':           graph_conf['K'],
@@ -990,7 +1002,7 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
         nr_current_gauss = local_means.shape[0]
         nr_gauss = min(nr_initial_gauss,nr_current_gauss)
         losses['deform'] = torch.sum(torch.square(params_initial['means3D'][:nr_gauss]-local_means[:nr_gauss]))/nr_gauss
-    elif tracking and gaussian_deformations and deformation_type == 'graph':
+    elif tracking and gaussian_deformations and deformation_type in ('graph', 'hybrid'):
         w = 3e-3
         if w > 0.0 and 'graph_nodes' in params:
             arap = arap_loss_graph(params, arap_edges_k=6)
@@ -1901,7 +1913,7 @@ def rgbd_slam(config: dict):
                                                         reduction_type = config['gaussian_reduction']['reduction_type'],
                                                         reduction_fraction=config['gaussian_reduction']['reduction_fraction'] )                     # if config['GRN']['random_initialization']:
 
-                    if config['deforms']['use_deformations'] and config['deforms']['deform_type'] == 'graph':
+                    if config['deforms']['use_deformations'] and config['deforms']['deform_type'] in ('graph', 'hybrid'):
                         G1 = params_iter['means3D'].shape[0]
                         if G1 > G0:
                             new_inds = torch.arange(G0, G1, device=params_iter['means3D'].device)
@@ -2058,7 +2070,7 @@ def rgbd_slam(config: dict):
                         save_params_ckpt(params_iter, ckpt_output_dir, time_idx)
                         print('Failed to evaluate trajectory.')
 
-                if config['deforms']['use_deformations'] and config['deforms']['deform_type'] == 'graph':
+                if config['deforms']['use_deformations'] and config['deforms']['deform_type'] in ('graph', 'hybrid'):
                     stride = config['deforms'].get('rebind_stride', 10)
                     if (time_idx % stride) == 0:
                         graph_conf = config['deforms'].get('graph_conf', {'K': 6, 'sigma_mult': 0.5})

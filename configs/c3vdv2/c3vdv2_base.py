@@ -65,7 +65,7 @@ config = dict(
     ), 
         deforms = dict(
         use_deformations = True,
-        deform_type = 'graph',
+        deform_type = 'hybrid',
         nr_basis = 50,
         use_xyzt=True,
         graph = dict(

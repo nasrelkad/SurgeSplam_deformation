@@ -9,7 +9,18 @@ import matplotlib.pyplot as plt
 from datasets.gradslam_datasets.geometryutils import relative_transformation
 from utils.recon_helpers import setup_camera, energy_mask
 from utils.slam_external import build_rotation,calc_psnr
-from utils.slam_helpers import transform_to_frame, transform_to_frame_eval, transformed_params2rendervar, transformed_params2depthplussilhouette,transformed_GRNparams2rendervar,transformed_GRNparams2depthplussilhouette,align_shift_and_scale
+from utils.slam_helpers import (
+    transform_to_frame,
+    transform_to_frame_eval,
+    transformed_params2rendervar,
+    transformed_params2depthplussilhouette,
+    transformed_GRNparams2rendervar,
+    transformed_GRNparams2depthplussilhouette,
+    align_shift_and_scale,
+    _graph_node_motion,
+    _aa_to_quat,
+    _qmul,
+)
 from utils.slam_helpers import deform_gaussians as deform_gaussians_eval
 
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
@@ -314,6 +325,53 @@ def report_progress(params, data, i, progress_bar, iter_time_idx, sil_thres, eve
 
 #     return xyz,rots,scales
 
+def _graph_skinning_eval(params, time):
+    if 'graph_nodes' not in params or 'graph_idx' not in params or 'graph_w' not in params:
+        raise KeyError("Graph deformation requested but graph buffers are missing.")
+
+    dt = (time if torch.is_tensor(time) else torch.tensor(float(time), device=params['means3D'].device, dtype=params['means3D'].dtype)).float()
+    use_fourier = ('fourier_xyz_cos' in params)
+    R_i, t_i, logs_i = _graph_node_motion(params, dt, use_fourier=use_fourier)
+
+    base_xyz = params['means3D']
+    device = base_xyz.device
+    idx = params['graph_idx'].to(dtype=torch.long, device=device)
+    nodes = params['graph_nodes'].to(device=device)
+    w = params['graph_w'].to(device=device)
+
+    n_ik    = nodes[idx]
+    t_ik    = t_i[idx]
+    R_ik    = R_i[idx]
+    logs_ik = logs_i[idx]
+
+    x_rel = (base_xyz.unsqueeze(1) - n_ik)
+    x_def = (R_ik @ x_rel.unsqueeze(-1)).squeeze(-1) + n_ik + t_ik
+    x_out = (w.unsqueeze(-1) * x_def).sum(dim=1)
+
+    logs_g = (w.unsqueeze(-1) * logs_ik).sum(dim=1)
+    scales_out = params['log_scales'] + logs_g
+    rots_out = params['unnorm_rotations']
+    opacities = params['logit_opacities']
+    colors = params['rgb_colors']
+    return x_out, rots_out, scales_out, opacities, colors
+
+
+def _cv_deformation_eval(params, time):
+    t = torch.as_tensor(time, device=params['means3D'].device, dtype=params['means3D'].dtype).view(-1, 1)
+    v_xyz  = params['cv_vel_xyz']
+    v_lsg  = params['cv_vel_log_scales']
+    w_aa   = params['cv_angvel_aa']
+
+    xyz = params['means3D'] + v_xyz * t
+    base_q = F.normalize(params['unnorm_rotations'], dim=-1)
+    dq = _aa_to_quat(w_aa * t)
+    rots = F.normalize(_qmul(base_q, dq), dim=-1)
+    scales = params['log_scales'] + v_lsg * t
+    opacities = params['logit_opacities']
+    colors = params['rgb_colors']
+    return xyz, rots, scales, opacities, colors
+
+
 def deform_gaussians(params, time, deform_grad, N=5, deformation_type='gaussian', temperature=0.5):
     """
     Gaussian deformation:
@@ -389,48 +447,18 @@ def deform_gaussians(params, time, deform_grad, N=5, deformation_type='gaussian'
         return xyz, rots, scales, opacities, colors
 
     elif deformation_type == 'graph':
-        """
-        Skin each Gaussian to K nearest graph nodes, transform by node motion (CA + optional Fourier),
-        then blend in Lie/log spaces.
-        """
-        
-        # dt in frames relative to 0 (if you keep absolute time indices)
-        dt = (time if torch.is_tensor(time) else torch.tensor(float(time), device=params['means3D'].device, dtype=params['means3D'].dtype)).float()
-        # node motions
-        use_fourier = ('fourier_xyz_cos' in params)
-        R_i, t_i, logs_i = _graph_node_motion(params, dt, use_fourier=use_fourier)   # [Gm,3,3], [Gm,3], [Gm,3]
+        return _graph_skinning_eval(params, time)
 
-        # gather neighbors for each Gaussian
-        idx = params['graph_idx']     # [G,K] long
-        w   = params['graph_w']       # [G,K] float
-        nodes = params['graph_nodes'] # [Gm,3]
-        x = params['means3D']         # [G,3]
-
-        # [G,K,3]
-        n_ik = nodes[idx]         # neighbor node positions
-        t_ik = t_i[idx]           # node translations at t
-        R_ik = R_i[idx]           # node rotations at t
-        logs_ik = logs_i[idx]     # node log-scales at t
-
-        # center-relative, rotate, then uncenter and translate:
-        # x'_k = R_i(t)*(x - n_i) + n_i + t_i(t)
-        x_rel = (x.unsqueeze(1) - n_ik)                         # [G,K,3]
-        x_def = (R_ik @ x_rel.unsqueeze(-1)).squeeze(-1) + n_ik + t_ik
-        x_out = (w.unsqueeze(-1) * x_def).sum(dim=1)            # [G,3]
-
-        # rotation: blend axis-angle from node rotations (small-angle OK). We reuse node ang_i used inside _graph_node_motion
-        # For stability, compute ang_i again to avoid storing; tiny overhead.
-        # If you prefer, store the ang_i in _graph_node_motion and return it.
-        # Here: approximate Gaussian rotation as identity (or keep original) — optional:
-        rots_out = params['unnorm_rotations']  # keep original per-Gaussian orientation; advanced: blend node rotvecs.
-
-        # scales: blend log-scales
-        logs_g = (w.unsqueeze(-1) * logs_ik).sum(dim=1)         # [G,3]
-        scales_out = params['log_scales'] + logs_g              # add on top of per-Gaussian log-scales (optional)
-
-        opacities = params['logit_opacities']
-        colors    = params['rgb_colors']
-        return x_out, rots_out, scales_out, opacities, colors
+    elif deformation_type == 'hybrid':
+        cv_xyz, cv_rots, cv_scales, opacities, colors = _cv_deformation_eval(params, time)
+        graph_xyz, _, graph_scales, _, _ = _graph_skinning_eval(params, time)
+        cv_disp = cv_xyz - params['means3D']
+        xyz = graph_xyz + cv_disp
+        cv_scale_delta = cv_scales - params['log_scales']
+        graph_scale_delta = graph_scales - params['log_scales']
+        scales = params['log_scales'] + cv_scale_delta + graph_scale_delta
+        rots = cv_rots
+        return xyz, rots, scales, opacities, colors
 
     elif deformation_type == 'simple':
 
@@ -441,20 +469,8 @@ def deform_gaussians(params, time, deform_grad, N=5, deformation_type='gaussian'
         colors = params['rgb_colors']
         return xyz, rots, scales, opacities, colors
 
-    elif deformation_type == 'cv':  # constant velocity (add 'ca' with t^2 terms if desired)
-        t = torch.as_tensor(time, device=params['means3D'].device, dtype=params['means3D'].dtype).view(-1,1)
-        v_xyz  = params['cv_vel_xyz']          # [G,3]
-        v_lsg  = params['cv_vel_log_scales']   # [G,3]
-        w_aa   = params['cv_angvel_aa']        # [G,3]
-
-        xyz = params['means3D'] + v_xyz * t
-        base_q = F.normalize(params['unnorm_rotations'], dim=-1)
-        dq = _aa_to_quat(w_aa * t)
-        rots = F.normalize(_qmul(base_q, dq), dim=-1)
-        scales = params['log_scales'] + v_lsg * t
-
-        opacities = params['logit_opacities']; colors = params['rgb_colors']
-        return xyz, rots, scales, opacities, colors
+    elif deformation_type == 'cv':
+        return _cv_deformation_eval(params, time)
 
 
 def compute_errors(gt, pred):
