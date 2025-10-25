@@ -231,15 +231,25 @@ def initialize_graph_deformations(params, num_nodes=256, K=6, sigma_mult=0.5,
 
     # 2) KNN from each Gaussian to nodes
     with torch.no_grad():
-        # squared distances
-        # [G, Gm]
+        # squared distances: [G, Gm]
         d2 = torch.cdist(means, nodes, p=2.0) ** 2
-        knn_d2, knn_idx = torch.topk(d2, k=min(K, Gm), dim=1, largest=False)
-        # σ = sigma_mult * median node spacing
-        # estimate spacing from nodes
-        nn_nodes = torch.topk(torch.cdist(nodes, nodes, p=2.0), k=2, dim=1, largest=False).values[:, 1]
-        sigma = sigma_mult * torch.median(nn_nodes).clamp_min(1e-6)
-        w = torch.softmax(-knn_d2 / (sigma * sigma), dim=1)  # [G,K]
+        knn_k = max(1, min(K, Gm))
+        knn_d2, knn_idx = torch.topk(d2, k=knn_k, dim=1, largest=False)
+
+        # σ = sigma_mult * median node spacing (fallback for tiny graphs)
+        if Gm > 1:
+            node_dists = torch.cdist(nodes, nodes, p=2.0)
+            topk_k = min(2, node_dists.shape[1])
+            nn_vals = torch.topk(node_dists, k=topk_k, dim=1, largest=False).values
+            if topk_k == 1:
+                nn_nodes = nn_vals[:, 0]
+            else:
+                nn_nodes = nn_vals[:, 1]
+            sigma = sigma_mult * torch.median(nn_nodes).clamp_min(1e-6)
+        else:
+            sigma = torch.tensor(sigma_mult, device=means.device, dtype=means.dtype)
+
+        w = torch.softmax(-knn_d2 / (sigma * sigma), dim=1)  # [G, knn_k]
 
     params['graph_nodes'] = torch.nn.Parameter(nodes.requires_grad_(False))
     params['graph_idx']   = knn_idx.long()       # not a Parameter (kept fixed)
@@ -603,6 +613,157 @@ def xyzt_time_gate(params, t: float):
     diff = t - mu
     gt = torch.exp(-0.5 * (diff * diff) / var)
     return gt
+
+
+def endo4dgs_confidence_gate(depth_z: torch.Tensor,
+                              logit_opacities: torch.Tensor,
+                              normalize: bool = True,
+                              eps: float = 1e-6) -> torch.Tensor:
+    """
+    Confidence weighting as described in Endo-4DGS.
+    Approximates the rendering accumulation by sorting Gaussians along depth
+    and computing alpha * accumulated transmittance.
+    """
+    if depth_z is None or logit_opacities is None:
+        return None
+
+    z = depth_z.flatten()
+    if z.numel() == 0:
+        return torch.ones_like(z)
+
+    alphas = torch.sigmoid(logit_opacities.reshape(-1))
+    # sort by depth (front to back)
+    sort_idx = torch.argsort(z)
+    alphas_sorted = alphas[sort_idx]
+    # transmittance for each Gaussian (product of (1 - alpha) of predecessors)
+    one_minus = (1.0 - alphas_sorted).clamp_min(eps)
+    trans = torch.cumprod(
+        torch.cat(
+            [torch.ones(1, device=z.device, dtype=z.dtype), one_minus[:-1]],
+            dim=0),
+        dim=0
+    )
+    weights_sorted = alphas_sorted * trans
+    weights = torch.zeros_like(weights_sorted)
+    weights[sort_idx] = weights_sorted
+
+    if normalize:
+        denom = weights.sum() + torch.as_tensor(eps, device=weights.device, dtype=weights.dtype)
+        weights = weights / denom
+    weights = weights.clamp_min(eps)
+    return weights
+
+
+def ehsurgs_lifecycle_gate(params: dict,
+                           time_idx: float,
+                           gate_settings: dict | None = None) -> torch.Tensor | None:
+    """
+    Lifecycle gating adapted from EH-SurGS. Produces a per-Gaussian gate in (0,1)
+    by evaluating a Gaussian basis expansion over time.
+    """
+    required = ['eh_lc_base', 'eh_lc_weights', 'eh_lc_centers', 'eh_lc_log_sigmas']
+    if any(k not in params for k in required):
+        return None
+
+    gate_settings = gate_settings or {}
+
+    base = params['eh_lc_base'].reshape(-1)
+    weights = params['eh_lc_weights']
+    centers = params['eh_lc_centers']
+    log_sigmas = params['eh_lc_log_sigmas']
+
+    t = torch.as_tensor(time_idx, device=base.device, dtype=base.dtype)
+    while t.dim() < centers.dim():
+        t = t.unsqueeze(0)
+
+    sigma = torch.exp(log_sigmas).clamp_min(1e-6)
+    gaussians = torch.exp(-0.5 * ((t - centers) / sigma) ** 2)
+    logits = base + (weights * gaussians).sum(dim=-1)
+    gate = torch.sigmoid(logits)
+
+    cmin = gate_settings.get('clamp_min', None)
+    cmax = gate_settings.get('clamp_max', None)
+    if cmin is not None:
+        gate = gate.clamp_min(float(cmin))
+    if cmax is not None:
+        gate = gate.clamp_max(float(cmax))
+
+    return gate.clamp_min(1e-6)
+
+
+def compute_temporal_gate(params: dict,
+                          transformed_pts: torch.Tensor | None,
+                          local_opacities: torch.Tensor | None,
+                          time_idx: float,
+                          gate_config: dict | None = None,
+                          default_thresh: float = 0.0):
+    """
+    Returns (gate_tensor or None, gate_threshold) by combining Endo-4DGS,
+    EH-SurGS lifecycle, and XYZT gates.
+    """
+    gate_settings = gate_config or {}
+    device = None
+    target_len = None
+    if transformed_pts is not None and torch.is_tensor(transformed_pts):
+        device = transformed_pts.device
+        target_len = transformed_pts.shape[0]
+    elif 'means3D' in params and torch.is_tensor(params['means3D']):
+        device = params['means3D'].device
+
+    def _match_len(gate: torch.Tensor | None):
+        nonlocal target_len
+        if gate is None:
+            return None
+        gate = gate.reshape(-1)
+        if target_len is None:
+            target_len = gate.shape[0]
+        if gate.shape[0] > target_len:
+            gate = gate[:target_len]
+        elif gate.shape[0] < target_len:
+            pad = torch.ones(target_len - gate.shape[0], dtype=gate.dtype, device=gate.device)
+            gate = torch.cat([gate, pad], dim=0)
+        if device is not None and gate.device != device:
+            gate = gate.to(device)
+        return gate
+
+    def _merge_gate(current: torch.Tensor | None, new_gate: torch.Tensor | None):
+        new_gate = _match_len(new_gate)
+        if new_gate is None:
+            return current
+        if current is None:
+            return new_gate
+        if current.shape[0] != new_gate.shape[0]:
+            min_len = min(current.shape[0], new_gate.shape[0])
+            current = current[:min_len]
+            new_gate = new_gate[:min_len]
+        return current * new_gate
+
+    combined_gate = None
+
+    if gate_settings.get('use_endo4dgs', False) and transformed_pts is not None and local_opacities is not None:
+        endo_cfg = gate_settings.get('endo4dgs', {})
+        endo_gate = endo4dgs_confidence_gate(
+            transformed_pts[:, 2],
+            local_opacities,
+            normalize=endo_cfg.get('normalize', True),
+            eps=float(endo_cfg.get('eps', 1e-6))
+        )
+        combined_gate = _merge_gate(combined_gate, endo_gate)
+
+    if gate_settings.get('use_ehsurgs', False):
+        life_gate = ehsurgs_lifecycle_gate(params, float(time_idx), gate_settings.get('ehsurgs', {}))
+        combined_gate = _merge_gate(combined_gate, life_gate)
+
+    if 't_mu' in params and 't_logvar' in params:
+        temporal_gate = xyzt_time_gate(params, float(time_idx))
+        combined_gate = _merge_gate(combined_gate, temporal_gate)
+
+    if combined_gate is not None:
+        combined_gate = _match_len(combined_gate)
+        combined_gate = combined_gate.clamp_min(1e-6)
+
+    threshold = float(gate_settings.get('prune_thresh', default_thresh))
+    return combined_gate, threshold
 
 def transform_to_frame(local_means,params, time_idx, gaussians_grad, camera_grad):
     """
@@ -1060,7 +1221,7 @@ def initialize_deformations(params, nr_basis, use_distributed_biases, total_time
 
 
 def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis = 10,use_distributed_biases = False, total_timescale = None,use_deform = True,deform_type = 'gaussian',num_frames = 1,
-                            random_initialization = False,init_scale = 0.1):
+                            random_initialization = False,init_scale = 0.1, gate_conf=None, template_params=None):
     num_pts = new_pt_cld.shape[0]
     # Render all new gaussians with green color for debugging
     # new_pt_cld[:,3] = 0
@@ -1099,6 +1260,34 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis
         params = initialize_graph_deformations(params=params)
     if not use_simplification:
         params['feature_rest'] = torch.zeros(num_pts, 45) # set SH degree 3 fixed
+
+    gate_conf = gate_conf or {}
+    lifecycle_cfg = gate_conf.get('ehsurgs', {}) if gate_conf else {}
+    if template_params is not None and isinstance(template_params, dict) and 'eh_lc_base' in template_params:
+        base_template = template_params['eh_lc_base']
+        device = base_template.device
+        num_basis = template_params['eh_lc_weights'].shape[1]
+        params['eh_lc_base'] = base_template.detach().new_full((num_pts, 1), float(lifecycle_cfg.get('init_bias', 0.0)))
+        params['eh_lc_weights'] = template_params['eh_lc_weights'].detach().new_zeros((num_pts, num_basis))
+        mean_log_sigma = template_params['eh_lc_log_sigmas'].detach().mean(dim=0, keepdim=True)
+        params['eh_lc_log_sigmas'] = mean_log_sigma.repeat(num_pts, 1)
+        mean_centers = template_params['eh_lc_centers'].detach().mean(dim=0, keepdim=True)
+        params['eh_lc_centers'] = mean_centers.repeat(num_pts, 1)
+    elif gate_conf.get('use_ehsurgs', False):
+        device = means3D.device if isinstance(means3D, torch.Tensor) else torch.device("cuda")
+        num_basis = int(lifecycle_cfg.get('num_basis', 4))
+        init_bias = float(lifecycle_cfg.get('init_bias', 0.0))
+        init_sigma = float(lifecycle_cfg.get('init_sigma', 6.0))
+        log_sigma = math.log(max(init_sigma, 1e-3))
+        params['eh_lc_base'] = torch.full((num_pts, 1), init_bias, device=device)
+        params['eh_lc_weights'] = torch.zeros(num_pts, num_basis, device=device)
+        params['eh_lc_log_sigmas'] = torch.full((num_pts, num_basis), log_sigma, device=device)
+        span = lifecycle_cfg.get('time_span')
+        if span is None:
+            span = float(num_frames - 1 if num_frames > 1 else 1.0)
+        centers = torch.linspace(0.0, float(span), steps=num_basis, device=device)
+        params['eh_lc_centers'] = centers.unsqueeze(0).repeat(num_pts, 1)
+
     for k, v in params.items():
         # Check if value is already a torch tensor
         if not isinstance(v, torch.Tensor):
@@ -1214,7 +1403,23 @@ def texture_mask_laplacian(image_tensor: torch.Tensor, num_samples: int, ksize: 
 def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq_dist_method, use_simplification=True,
                       nr_basis = 10,use_distributed_biases = False,total_timescale = None,use_grn=False,grn_model=None,
                       use_deform = True,deformation_type = 'gaussian',num_frames = 1,
-                      random_initialization=False,init_scale=0.1,cam = None, reduce_gaussians = False,reduction_type = 'random',reduction_fraction = 0.5):
+                      random_initialization=False,init_scale=0.1,cam = None, reduce_gaussians = False,reduction_type = 'random',reduction_fraction = 0.5,
+                      gate_conf=None):
+    def _match_graph_columns(tensor, ref_tensor, fill_value):
+        if ref_tensor is None or ref_tensor.ndim < 2:
+            return tensor
+        target_cols = ref_tensor.shape[1]
+        if tensor.ndim == 1:
+            tensor = tensor.unsqueeze(1)
+        if tensor.shape[1] == target_cols:
+            return tensor
+        if tensor.shape[1] > target_cols:
+            return tensor[:, :target_cols]
+        pad_cols = target_cols - tensor.shape[1]
+        pad_shape = (tensor.shape[0], pad_cols)
+        pad = torch.full(pad_shape, fill_value, dtype=tensor.dtype, device=tensor.device)
+        return torch.cat([tensor, pad], dim=1)
+
     # Silhouette Rendering
     if use_deform == True:
         local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(params,time_idx,True,deformation_type =deformation_type)
@@ -1283,8 +1488,17 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
                                     curr_w2c, mask=non_presence_mask, compute_mean_sq_dist=True,
                                     mean_sq_dist_method=mean_sq_dist_method)
         print("Adding {} new gaussians".format(new_pt_cld.shape[0]))
-        new_params = initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis = nr_basis,use_distributed_biases=use_distributed_biases,total_timescale = total_timescale,use_deform = use_deform,deform_type=deformation_type,
-                                            num_frames = num_frames,random_initialization=random_initialization,init_scale=init_scale)
+        new_params = initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,
+                                           nr_basis=nr_basis,
+                                           use_distributed_biases=use_distributed_biases,
+                                           total_timescale=total_timescale,
+                                           use_deform=use_deform,
+                                           deform_type=deformation_type,
+                                           num_frames=num_frames,
+                                           random_initialization=random_initialization,
+                                           init_scale=init_scale,
+                                           gate_conf=gate_conf,
+                                           template_params=params)
         
 
         # bloat_params = True
@@ -1298,9 +1512,61 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
         # # Therefore means,scales and rotations are set to 0 for previous timesteps
         # mask = torch.ones((1,1,new_params['means3D'].shape[-1]),device="cuda")
         # mask[0,0,time_idx-1:] = 0
-        params_iter = {}
+        params_iter = params.copy()
+        graph_node_keys = {
+            'graph_nodes', 'node_v_xyz', 'node_a_xyz', 'node_v_ang', 'node_a_ang',
+            'node_v_s', 'node_a_s', 'node_ang0', 'node_s0', 'node_t0',
+            'fourier_xyz_cos', 'fourier_xyz_sin', 'fourier_ang_cos', 'fourier_ang_sin',
+            'fourier_s_cos', 'fourier_s_sin'
+        }
+        graph_per_gaussian = {'graph_idx', 'graph_w'}
+        skip_concat = {'cam_unnorm_rots', 'cam_trans'}
+
         for k, v in new_params.items():
+            if k in skip_concat:
+                continue
+            if k in graph_node_keys:
+                # Keep existing scene-level graph attributes untouched
+                continue
+            if k in graph_per_gaussian:
+                base = params_iter.get(k, None)
+                if base is None:
+                    params_iter[k] = v.detach() if isinstance(v, torch.nn.Parameter) else v
+                    continue
+                base_tensor = base.detach() if isinstance(base, torch.nn.Parameter) else base
+                new_tensor = v.detach() if isinstance(v, torch.nn.Parameter) else v
+                new_tensor = new_tensor.to(device=base_tensor.device, dtype=base_tensor.dtype)
+                fill_val = 0 if k == 'graph_idx' else 0.0
+                new_tensor = _match_graph_columns(new_tensor, base_tensor, fill_val)
+                combined = torch.cat((base_tensor, new_tensor), dim=0)
+                params_iter[k] = combined
+                continue
             params_iter[k] = torch.nn.Parameter(torch.cat((params[k], v), dim=0).requires_grad_(True))
+
+        # Grow XYZT gating tensors if they already exist
+        new_gauss = new_pt_cld.shape[0]
+        if new_gauss > 0:
+            if 't_mu' in params_iter:
+                base_mu = params_iter['t_mu']
+                base_data = base_mu.detach()
+                mu_device = base_data.device
+                mu_dtype = base_data.dtype
+                new_mu = torch.full((new_gauss,), float(time_idx), device=mu_device, dtype=mu_dtype)
+                params_iter['t_mu'] = torch.nn.Parameter(
+                    torch.cat((base_data, new_mu), dim=0).requires_grad_(True)
+                )
+            if 't_logvar' in params_iter:
+                base_lv = params_iter['t_logvar']
+                base_data = base_lv.detach()
+                lv_device = base_data.device
+                lv_dtype = base_data.dtype
+                default_logvar = torch.median(base_data).item() if base_data.numel() > 0 else math.log(25.0)
+                new_lv = torch.full((new_gauss,), float(default_logvar), device=lv_device, dtype=lv_dtype)
+                params_iter['t_logvar'] = torch.nn.Parameter(
+                    torch.cat((base_data, new_lv), dim=0).requires_grad_(True)
+                )
+
+        # Ensure camera tensors still refer to the shared arrays
         params_iter['cam_unnorm_rots'] = params['cam_unnorm_rots']
         params_iter['cam_trans'] = params['cam_trans']
         num_pts = params_iter['means3D'].shape[0]

@@ -11,14 +11,14 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "c1_transverse1_t4_v4"
+    scene_name = "c1_ascending_t4_v4"
 
 map_every = 1
 keyframe_every = 8
 # mapping_window_size = 24
-tracking_iters = 20
-mapping_iters = 20
-frames = 49 # adjust untill which frame
+tracking_iters = 25
+mapping_iters = 50
+frames = 45  # full sequence length for C3VDv2 c1_transverse1_t4_v4
 group_name = "C3VDv2_base"
 run_name = scene_name
 
@@ -47,9 +47,9 @@ config = dict(
         desired_image_height=1080//2,
         desired_image_width=1350//2,
         start=0,
-        end=frames,#-1,
+        end=frames,
         stride=1,
-        num_frames=frames,#-1,
+        num_frames=frames,
         train_or_test="all",
     ),
     depth = dict(
@@ -74,15 +74,32 @@ config = dict(
         sigma_mult = 0.5,  # σ ≈ 0.5 * median node spacing
         use_fourier = True,
         M = 2,   ),          # 2–4 Fourier modes per node is enough
-        rebind_stride = 10,
+        rebind_stride = 5,
         rebind_tau_mult = 2.5,
-        xyzt_init_sigma=30,
+        xyzt_init_sigma=10,
         use_distributed_biases = True,
-        xyzt_gate_thresh=0.35,
-        total_timescale = 50,
+        xyzt_gate_thresh=0.17,
+        total_timescale = frames,
         max_vel_xyz=0.01,         # scene units / frame (tight)
         max_ang_vel=0.016,         # rad / frame (~8.6°/frame)
         max_logscale_vel=0.01,    # per frame
+        gates=dict(
+            use_endo4dgs=True,
+            endo4dgs=dict(
+                normalize=True,
+                eps=1e-6
+            ),
+            use_ehsurgs=True,
+            ehsurgs=dict(
+                num_basis=6,
+                init_sigma=12.0,
+                init_bias=0.0,
+                clamp_min=0.0,
+                clamp_max=1.0,
+                time_span=frames
+            ),
+            prune_thresh=0.0
+        ),
     ),
     gaussian_reduction = dict(
         reduce_gaussians = False,
@@ -91,7 +108,7 @@ config = dict(
     ) ,  
     GRN = dict(
         use_grn = True,
-        random_initialization = True,
+        random_initialization = False,
         init_scale = 0.02,
         num_iters_initialization = 10,
         num_iters_initialization_added_gaussians = 60,
@@ -129,6 +146,10 @@ config = dict(
             fourier_ang_sin=  0.00002,
             fourier_s_cos=    0.00002,
             fourier_s_sin=    0.00002,
+            eh_lc_base=0.0001,
+            eh_lc_weights=0.00005,
+            eh_lc_centers=0.00005,
+            eh_lc_log_sigmas=0.00005,
             arap=5e-3,
         ),
         # grn_hidden_dim = 128,
@@ -141,8 +162,8 @@ config = dict(
         use_gt_poses=False, # Use GT Poses for Tracking
         forward_prop=True, # Forward Propagate Poses
         num_iters=tracking_iters,
-        use_sil_for_loss=True,
-        sil_thres=0.98,
+        use_sil_for_loss=False,
+        sil_thres=0.7,
         use_l1=True,
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
@@ -189,6 +210,10 @@ config = dict(
             fourier_ang_sin=  0.00002,
             fourier_s_cos=    0.00002,
             fourier_s_sin=    0.00002,
+            eh_lc_base=0.00005,
+            eh_lc_weights=0.00002,
+            eh_lc_centers=0.00002,
+            eh_lc_log_sigmas=0.00002,
 
         ),
     ),
@@ -235,6 +260,10 @@ config = dict(
             fourier_ang_sin=  0.00002,
             fourier_s_cos=    0.00002,
             fourier_s_sin=    0.00002,
+            eh_lc_base=0.00005,
+            eh_lc_weights=0.00002,
+            eh_lc_centers=0.00002,
+            eh_lc_log_sigmas=0.00002,
             arap=5e-3,
         ),
         prune_gaussians=True, # Prune Gaussians during Mapping

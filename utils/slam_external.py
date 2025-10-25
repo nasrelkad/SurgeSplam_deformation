@@ -147,6 +147,10 @@ def remove_points(to_remove, params, variables, optimizer):
 
     for k in keys:
         v = params[k]
+
+        # Skip non-tensor entries safely
+        if not isinstance(v, (torch.Tensor, torch.nn.Parameter)):
+            continue
         # Find optimizer group for this key (may be missing if frozen)
         group = next((g for g in optimizer.param_groups if g.get('name') == k), None)
 
@@ -234,11 +238,10 @@ def prune_gaussians(params, variables, optimizer, iter, prune_dict,use_grn):
             to_remove = (torch.sigmoid(params['logit_opacities']) < remove_threshold).squeeze()
             # Remove Gaussians that are too big
             if iter >= prune_dict['remove_big_after']:
-                if use_grn:
-                    big_points_ws = (params['log_scales']).max(dim=1).values > prune_dict['prune_size_thresh'] * variables['scene_radius']
-                else:
-                    big_points_ws = torch.exp(params['log_scales']).max(dim=1).values > prune_dict['prune_size_thresh'] * variables['scene_radius']
-                
+                # Always compare in world-space units; log_scales stores values in log-domain.
+                world_scales = torch.exp(params['log_scales'])
+                big_points_ws = world_scales.max(dim=1).values > prune_dict['prune_size_thresh'] * variables['scene_radius']
+
                 to_remove = torch.logical_or(to_remove, big_points_ws)
                 if to_remove.sum() > 0:
                     print(f"Removing {to_remove.sum()} Gaussians with big weights")

@@ -18,7 +18,14 @@ from diff_gaussian_rasterization import GaussianRasterizationSettings as Camera
 
 from utils.common_utils import seed_everything
 from utils.recon_helpers import setup_camera
-from utils.slam_helpers import get_depth_and_silhouette, _graph_node_motion, _aa_to_quat, _qmul
+from utils.slam_helpers import (
+    get_depth_and_silhouette,
+    _graph_node_motion,
+    _aa_to_quat,
+    _qmul,
+    apply_xyzt_gate,
+    compute_temporal_gate,
+)
 from utils.slam_external import build_rotation
 
 
@@ -359,7 +366,8 @@ def load_camera(cfg, scene_path):
     return w2c, k
 
 
-def load_scene_data(scene_path, first_frame_w2c, intrinsics, time_idx, deform_type=None):
+def load_scene_data(scene_path, first_frame_w2c, intrinsics, time_idx, deform_type=None,
+                    gate_config=None, gate_thresh=0.0):
     print(f"Loading data from {scene_path}")
     raw = dict(np.load(scene_path, allow_pickle=True))
     intrinsics = torch.as_tensor(intrinsics, dtype=torch.float32, device='cuda')
@@ -479,10 +487,16 @@ def load_scene_data(scene_path, first_frame_w2c, intrinsics, time_idx, deform_ty
         'scales': torch.exp(torch.tile(local_scales, (1, 3))),
         'means2D': torch.zeros_like(local_means, device="cuda")
     }
+    combined_gate, gate_threshold = compute_temporal_gate(
+        params, transformed_pts, local_opacities, time_idx, gate_config, gate_thresh
+    )
+    if combined_gate is not None:
+        rendervar = apply_xyzt_gate(rendervar, combined_gate, gate_thresh=gate_threshold)
+        depth_rendervar = apply_xyzt_gate(depth_rendervar, combined_gate, gate_thresh=gate_threshold)
     return rendervar, depth_rendervar, all_w2cs, params
 
 
-def deform_and_render(params, time_idx, deformation_type, w2c):
+def deform_and_render(params, time_idx, deformation_type, w2c, gate_config=None, gate_thresh=0.0):
     w2c = torch.tensor(w2c).cuda().float()
     local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(
         params, time_idx, False, deformation_type=deformation_type
@@ -512,6 +526,12 @@ def deform_and_render(params, time_idx, deformation_type, w2c):
         'scales': torch.exp(torch.tile(local_scales, (1, 3))),
         'means2D': torch.zeros_like(local_means, device="cuda")
     }
+    combined_gate, gate_threshold = compute_temporal_gate(
+        params, transformed_pts, local_opacities, time_idx, gate_config, gate_thresh
+    )
+    if combined_gate is not None:
+        rendervar = apply_xyzt_gate(rendervar, combined_gate, gate_thresh=gate_threshold)
+        depth_rendervar = apply_xyzt_gate(depth_rendervar, combined_gate, gate_thresh=gate_threshold)
     return rendervar, depth_rendervar, params
 
 def make_lineset(all_pts, all_cols, num_lines):
@@ -594,9 +614,17 @@ def rgbd2pcd(color, depth, w2c, intrinsics, cfg):
 
 def visualize(scene_path, cfg,experiment):
     time_idx = 0
+    gate_conf = experiment.config['deforms'].get('gates', None)
+    gate_thresh = experiment.config['deforms'].get('xyzt_gate_thresh', 0.0)
     w2c, k = load_camera(cfg, scene_path)
     scene_data, scene_depth_data, all_w2cs, params = load_scene_data(
-        scene_path, w2c, k, time_idx, deform_type=experiment.config['deforms']['deform_type']
+        scene_path,
+        w2c,
+        k,
+        time_idx,
+        deform_type=experiment.config['deforms']['deform_type'],
+        gate_config=gate_conf,
+        gate_thresh=gate_thresh
     )
     deformation_type = params.get('_deform_type', experiment.config['deforms']['deform_type'])
 
@@ -673,7 +701,14 @@ def visualize(scene_path, cfg,experiment):
     # Interactive Rendering
     while True:
         # scene_data, scene_depth_data, all_w2cs = load_scene_data(scene_path, w2c, k,time_idx,deformation_type=deformation_type)
-        scene_data,scene_depth_data, params = deform_and_render(params,time_idx,deformation_type,all_w2cs[time_idx])
+        scene_data,scene_depth_data, params = deform_and_render(
+            params,
+            time_idx,
+            deformation_type,
+            all_w2cs[time_idx],
+            gate_config=gate_conf,
+            gate_thresh=gate_thresh
+        )
 
         cam_params = view_control.convert_to_pinhole_camera_parameters()
         view_k = cam_params.intrinsic.intrinsic_matrix

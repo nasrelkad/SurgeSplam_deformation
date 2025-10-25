@@ -18,6 +18,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 import torch.nn as nn
+import math
 from datasets.gradslam_datasets import (
     load_dataset_config,
     EndoSLAMDataset,
@@ -38,6 +39,7 @@ from utils.slam_helpers import (
     transformed_GRNparams2depthplussilhouette,transformed_GRNparams2rendervar,
     add_new_gaussians,grn_initialization,deform_gaussians,initialize_deformations,initialize_new_params,grn_initialization,
     get_mask,align_shift_and_scale, initialize_cv_deformations, initialize_xyzt, xyzt_time_gate, apply_xyzt_gate, initialize_graph_deformations, arap_loss, arap_loss_graph,
+    compute_temporal_gate,
     rebind_graph_subset, periodic_rebind_if_far, rebind_graph, ensure_binding_buffers
 )
 from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, densify
@@ -466,7 +468,8 @@ def _to_tensor(v, device):
     return torch.tensor(v, device=device)
 
 def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification=True,use_deforms = True,deform_type = 'gaussian',nr_basis = 10,use_distributed_biases = False,total_timescale = None,cam = None,random_initialization = False,init_scale = 0.1, 
-                        graph_conf = {'num_nodes':   256, 'K': 6,'sigma_mult':  0.5, 'use_fourier': True, 'M':  2}):
+                        graph_conf = {'num_nodes':   256, 'K': 6,'sigma_mult':  0.5, 'use_fourier': True, 'M':  2},
+                        gate_conf=None):
     num_pts = init_pt_cld.shape[0]
     means3D = init_pt_cld[:, :3] # [num_gaussians, 3]
     unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1)) # [num_gaussians, 3]
@@ -525,6 +528,23 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification
         params = ensure_binding_buffers(params, K=graph_conf['K'], tag="post-init")
             
             
+
+    gate_conf = gate_conf or {}
+    lifecycle_cfg = gate_conf.get('ehsurgs', {}) if gate_conf else {}
+    if gate_conf.get('use_ehsurgs', False):
+        device = means3D.device if isinstance(means3D, torch.Tensor) else torch.device("cuda")
+        num_basis = int(lifecycle_cfg.get('num_basis', 4))
+        init_bias = float(lifecycle_cfg.get('init_bias', 0.0))
+        init_sigma = float(lifecycle_cfg.get('init_sigma', 6.0))
+        log_sigma = math.log(max(init_sigma, 1e-3))
+        params['eh_lc_base'] = torch.full((num_pts, 1), init_bias, device=device)
+        params['eh_lc_weights'] = torch.zeros(num_pts, num_basis, device=device)
+        params['eh_lc_log_sigmas'] = torch.full((num_pts, num_basis), log_sigma, device=device)
+        span = lifecycle_cfg.get('time_span')
+        if span is None:
+            span = float(num_frames - 1 if num_frames > 1 else 1.0)
+        centers = torch.linspace(0.0, float(span), steps=num_basis, device=device)
+        params['eh_lc_centers'] = centers.unsqueeze(0).repeat(num_pts, 1)
  
     # Initialize a single gaussian trajectory to model the camera poses relative to the first frame
     cam_rots = np.tile([1, 0, 0, 0], (1, 1))
@@ -662,7 +682,62 @@ def _clamp_cv_deform(params):
             scale = torch.clamp(ma / n, max=1.0)
             params['cv_angvel_aa'].mul_(scale)
 
-  
+
+def _extract_scalar(value, default):
+    if value is None:
+        return default
+    if isinstance(value, (float, int)):
+        val = float(value)
+        return val if math.isfinite(val) else default
+    if isinstance(value, torch.Tensor):
+        if value.numel() == 0:
+            return default
+        v = value.detach()
+        if v.numel() > 1:
+            v = torch.max(v)
+        val = float(v.item())
+        return val if math.isfinite(val) else default
+    return default
+
+
+def _sanitize_log_scales_for_render(log_scales, variables=None,
+                                    max_factor=0.5, min_factor=1e-4,
+                                    min_absolute=1e-4):
+    """
+    Clamp Gaussian log-scales before exponentiation to avoid overly large splats.
+    The clamp range adapts to the estimated scene radius when available.
+    """
+    device = log_scales.device
+    dtype = log_scales.dtype
+
+    if isinstance(variables, dict):
+        scene_radius_val = _extract_scalar(variables.get('scene_radius'), None)
+        max_factor = _extract_scalar(variables.get('scale_clamp_max_factor'), max_factor)
+        min_factor = _extract_scalar(variables.get('scale_clamp_min_factor'), min_factor)
+        min_absolute = _extract_scalar(variables.get('scale_clamp_absolute_min'), min_absolute)
+    else:
+        scene_radius_val = None
+
+    if scene_radius_val is None or not math.isfinite(scene_radius_val) or scene_radius_val <= 0.0:
+        scene_radius_val = 1.0
+
+    min_absolute = max(float(min_absolute), 1e-8)
+    min_factor = max(float(min_factor), 1e-8)
+    max_factor = max(float(max_factor), min_factor + 1e-6)
+
+    min_scale_val = max(scene_radius_val * min_factor, min_absolute)
+    max_scale_val = max(scene_radius_val * max_factor, min_scale_val)
+
+    log_min = math.log(min_scale_val)
+    log_max = math.log(max_scale_val)
+
+    log_min_t = log_scales.new_tensor(log_min)
+    log_max_t = log_scales.new_tensor(log_max)
+
+    cleaned = torch.where(torch.isfinite(log_scales), log_scales, log_min_t)
+    return torch.clamp(cleaned, min=log_min_t, max=log_max_t)
+
+
 # replace BOTH of these occurrences in main_SurgeSplat:
 #   color = color.permute(2, 0, 1) / 255
 #   tracking_color = tracking_color.permute(2, 0, 1) / 255
@@ -680,7 +755,8 @@ def to01(t):
 def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_radius_depth_ratio, mean_sq_dist_method, densify_dataset=None, use_simplification=True,use_gt_depth = True,
                               use_deforms=True,deform_type='gaussian',nr_basis = 10,use_distributed_biases = False,total_timescale=None,use_grn=False,grn_model=None,
                               random_initialization=False,init_scale=0.1,reduce_gaussians= True,reduction_type = 'laplace',reduction_fraction = 0.8,
-                              graph_conf = {'num_nodes':   256, 'K': 6,'sigma_mult':  0.5, 'use_fourier': True, 'M':  2}):
+                              graph_conf = {'num_nodes':   256, 'K': 6,'sigma_mult':  0.5, 'use_fourier': True, 'M':  2},
+                              gate_conf=None):
     # Get RGB-D Data & Camera Parameters
     # color, depth, intrinsics, pose = dataset[0]
 
@@ -725,7 +801,11 @@ def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_rad
     # Initialize Parameters
 
   
-    params_list, variables = initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification,use_deforms=use_deforms,deform_type=deform_type,nr_basis = nr_basis,use_distributed_biases=use_distributed_biases,total_timescale=total_timescale,cam = cam,random_initialization=random_initialization,init_scale=init_scale, graph_conf= graph_conf)
+    params_list, variables = initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification,
+                                               use_deforms=use_deforms, deform_type=deform_type, nr_basis=nr_basis,
+                                               use_distributed_biases=use_distributed_biases, total_timescale=total_timescale,
+                                               cam=cam, random_initialization=random_initialization, init_scale=init_scale,
+                                               graph_conf=graph_conf, gate_conf=gate_conf)
     
     # bloat_params = True
     # if bloat_params:
@@ -759,11 +839,14 @@ def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_rad
                             'sigma_mult':  graph_conf['sigma_mult'],
                             'use_fourier': graph_conf['use_fourier'],
                             'M':           graph_conf['M']}
-            params_list = params
+        params_list = params
 
     
     # Initialize an estimate of scene radius for Gaussian-Splatting Densification
     variables['scene_radius'] = torch.max(depth)/scene_radius_depth_ratio # NOTE: change_here
+    variables.setdefault('scale_clamp_max_factor', 0.5)
+    variables.setdefault('scale_clamp_min_factor', 1e-4)
+    variables.setdefault('scale_clamp_absolute_min', 1e-4)
 
     if densify_dataset is not None:
         return params_list, variables, intrinsics, w2c, cam, densify_intrinsics, densify_cam
@@ -775,7 +858,7 @@ def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_rad
 def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_weights, use_sil_for_loss, 
              sil_thres, use_l1,ignore_outlier_depth_loss, tracking=False, 
              mapping=False, do_ba=False, plot_dir=None, visualize_tracking_loss=False, tracking_iteration=None,use_gt_depth = True,gaussian_deformations = True,save_idx=0,
-             use_grn = False,deformation_type = 'gaussian', gate_thresh = 0.35):
+             use_grn = False,deformation_type = 'gaussian', gate_thresh = 0.35, gate_config=None):
 
     global w2cs, w2ci
     # Initialize Loss Dictionary
@@ -788,11 +871,12 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
         else:
             local_means,local_rots,local_scales,local_opacities,local_colors= deform_gaussians(params,iter_time_idx,deform_grad = False,deformation_type = deformation_type)
     else:
-        local_means = params['means3D']
-        local_rots = params['unnorm_rotations']
-        local_scales = params['log_scales']
-        local_opacities = params['logit_opacities']
-        local_colors = params['rgb_colors']
+       local_means = params['means3D']
+       local_rots = params['unnorm_rotations']
+       local_scales = params['log_scales']
+       local_opacities = params['logit_opacities']
+       local_colors = params['rgb_colors']
+    local_scales = _sanitize_log_scales_for_render(local_scales, variables)
     if tracking:
         # Get current frame Gaussians, where only the camera pose gets gradient
         
@@ -864,11 +948,12 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
                                                                     transformed_pts,local_rots,local_scales,local_opacities)
     
     # Visualize the Rendered Images
-    if 't_mu' in params:    
-        gt = xyzt_time_gate(params, float(iter_time_idx))     # time index of this frame
-        rendervar = apply_xyzt_gate(
-            rendervar, gt, gate_thresh=gate_thresh)
-        
+    combined_gate, gate_threshold = compute_temporal_gate(
+        params, transformed_pts, local_opacities, iter_time_idx, gate_config, gate_thresh
+    )
+    if combined_gate is not None:
+        rendervar = apply_xyzt_gate(rendervar, combined_gate, gate_thresh=gate_threshold)
+        depth_sil_rendervar = apply_xyzt_gate(depth_sil_rendervar, combined_gate, gate_thresh=gate_threshold)
 
     # RGB Rendering
     try:
@@ -1209,6 +1294,7 @@ def optimize_initialization(params,params_init,curr_data,num_iters_initializatio
     optimizer = initialize_optimizer(params,config['GRN']['random_initialization_lrs'])
     iter = 0
     save_idx = 0
+    gate_conf = config['deforms'].get('gates', None)
 
     progress_bar = tqdm(range(num_iters_initialization), desc=f"Initial optimization")
 
@@ -1218,7 +1304,8 @@ def optimize_initialization(params,params_init,curr_data,num_iters_initializatio
                     config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True,
                     visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
                     tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=None,gaussian_deformations=config['deforms']['use_deformations'],
-                    use_grn = config['GRN']['use_grn'],deformation_type = config['deforms']['deform_type'], gate_thresh = config['deforms']['xyzt_gate_thresh'])
+                    use_grn = config['GRN']['use_grn'],deformation_type = config['deforms']['deform_type'], gate_thresh = config['deforms']['xyzt_gate_thresh'],
+                    gate_config=gate_conf)
         loss.backward()
         optimizer.step()
         _clamp_cv_deform(params)
@@ -1278,6 +1365,9 @@ def rgbd_slam(config: dict):
         config['gaussian_simplification'] = True # simplified in paper
     if not config['gaussian_simplification']:
         print("Using Full Gaussian Representation, which may cause unstable optimization if not fully optimized.")
+    gate_conf = None
+    if 'deforms' in config:
+        gate_conf = config['deforms'].get('gates', None)
     if "gradslam_data_cfg" not in dataset_config:
         gradslam_data_cfg = {}
         gradslam_data_cfg["dataset_name"] = dataset_config["dataset_name"]
@@ -1408,7 +1498,8 @@ def rgbd_slam(config: dict):
                                                                         use_deforms=config['deforms']['use_deformations'],
                                                                         deform_type=config['deforms']['deform_type'],
                                                                         use_grn = config['GRN']['use_grn'],
-                                                                        graph_conf = config['deforms']['graph'])    
+                                                                        graph_conf = config['deforms']['graph'],
+                                                                        gate_conf=gate_conf)    
 
 
     else:
@@ -1478,7 +1569,8 @@ def rgbd_slam(config: dict):
                                                                             reduce_gaussians = config['gaussian_reduction']['reduce_gaussians'],
                                                                             reduction_type = config['gaussian_reduction']['reduction_type'],
                                                                             reduction_fraction=config['gaussian_reduction']['reduction_fraction'],
-                                                                            graph_conf =  config['deforms']['graph'])        
+                                                                            graph_conf =  config['deforms']['graph'],
+                                                                            gate_conf=gate_conf)        
         
     params = initialize_xyzt(
             params,
@@ -1722,7 +1814,8 @@ def rgbd_slam(config: dict):
                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
                                                    plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
                                                    tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=None,gaussian_deformations=config['deforms']['use_deformations'],
-                                                   use_grn = config['GRN']['use_grn'],deformation_type = config['deforms']['deform_type'])
+                                                   use_grn = config['GRN']['use_grn'],deformation_type = config['deforms']['deform_type'],
+                                                   gate_config=gate_conf, gate_thresh=config['deforms']['xyzt_gate_thresh'])
                 # print(loss)
                 save_idx = save_idx+1
 
@@ -1758,7 +1851,18 @@ def rgbd_slam(config: dict):
                             candidate_log_scales = params_iter['log_scales'].detach().clone()
                     # Report Progress
                     if config['report_iter_progress']:
-                        report_progress(params_iter, tracking_curr_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True)
+                        report_progress(
+                            params_iter,
+                            tracking_curr_data,
+                            iter+1,
+                            progress_bar,
+                            iter_time_idx,
+                            sil_thres=config['tracking']['sil_thres'],
+                            tracking=True,
+                            gate_config=gate_conf,
+                            deformation_type=config['deforms']['deform_type'],
+                            gate_thresh=config['deforms']['xyzt_gate_thresh']
+                        )
                     else:
                         progress_bar.update(1)
                 # Update the runtime numbers
@@ -1834,6 +1938,7 @@ def rgbd_slam(config: dict):
             # local_means = params['means3D']
             # local_rots = params['unnorm_rotations']
             # local_scales = params['log_scales']
+            local_scales = _sanitize_log_scales_for_render(local_scales, variables)
             transformed_pts = transform_to_frame(local_means,params_iter, time_idx, gaussians_grad=False, camera_grad=False)
             # img_rendervar = transformed_params2rendervar(params,transformed_pts,local_rots,local_scales)
             if config['GRN']['use_grn']:
@@ -1911,7 +2016,8 @@ def rgbd_slam(config: dict):
                                                         init_scale=config['GRN']['init_scale'],cam = cam,
                                                         reduce_gaussians = config['gaussian_reduction']['reduce_gaussians'],
                                                         reduction_type = config['gaussian_reduction']['reduction_type'],
-                                                        reduction_fraction=config['gaussian_reduction']['reduction_fraction'] )                     # if config['GRN']['random_initialization']:
+                                                        reduction_fraction=config['gaussian_reduction']['reduction_fraction'],
+                                                        gate_conf=gate_conf )                     # if config['GRN']['random_initialization']:
 
                     if config['deforms']['use_deformations'] and config['deforms']['deform_type'] in ('graph', 'hybrid'):
                         G1 = params_iter['means3D'].shape[0]
@@ -2062,8 +2168,19 @@ def rgbd_slam(config: dict):
                         # Report Mapping Progress
                         progress_bar = tqdm(range(1), desc=f"Mapping Result Time Step: {time_idx}")
                         with torch.no_grad():
-                            report_progress(params_iter, curr_data, 1, progress_bar, time_idx, sil_thres=config['mapping']['sil_thres'], 
-                                            mapping=True, online_time_idx=time_idx)
+                            report_progress(
+                                params_iter,
+                                curr_data,
+                                1,
+                                progress_bar,
+                                time_idx,
+                                sil_thres=config['mapping']['sil_thres'],
+                                mapping=True,
+                                online_time_idx=time_idx,
+                                gate_config=gate_conf,
+                                deformation_type=config['deforms']['deform_type'],
+                                gate_thresh=config['deforms']['xyzt_gate_thresh']
+                            )
                         progress_bar.close()
                     except:
                         ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
@@ -2138,6 +2255,7 @@ def rgbd_slam(config: dict):
         # local_means = params['means3D']
         # local_rots = params['unnorm_rotations']
         # local_scales = params['log_scales']
+        local_scales = _sanitize_log_scales_for_render(local_scales, variables)
         transformed_pts = transform_to_frame(local_means,params_iter, time_idx_plot, gaussians_grad=False, camera_grad=False)
         
         # img_rendervar = transformed_params2rendervar(params,transformed_pts,local_rots,local_scales)
@@ -2227,8 +2345,18 @@ def rgbd_slam(config: dict):
         # Evaluate Final Parameters
     dataset = [dataset, eval_dataset, 'C3VD'] if dataset_config["train_or_test"] == 'train' else dataset
     with torch.no_grad():
-        eval_save(dataset, params, eval_dir, sil_thres=config['mapping']['sil_thres'],
-                mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],use_grn = config['GRN']['use_grn'], deformation_type = config['deforms']['deform_type'])
+        eval_save(
+            dataset,
+            params,
+            eval_dir,
+            sil_thres=config['mapping']['sil_thres'],
+            mapping_iters=config['mapping']['num_iters'],
+            add_new_gaussians=config['mapping']['add_new_gaussians'],
+            use_grn=config['GRN']['use_grn'],
+            deformation_type=config['deforms']['deform_type'],
+            gate_config=gate_conf,
+            gate_thresh=config['deforms']['xyzt_gate_thresh']
+        )
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

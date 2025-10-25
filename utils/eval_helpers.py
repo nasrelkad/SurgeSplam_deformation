@@ -20,6 +20,8 @@ from utils.slam_helpers import (
     _graph_node_motion,
     _aa_to_quat,
     _qmul,
+    apply_xyzt_gate,
+    compute_temporal_gate,
 )
 from utils.slam_helpers import deform_gaussians as deform_gaussians_eval
 
@@ -206,10 +208,26 @@ def plot_rgbd_silhouette(color, depth, rastered_color, rastered_depth, presence_
 
 def report_progress(params, data, i, progress_bar, iter_time_idx, sil_thres, every_i=1, qual_every_i=1, 
                     tracking=False, mapping=False, online_time_idx=None,
-                    global_logging=True):
+                    global_logging=True, gate_config=None, deformation_type=None,
+                    gate_thresh=0.0):
     if i % every_i == 0 or i == 1:
         if not global_logging:
             stage = "Per Iteration " + stage
+
+        deform_mode = deformation_type
+        if deform_mode is None:
+            if 'graph_nodes' in params and 'cv_vel_xyz' in params:
+                deform_mode = 'hybrid'
+            elif 'graph_nodes' in params:
+                deform_mode = 'graph'
+            elif 'cv_vel_xyz' in params:
+                deform_mode = 'cv'
+            else:
+                deform_mode = 'gaussian'
+
+        local_means, local_rots, local_scales, local_opacities, local_colors = deform_gaussians_eval(
+            params, iter_time_idx, False, deformation_type=deform_mode
+        )
 
         if tracking:
             # Get list of gt poses
@@ -260,6 +278,13 @@ def report_progress(params, data, i, progress_bar, iter_time_idx, sil_thres, eve
         rendervar = transformed_params2rendervar(params, transformed_pts)
         depth_sil_rendervar = transformed_params2depthplussilhouette(params, data['w2c'], 
                                                                      transformed_pts)
+        combined_gate, gate_threshold = compute_temporal_gate(
+            params, transformed_pts, local_opacities, iter_time_idx, gate_config, gate_thresh
+        )
+        if combined_gate is not None:
+            rendervar = apply_xyzt_gate(rendervar, combined_gate, gate_thresh=gate_threshold)
+            depth_sil_rendervar = apply_xyzt_gate(depth_sil_rendervar, combined_gate, gate_thresh=gate_threshold)
+
         depth_sil, _, _ = Renderer(raster_settings=data['cam'])(**depth_sil_rendervar)
         rastered_depth = depth_sil[0, :, :].unsqueeze(0)
         valid_depth_mask = (data['depth'] > 0) & (data['depth'] < 1e10)
@@ -496,7 +521,8 @@ def compute_errors(gt, pred):
     return abs_rel, sq_rel, rmse, rmse_log, a1, a2, a3, psnr
 
 def eval_save(dataset, final_params, eval_dir, sil_thres, 
-         mapping_iters, add_new_gaussians, save_renders=True,use_grn = True, deformation_type='simple'):
+         mapping_iters, add_new_gaussians, save_renders=True,use_grn = True, deformation_type='simple',
+         gate_config=None, gate_thresh=0.0):
     # timer = Timer()
     # timer.start()
     split = False
@@ -626,6 +652,13 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
 
                 depth_sil_rendervar = transformed_params2depthplussilhouette(final_params, curr_data['w2c'],
                                                                             transformed_pts,local_rots,local_scales,local_opacities)
+
+            combined_gate, gate_threshold = compute_temporal_gate(
+                final_params, transformed_pts, local_opacities, total_time_idx, gate_config, gate_thresh
+            )
+            if combined_gate is not None:
+                rendervar = apply_xyzt_gate(rendervar, combined_gate, gate_thresh=gate_threshold)
+                depth_sil_rendervar = apply_xyzt_gate(depth_sil_rendervar, combined_gate, gate_thresh=gate_threshold)
 
             # Render Depth & Silhouette
             depth_sil, _, _ = Renderer(raster_settings=curr_data['cam'])(**depth_sil_rendervar)
