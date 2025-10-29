@@ -96,9 +96,167 @@ def energy_mask(color: torch.Tensor, th_1=0.1, th_2=0.9):
     mask out the background(black). set to 0 to mask black only, and other value(0, 1) to filter pixels with certain brightness
     """
     weights = torch.tensor([0.2989, 0.5870, 0.1140], device=color.device).view(3, 1, 1)
-    gray = torch.sum(color * weights, dim=0).detach() # mask should not have grad
-    zero_mask = torch.where((gray >= th_1) & (gray <= th_2), torch.tensor([True], device=color.device), torch.tensor([False], device=color.device))[None]
-    # Image.fromarray(np.uint8(zero_mask[0].detach().cpu().numpy()*255), 'L').save('mask.png')
 
-    # return zero_mask
-    return torch.ones_like(zero_mask).to(zero_mask.device)
+    # Ensure color is in [0,1]. Some callers may pass uint8 images (0..255).
+    # If the image max is > 2 we assume 0..255 and normalize.
+    with torch.no_grad():
+        cmax = float(color.max())
+        if cmax > 2.0:
+            color = color / 255.0
+
+    gray = torch.sum(color * weights, dim=0).detach()  # mask should not have grad
+
+    # Build boolean mask: True = foreground (keep)
+    mask = (gray >= th_1) & (gray <= th_2)
+    # Add leading batch/channel dim to match the pipeline expectation (1,H,W)
+    zero_mask = mask[None]
+
+    # Return a proper boolean tensor on the same device.
+    return zero_mask.to(dtype=torch.bool, device=color.device)
+
+
+def detect_collapse(color: torch.Tensor | None,
+                    depth: torch.Tensor | None,
+                    prev_area_frac: float | None = None,
+                    area_drop_frac: float = 0.5,
+                    min_area_frac: float = 0.05,
+                    verbose: bool = False):
+    """
+    Heuristic collapse detector based on image and/or depth coverage.
+
+    Args:
+        color: [3,H,W] image tensor (can be None if only depth used)
+        depth: [1,H,W] or [H,W] depth tensor (can be None if only color used)
+        prev_area_frac: previous frame foreground fraction (optional)
+        area_drop_frac: relative drop factor to declare collapse (e.g. 0.5 means current < prev*0.5)
+        min_area_frac: absolute minimum area fraction to consider collapsed
+        verbose: print debug info
+
+    Returns:
+        collapsed (bool), stats (dict) with keys 'area_frac' and 'depth_med'
+    """
+    H = W = None
+    area_frac = None
+    depth_med = None
+
+    if depth is not None:
+        d = depth.detach().cpu().numpy()
+        if d.ndim == 3 and d.shape[0] == 1:
+            d = d[0]
+        valid = (d > 0) & np.isfinite(d)
+        area_frac = float(valid.mean())
+        if valid.sum() > 0:
+            depth_med = float(np.median(d[valid]))
+        H, W = d.shape
+
+    if color is not None and area_frac is None:
+        c = color.detach().cpu().numpy()
+        if c.ndim == 3:
+            # expect CHW
+            if c.shape[0] == 3:
+                gray = c.mean(axis=0)
+            else:
+                gray = c
+        else:
+            gray = c
+        valid = (gray > (gray.mean() * 0.5))
+        area_frac = float(valid.mean())
+        H, W = gray.shape
+
+    if area_frac is None:
+        # no signal available
+        return False, {'area_frac': None, 'depth_med': None}
+
+    collapsed = False
+    if prev_area_frac is not None:
+        if area_frac < prev_area_frac * area_drop_frac:
+            collapsed = True
+    if area_frac < min_area_frac:
+        collapsed = True
+
+    if verbose:
+        print(f"detect_collapse: area_frac={area_frac:.4f} prev={prev_area_frac} depth_med={depth_med} -> collapsed={collapsed}")
+
+    return collapsed, {'area_frac': area_frac, 'depth_med': depth_med}
+
+
+def adaptive_collapse_densify(params, variables, curr_data, time_idx, mean_sq_dist_method,
+                              optimizer=None, prev_area_frac=None, aggressive_cfg: dict | None = None,
+                              use_grn=False, grn_model=None, gate_conf=None, verbose=False):
+    """
+    If a collapse is detected on the current frame `curr_data`, call `add_new_gaussians`
+    with more aggressive parameters to densify the representation in missing/occluded regions.
+
+    This is a helper wrapper that does not change global control flow; it returns
+    the updated (params, variables) pair from `add_new_gaussians` so callers can use it
+    inline during mapping.
+
+    Args:
+        params, variables: current scene state
+        curr_data: dict with keys 'im', 'depth', 'intrinsics', 'w2c', 'cam' as in your pipeline
+        time_idx: integer frame index
+        mean_sq_dist_method: pass-through to add_new_gaussians
+        optimizer: optional optimizer (not used here but kept for API symmetry)
+        prev_area_frac: previous frame area fraction used by detect_collapse
+        aggressive_cfg: dict overriding aggressive add_new_gaussians defaults
+        use_grn, grn_model, gate_conf: passed to add_new_gaussians
+    Returns:
+        params_iter, variables, info
+    """
+    # Lazy import to avoid circular dependencies at module import time
+    from utils.slam_helpers import add_new_gaussians
+
+    # Default aggressive settings
+    # Aggressive defaults tuned for collapsed-lumen densification: smaller init scale,
+    # more bases to cover local complexity, and random initialization to avoid bias.
+    aggressive_defaults = dict(
+        nr_basis=8,
+        use_distributed_biases=False,
+        total_timescale=None,
+        use_grn=use_grn,
+        grn_model=grn_model,
+        use_deform=True,
+        deformation_type='gaussian',
+        num_frames=1,
+        random_initialization=True,
+        init_scale=0.02,
+        cam=curr_data.get('cam', None),
+        reduce_gaussians=False,
+        reduction_type='random',
+        reduction_fraction=0.5,
+        gate_conf=gate_conf,
+    )
+
+    if aggressive_cfg is not None:
+        aggressive_defaults.update(aggressive_cfg)
+
+    # Run detection using current data
+    collapsed, stats = detect_collapse(curr_data.get('im', None), curr_data.get('depth', None), prev_area_frac=prev_area_frac)
+    info = {'collapsed': collapsed, 'detector_stats': stats}
+
+    if collapsed:
+        if verbose:
+            print(f"adaptive_collapse_densify: collapse detected at t={time_idx}, running aggressive add_new_gaussians")
+        params_iter, variables = add_new_gaussians(params, variables, curr_data, sil_thres=0.5,
+                                                   time_idx=time_idx, mean_sq_dist_method=mean_sq_dist_method,
+                                                   use_simplification=True,
+                                                   nr_basis=aggressive_defaults['nr_basis'],
+                                                   use_distributed_biases=aggressive_defaults['use_distributed_biases'],
+                                                   total_timescale=aggressive_defaults['total_timescale'],
+                                                   use_grn=aggressive_defaults['use_grn'],
+                                                   grn_model=aggressive_defaults['grn_model'],
+                                                   use_deform=aggressive_defaults['use_deform'],
+                                                   deformation_type=aggressive_defaults['deformation_type'],
+                                                   num_frames=aggressive_defaults['num_frames'],
+                                                   random_initialization=aggressive_defaults['random_initialization'],
+                                                   init_scale=aggressive_defaults['init_scale'],
+                                                   cam=aggressive_defaults['cam'],
+                                                   reduce_gaussians=aggressive_defaults['reduce_gaussians'],
+                                                   reduction_type=aggressive_defaults['reduction_type'],
+                                                   reduction_fraction=aggressive_defaults['reduction_fraction'],
+                                                   gate_conf=aggressive_defaults['gate_conf'])
+        info['action'] = 'added_gaussians'
+        return params_iter, variables, info
+
+    info['action'] = 'none'
+    return params, variables, info

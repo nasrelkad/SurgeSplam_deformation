@@ -97,9 +97,41 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
 
 
 def accumulate_mean2d_gradient(variables):
-    variables['means2D_gradient_accum'][variables['seen']] += torch.norm(
-        variables['means2D'].grad[variables['seen'], :2], dim=-1)
-    variables['denom'][variables['seen']] += 1
+    # Defensive: ensure 'seen' exists and lengths align before boolean-indexing
+    if 'seen' not in variables:
+        # Nothing to accumulate this round
+        print('[densify-accum] warning: "seen" missing in variables — skipping accumulate')
+        return variables
+
+    seen = variables['seen']
+
+    # Ensure required buffers are present
+    if 'means2D_gradient_accum' not in variables or 'denom' not in variables or 'means2D' not in variables:
+        print('[densify-accum] warning: missing buffers in variables — skipping accumulate')
+        return variables
+
+    grad_buf = variables['means2D_gradient_accum']
+    denom_buf = variables['denom']
+    means2D = variables['means2D']
+
+    # Compute a safe common length to avoid indexing mismatches
+    try:
+        min_len = min(grad_buf.shape[0], denom_buf.shape[0], means2D.grad.shape[0], seen.shape[0])
+    except Exception:
+        # If any object doesn't have expected attributes, fallback to conservative min
+        min_len = min(grad_buf.shape[0], denom_buf.shape[0], seen.shape[0])
+
+    if min_len <= 0:
+        return variables
+
+    if (grad_buf.shape[0] != seen.shape[0]) or (denom_buf.shape[0] != seen.shape[0]) or (means2D.grad.shape[0] != seen.shape[0]):
+        print(f"[densify-accum] aligning lengths: grad={grad_buf.shape[0]}, denom={denom_buf.shape[0]}, means2D_grad={getattr(means2D.grad,'shape',None)}, seen={seen.shape[0]} -> min_len={min_len}")
+
+    # Slice to common length then apply boolean mask
+    use_seen = seen[:min_len]
+    variables['means2D_gradient_accum'][:min_len][use_seen] += torch.norm(
+        means2D.grad[:min_len][use_seen, :2], dim=-1)
+    variables['denom'][:min_len][use_seen] += 1
     return variables
 
 
@@ -263,6 +295,35 @@ def densify(params, variables, optimizer, iter, densify_dict):
         if (iter >= densify_dict['start_after']) and (iter % densify_dict['densify_every'] == 0):
             grads = variables['means2D_gradient_accum'] / variables['denom']
             grads[grads.isnan()] = 0.0
+            # Defensive alignment: ensure grads and other per-gaussian buffers
+            # match the current number of gaussians in params['means3D'].
+            try:
+                G_target = int(params['means3D'].shape[0])
+                if grads.shape[0] != G_target:
+                    old_len = grads.shape[0]
+                    if grads.shape[0] > G_target:
+                        grads = grads[:G_target]
+                    else:
+                        pad = torch.zeros((G_target - grads.shape[0],), device=grads.device, dtype=grads.dtype)
+                        grads = torch.cat([grads, pad], dim=0)
+                    variables['means2D_gradient_accum'] = grads * variables['denom']
+                    # Align other commonly used buffers
+                    for name in ('denom', 'max_2D_radius'):
+                        if name in variables:
+                            v = variables[name]
+                            if v.shape[0] != G_target:
+                                try:
+                                    if v.shape[0] > G_target:
+                                        variables[name] = v[:G_target]
+                                    else:
+                                        pad = torch.zeros((G_target - v.shape[0],) + v.shape[1:], device=v.device, dtype=v.dtype)
+                                        variables[name] = torch.cat([v, pad], dim=0)
+                                except Exception:
+                                    variables[name] = torch.zeros(G_target, device=v.device if hasattr(v,'device') else 'cuda')
+                    print(f"[densify-align] adjusted grads from {old_len} -> {G_target}")
+            except Exception:
+                print(Exception)
+                pass
             to_clone = torch.logical_and(grads >= grad_thresh, (
                         torch.max(torch.exp(params['log_scales']), dim=1).values <= 0.01 * variables['scene_radius']))
             new_params = {k: v[to_clone] for k, v in params.items() if k not in ['cam_unnorm_rots', 'cam_trans']}

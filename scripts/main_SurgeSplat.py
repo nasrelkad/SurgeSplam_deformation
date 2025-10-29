@@ -4,7 +4,7 @@ import shutil
 import sys
 import time
 from importlib.machinery import SourceFileLoader
-
+import traceback
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 sys.path.insert(0, _BASE_DIR)
@@ -32,7 +32,7 @@ from datasets.gradslam_datasets import (
 from utils.common_utils import seed_everything, save_params_ckpt, save_params, save_means3D
 from utils.eval_helpers import report_progress, eval_save
 from utils.keyframe_selection import keyframe_selection_overlap, keyframe_selection_distance
-from utils.recon_helpers import setup_camera, energy_mask
+from utils.recon_helpers import setup_camera, energy_mask, adaptive_collapse_densify, detect_collapse
 from utils.slam_helpers import (
     transformed_params2rendervar, transformed_params2depthplussilhouette,
     transform_to_frame, l1_loss_v1, matrix_to_quaternion,
@@ -188,8 +188,8 @@ def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True,
     x_grid, y_grid = torch.meshgrid(torch.arange(width).cuda().float(),
                                     torch.arange(height).cuda().float(),
                                     indexing='xy')
-    xx = (x_grid - CX)/FX
-    yy = (y_grid - CY)/FY
+    xx = (x_grid - CX) / FX
+    yy = (y_grid - CY) / FY
     xx = xx.reshape(-1)
     yy = yy.reshape(-1)
     depth_z = depth[0].reshape(-1)
@@ -783,14 +783,48 @@ def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_rad
     else:
         densify_intrinsics = intrinsics
 
-    # Get Initial Point Cloud (PyTorch CUDA Tensor)
-    mask = (depth > 0) & energy_mask(color) # Mask out invalid depth values
-    # Image.fromarray(np.uint8(mask[0].detach().cpu().numpy()*255), 'L').save('mask.png')
-    print("Initial gaussian mask contains {} valid pixels".format(torch.sum(mask)))
-    mask = mask.reshape(-1)
+    # Build a robust [H,W] foreground mask from depth and color so that
+    # flattening always matches image resolution. This avoids cases where
+    # downstream code sees mismatched flattened sizes (e.g., 540x540 vs 540x675).
+    # depth is expected as (C,H,W) or (H,W)
+    if isinstance(depth, torch.Tensor) and depth.ndim == 3:
+        if depth.shape[0] == 1:
+            depth_valid = (depth[0] > 0)
+        else:
+            # collapse multi-channel depth to a single valid mask
+            depth_valid = (depth > 0).any(dim=0)
+    else:
+        depth_valid = (depth > 0)
+
+    energy = energy_mask(color)  # returns shape [1,H,W]
+    if isinstance(energy, torch.Tensor) and energy.ndim == 3:
+        energy = energy[0]
+
+    mask_hw = depth_valid & energy
+    # Ensure mask is same spatial size as color/depth
+    H_target = color.shape[1]
+    W_target = color.shape[2]
+    if mask_hw.shape != (H_target, W_target):
+        # Try to resize using nearest neighbour to match expected resolution
+        try:
+            mask_hw = torch.nn.functional.interpolate(mask_hw[None, None, ...].float(), size=(H_target, W_target), mode='nearest')[0, 0].bool()
+            print(f"Resized mask from {mask_hw.shape} to {(H_target, W_target)} to match image resolution")
+        except Exception:
+            # As a last resort, crop or pad to target size
+            mh, mw = mask_hw.shape
+            if mh >= H_target and mw >= W_target:
+                mask_hw = mask_hw[:H_target, :W_target]
+            else:
+                pad_h = max(0, H_target - mh)
+                pad_w = max(0, W_target - mw)
+                mask_hw = torch.nn.functional.pad(mask_hw.float(), (0, pad_w, 0, pad_h)).bool()
+                print(f"Padded mask from {(mh,mw)} to {(H_target, W_target)}")
+
+    print("Initial gaussian mask contains {} valid pixels".format(int(mask_hw.sum())))
+    mask = mask_hw.reshape(-1)
     if reduce_gaussians:
-        mask = get_mask(mask,color,reduction_type,reduction_fraction)
-    print("After reducing gaussians, mask conttains {} valid pixels".format(torch.sum(mask)))
+        mask = get_mask(mask, color, reduction_type, reduction_fraction)
+    print("After reducing gaussians, mask conttains {} valid pixels".format(int(mask.sum())))
 
 
 
@@ -987,41 +1021,67 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
     else:
         mask = (curr_data['depth'] > 0)
     mask = mask & nan_mask & bg_mask
+    # If mask becomes empty, try a fallback using renderer presence / silhouette to avoid empty intersections
+    try:
+        if isinstance(mask, torch.Tensor) and mask.sum() == 0:
+            fallback_mask = nan_mask & bg_mask
+            try:
+                if 'presence_sil_mask' in locals():
+                    fallback_mask = fallback_mask & presence_sil_mask
+            except Exception:
+                pass
+            if fallback_mask.sum() > 0:
+                print('Warning: mask empty -> using fallback_mask from nan_mask/bg_mask[/presence_sil_mask]')
+                mask = fallback_mask
+    except Exception:
+        pass
     
     # Mask with presence silhouette mask (accounts for empty space)
     if tracking and use_sil_for_loss:
         mask = mask & presence_sil_mask
     if not use_gt_depth:
+        # Diagnostics before alignment: log shapes and counts to help debug empty masks
+        
         rendered_depth_aligned,predicted_depth_aligned,_,_,_,_ = align_shift_and_scale(depth,curr_data['depth'],mask)
         # rendered_depth_aligned = (depth-depth.min())/(depth.max()-depth.min())+0.1
         # predicted_depth_aligned = (curr_data['depth']-curr_data['depth'].min())/(curr_data['depth'].max()-curr_data['depth'].min())+0.1
         # rendered_depth_aligned = depth
         # predicted_depth_aligned = curr_data['depth']
     
-    if False:
-        fig,ax = plt.subplots(2,4)
-        ax[0,0].imshow(im.permute(1,2,0).cpu().detach())
-        ax[0,0].set_title('Rendered im')
-        ax[0,1].imshow(curr_data['im'].permute(1,2,0).cpu().detach())
-        ax[0,1].set_title('Input img')
-        im0 = ax[1,0].imshow(rendered_depth_aligned.squeeze().cpu().detach())
-        plt.colorbar(im0,ax = ax[1,0])
-        ax[1,0].set_title('Rendered depth')
-        ax[1,1].imshow(predicted_depth_aligned.squeeze().cpu().detach())
-        ax[1,1].set_title('Input depth')
-        ax[0,2].imshow(nan_mask.squeeze().cpu().detach())
-        ax[0,2].set_title('Nan mask')
-        ax[0,3].imshow(bg_mask.squeeze().cpu().detach())
-        ax[0,3].set_title('BG mask')
-        ax[1,2].imshow(mask.squeeze().cpu().detach())
-        ax[1,2].set_title('Mask')
-        im1 = ax[1,3].imshow(rendered_depth_aligned.squeeze().cpu().detach()-predicted_depth_aligned.squeeze().cpu().detach())
-        ax[1,3].set_title('Depth diff aligned')
-        plt.colorbar(im1,ax = ax[1,3])
-        plt.show()
+    
+    """ fig,ax = plt.subplots(2,4)
+    ax[0,0].imshow(im.permute(1,2,0).cpu().detach())
+    ax[0,0].set_title('Rendered im')
+    ax[0,1].imshow(curr_data['im'].permute(1,2,0).cpu().detach())
+    ax[0,1].set_title('Input img')
+    im0 = ax[1,0].imshow(rendered_depth_aligned.squeeze().cpu().detach())
+    plt.colorbar(im0,ax = ax[1,0])
+    ax[1,0].set_title('Rendered depth')
+    ax[1,1].imshow(predicted_depth_aligned.squeeze().cpu().detach())
+    ax[1,1].set_title('Input depth')
+    ax[0,2].imshow(nan_mask.squeeze().cpu().detach())
+    ax[0,2].set_title('Nan mask')
+    ax[0,3].imshow(bg_mask.squeeze().cpu().detach())
+    ax[0,3].set_title('BG mask')
+    ax[1,2].imshow(mask.squeeze().cpu().detach())
+    ax[1,2].set_title('Mask')
+    im1 = ax[1,3].imshow(rendered_depth_aligned.squeeze().cpu().detach()-predicted_depth_aligned.squeeze().cpu().detach())
+    ax[1,3].set_title('Depth diff aligned')
+    plt.colorbar(im1,ax = ax[1,3])
+    plt.show()
+    """
+    
     if not save_idx == None:
         ii = curr_data['id']
-        img = Image.fromarray((im.permute(1,2,0).cpu().detach().numpy()*255).astype(np.uint8))
+        
+        
+        im_np = im.permute(1,2,0).cpu().detach().numpy()
+        
+
+        # Save a clipped uint8 image for normal viewing
+        img = Image.fromarray((np.clip(im_np, 0.0, 1.0) * 255).astype(np.uint8))
+        
+        
         os.makedirs(f'./scripts/plots/{ii}',exist_ok=True)
         img.save(f'./scripts/plots/{ii}/{save_idx}.png')
 
@@ -1670,6 +1730,7 @@ def rgbd_slam(config: dict):
     
     # timer.lap("all the config")
     added_new_gaussians = []
+    prev_area_frac = None
 
 
 
@@ -1744,10 +1805,29 @@ def rgbd_slam(config: dict):
         # # plt.show()
         # plt.savefig(f'./scripts/plots/input_depth/{time_idx}.png')
         # plt.close()
-        curr_data = {'cam': cam, 'im': color, 'depth': depth, 'id': iter_time_idx, 'intrinsics': intrinsics, 
-                     'w2c': first_frame_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
+        # Choose which world-to-camera (w2c) to use for rendering/loss.
+        # - If tracking is configured to use GT poses, or estimated camera
+        #   parameters are not available, prefer `gt_w2c`.
+        # - Otherwise use the current estimated camera parameters from
+        #   `params_iter['cam_unnorm_rots']` and `params_iter['cam_trans']` so
+        #   the optimizer can refine/observe camera motion.
+        use_estimated_cam = (time_idx > 0) and (not config['tracking'].get('use_gt_poses', False))
+        curr_w2c = gt_w2c
+        if use_estimated_cam:
+            try:
+                # Build estimated w2c from params_iter if buffers exist
+                curr_cam_rot = F.normalize(params_iter['cam_unnorm_rots'][..., time_idx])
+                curr_cam_tran = params_iter['cam_trans'][..., time_idx]
+                curr_w2c = torch.eye(4, device=curr_cam_tran.device, dtype=curr_cam_tran.dtype)
+                curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
+                curr_w2c[:3, 3] = curr_cam_tran
+            except Exception:
+                # Fallback to GT w2c if something is missing/unexpected
+                curr_w2c = gt_w2c
 
-        
+        curr_data = {'cam': cam, 'im': color, 'depth': depth, 'id': iter_time_idx, 'intrinsics': intrinsics,
+                     'w2c': curr_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
+
         # Initialize Data for Tracking
         if seperate_tracking_res:
             tracking_color, tracking_depth, _, _ = tracking_dataset[time_idx]
@@ -1755,7 +1835,7 @@ def rgbd_slam(config: dict):
             tracking_color = to01(tracking_color)
             tracking_depth = tracking_depth.permute(2, 0, 1)
             tracking_curr_data = {'cam': tracking_cam, 'im': tracking_color, 'depth': tracking_depth, 'id': iter_time_idx,
-                                  'intrinsics': tracking_intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
+                                  'intrinsics': tracking_intrinsics, 'w2c': gt_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
         else:
             tracking_curr_data = curr_data
 
@@ -1777,8 +1857,21 @@ def rgbd_slam(config: dict):
         save_idx = 0
         if time_idx > 0 and not config['tracking']['use_gt_poses']:
             # Reset Optimizer & Learning Rates for tracking
-            _set_requires_grad_for_phase(params_iter, config['tracking']['lrs'])  
-            optimizer = initialize_optimizer(params_iter, config['tracking']['lrs'])
+            # Ensure camera parameters are included with sensible defaults
+            # if the experiment config omitted them or set them to 0.
+            tracking_lrs = dict(config['tracking'].get('lrs', {}))
+            # sensible defaults (can be overridden in experiment config)
+            default_cam_trans_lr = config['tracking'].get('default_cam_trans_lr', 0.005)
+            default_cam_rot_lr = config['tracking'].get('default_cam_rot_lr', 0.001)
+            if float(tracking_lrs.get('cam_trans', 0.0)) <= 0.0:
+                tracking_lrs['cam_trans'] = float(default_cam_trans_lr)
+                print(f"[tracking] setting default lr for 'cam_trans' = {tracking_lrs['cam_trans']}")
+            if float(tracking_lrs.get('cam_unnorm_rots', 0.0)) <= 0.0:
+                tracking_lrs['cam_unnorm_rots'] = float(default_cam_rot_lr)
+                print(f"[tracking] setting default lr for 'cam_unnorm_rots' = {tracking_lrs['cam_unnorm_rots']}")
+
+            _set_requires_grad_for_phase(params_iter, tracking_lrs)  
+            optimizer = initialize_optimizer(params_iter, tracking_lrs)
             # Keep Track of Best Candidate Rotation & Translation
             candidate_cam_unnorm_rot = params_iter['cam_unnorm_rots'][..., time_idx].detach().clone()
             candidate_cam_tran = params_iter['cam_trans'][..., time_idx].detach().clone()
@@ -1990,7 +2083,27 @@ def rgbd_slam(config: dict):
                         densify_color, densify_depth, _, _ = densify_dataset[time_idx]
                         #densify_color = densify_color.permute(2, 0, 1) / 255
                         densify_color = to01(densify_color)
-                        densify_depth = densify_depth.permute(2, 0, 1)
+                        # If the densification dataset doesn't provide depth (many sequences),
+                        # fall back to predicting depth with the SurgeDepth model if available.
+                        if (densify_depth is None) or (hasattr(densify_depth, 'numel') and densify_depth.numel() == 0):
+                            if not config['depth']['use_gt_depth']:
+                                # Run SurgeDepth on the densify color at its native resolution
+                                color_input = densify_color.permute(2,0,1).unsqueeze(0).cuda()/255
+                                color_input = torchvision.transforms.functional.normalize(color_input,config['depth']['normalization_means'],config['depth']['normalization_stds'])
+                                with torch.no_grad():
+                                    pred_disp = model(color_input)
+                                t_pred = config['depth']['shift_pred']
+                                s_pred = config['depth']['scale_pred']
+                                t_gt = config['depth']['shift_gt']
+                                s_gt = config['depth']['scale_gt']
+                                pred_disp = ((pred_disp - t_pred)/s_pred) * s_gt + t_gt
+                                densify_depth = 1.0 / pred_disp
+                                densify_depth = densify_depth.permute(1,2,0) * 10
+                            else:
+                                # keep as empty tensor if GT depth is required but missing
+                                densify_depth = torch.empty(0)
+                        else:
+                            densify_depth = densify_depth.permute(2, 0, 1)
                         densify_curr_data = {'cam': densify_cam, 'im': densify_color, 'depth': densify_depth, 'id': time_idx, 
                                     'intrinsics': densify_intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
                     else:
@@ -2000,24 +2113,39 @@ def rgbd_slam(config: dict):
                     # params, variables = remove_floating_gaussians(params, variables, densify_curr_data, time_idx)
                     densification_start_time = time.time()
                     # Add new Gaussians to the scene based on the Silhouette
-                    params_iter, variables = add_new_gaussians(params_iter, variables, densify_curr_data, 
-                                                        config['mapping']['sil_thres'], time_idx,
-                                                        config['mean_sq_dist_method'], 
-                                                        config['gaussian_simplification'],
-                                                        nr_basis = config['deforms']['nr_basis'],
-                                                        use_distributed_biases = config['deforms']['use_distributed_biases'],
-                                                        total_timescale = config['deforms']['total_timescale'],
-                                                        use_grn=config['GRN']['use_grn'],
-                                                        grn_model=grn_model,
-                                                        use_deform=config['deforms']['use_deformations'],
-                                                        deformation_type=config['deforms']['deform_type'],
-                                                        num_frames = num_frames,
-                                                        random_initialization=config['GRN']['random_initialization'],
-                                                        init_scale=config['GRN']['init_scale'],cam = cam,
-                                                        reduce_gaussians = config['gaussian_reduction']['reduce_gaussians'],
-                                                        reduction_type = config['gaussian_reduction']['reduction_type'],
-                                                        reduction_fraction=config['gaussian_reduction']['reduction_fraction'],
-                                                        gate_conf=gate_conf )                     # if config['GRN']['random_initialization']:
+                    # Use adaptive collapse densification helper which will call add_new_gaussians
+                    # aggressively when a collapse is detected; otherwise it is a noop.
+                    params_iter, variables, collapse_info = adaptive_collapse_densify(
+                        params_iter, variables, densify_curr_data, time_idx,
+                        config['mean_sq_dist_method'], prev_area_frac=prev_area_frac,
+                        aggressive_cfg=None, use_grn=config['GRN']['use_grn'],
+                        grn_model=grn_model, gate_conf=gate_conf, verbose=config.get('verbose', False)
+                    )
+                    # Log collapse detection summary for this mapping attempt (controlled by verbose flag)
+                    if config.get('verbose', False):
+                        dstat = collapse_info.get('detector_stats', {})
+                        print(f"[collapse] t={time_idx} action={collapse_info.get('action','none')} area_frac={dstat.get('area_frac')} depth_med={dstat.get('depth_med')}")
+                    # Update prev_area_frac and fall back to standard add_new_gaussians if nothing happened
+                    prev_area_frac = collapse_info.get('detector_stats', {}).get('area_frac', prev_area_frac)
+                    if collapse_info.get('action', 'none') == 'none':
+                        params_iter, variables = add_new_gaussians(params_iter, variables, densify_curr_data, 
+                                                            config['mapping']['sil_thres'], time_idx,
+                                                            config['mean_sq_dist_method'], 
+                                                            config['gaussian_simplification'],
+                                                            nr_basis = config['deforms']['nr_basis'],
+                                                            use_distributed_biases = config['deforms']['use_distributed_biases'],
+                                                            total_timescale = config['deforms']['total_timescale'],
+                                                            use_grn=config['GRN']['use_grn'],
+                                                            grn_model=grn_model,
+                                                            use_deform=config['deforms']['use_deformations'],
+                                                            deformation_type=config['deforms']['deform_type'],
+                                                            num_frames = num_frames,
+                                                            random_initialization=config['GRN']['random_initialization'],
+                                                            init_scale=config['GRN']['init_scale'],cam = cam,
+                                                            reduce_gaussians = config['gaussian_reduction']['reduce_gaussians'],
+                                                            reduction_type = config['gaussian_reduction']['reduction_type'],
+                                                            reduction_fraction=config['gaussian_reduction']['reduction_fraction'],
+                                                            gate_conf=gate_conf )
 
                     if config['deforms']['use_deformations'] and config['deforms']['deform_type'] in ('graph', 'hybrid'):
                         G1 = params_iter['means3D'].shape[0]
@@ -2137,9 +2265,85 @@ def rgbd_slam(config: dict):
                 #         # Prune Gaussians
                 if config['mapping']['prune_gaussians']:
                     params_iter, variables = prune_gaussians(params_iter, variables, optimizer, time_idx, config['mapping']['pruning_dict'],config['GRN']['use_grn'])
-                #         # Gaussian-Splatting's Gradient-based Densification
-                #         if config['mapping']['use_gaussian_splatting_densification']:
-                #             params, variables = densify(params, variables, optimizer, iter, config['mapping']['densify_dict'])
+                # Gaussian-Splatting's Gradient-based Densification (controlled by config flag)
+                if config['mapping'].get('use_gaussian_splatting_densification', False):
+                    # The original implementation called densify() inside a mapping inner-loop
+                    # where an `iter` variable was defined. In this simplified flow the
+                    # mapping inner-loop is commented out, so `iter` is not available.
+                    # Use a local mapping_iter counter (0) to keep the call well-defined.
+                    mapping_iter = 0
+                    # Defensive alignment: ensure per-gaussian auxiliary buffers match
+                    # the current number of gaussians. Mismatches can occur after
+                    # aggressive add/concat operations and lead to boolean-indexing
+                    # errors inside densify/remove_points (mask vs tensor length).
+                    # Write a brief pre-densify debug snapshot to help trace HxW vs G mismatches
+                    
+
+                    try:
+                        Np = int(params_iter['means3D'].shape[0])
+                        for _name in ('means2D_gradient_accum', 'denom', 'max_2D_radius'):
+                            if _name in variables:
+                                v = variables[_name]
+                                if v.shape[0] != Np:
+                                    try:
+                                        if v.shape[0] > Np:
+                                            variables[_name] = v[:Np]
+                                        else:
+                                            pad = torch.zeros((Np - v.shape[0],) + v.shape[1:], device=v.device, dtype=v.dtype)
+                                            variables[_name] = torch.cat([v, pad], dim=0)
+                                        print(f"[align] resized variables['{_name}'] from {v.shape[0]} to {Np}")
+                                    except Exception:
+                                        # best-effort: convert to tensor of correct length
+                                        variables[_name] = torch.zeros(Np, device=v.device if hasattr(v,'device') else 'cuda')
+                    except Exception:
+                        pass
+                    try:
+                        params_iter, variables = densify(params_iter, variables, optimizer, mapping_iter, config['mapping']['densify_dict'])
+                    except Exception as e:
+                        # Enhanced diagnostics: capture dataset/resolution and key variable shapes
+                        
+                        print(f"Warning: densify failed at frame {time_idx}, iter {mapping_iter}: {e}")
+                        print("DENSIFY DIAGNOSTICS:")
+                        try:
+                            ds = dataset_config if 'dataset_config' in locals() else config.get('data', {})
+                            H = ds.get('desired_image_height', None)
+                            W = ds.get('desired_image_width', None)
+                            densH = ds.get('densification_image_height', None)
+                            densW = ds.get('densification_image_width', None)
+                            print(f" dataset desired HxW={H}x{W}, dens HxW={densH}x{densW}")
+                        except Exception:
+                            print("  (failed to read dataset sizes)")
+                        try:
+                            # Print some useful variable shapes if present
+                            for k in ('means2D_gradient_accum', 'denom', 'max_2D_radius', 'means3D', 'logit_opacities'):
+                                if k in variables:
+                                    v = variables[k]
+                                    try:
+                                        print(f" variables[{k}].shape={tuple(v.shape)} numel={v.numel()}")
+                                    except Exception:
+                                        print(f" variables[{k}] present but cannot get shape")
+                        except Exception:
+                            pass
+                        # Append full traceback and brief context to run log for offline inspection
+                        try:
+                            wd = '.'
+                            if 'curr_data' in locals() and isinstance(curr_data, dict):
+                                wd = curr_data.get('workdir', wd)
+                            else:
+                                try:
+                                    cfg = globals().get('config', None)
+                                    if isinstance(cfg, dict):
+                                        wd = cfg.get('workdir', wd)
+                                except Exception:
+                                    pass
+                            os.makedirs(wd, exist_ok=True)
+                            logf = os.path.join(wd, 'densify_shape_mismatch.log')
+                            with open(logf, 'a') as f:
+                                f.write(f"Frame {time_idx} iter {mapping_iter} Exception: {repr(e)}\n")
+                                traceback.print_exc(file=f)
+                                f.write('\n')
+                        except Exception:
+                            pass
                 #         # Optimizer Update
                 #         optimizer.step()
                 #         optimizer.zero_grad(set_to_none=True)

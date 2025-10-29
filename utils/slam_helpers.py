@@ -9,6 +9,9 @@ import cv2
 import math
 from utils.slam_external import build_rotation
 from torch import nn
+import os
+import datetime
+import json
 
 def l1_loss_v1(x, y):
     return torch.abs((x - y)).mean()
@@ -195,6 +198,10 @@ def _farthest_point_sample(xyz, M):
     """
     
     N = xyz.shape[0]
+    # Handle degenerate cases: empty input or non-positive M
+    if N == 0 or M <= 0:
+        return torch.empty(0, dtype=torch.long, device=xyz.device)
+
     inds = torch.empty(M, dtype=torch.long, device=xyz.device)
     d2 = torch.full((N,), float("inf"), device=xyz.device)
     # start from a random point (or the centroid)
@@ -222,6 +229,40 @@ def initialize_graph_deformations(params, num_nodes=256, K=6, sigma_mult=0.5,
     
     means = params['means3D'].detach()  # [G,3], cuda float
     G = means.shape[0]
+
+    # Handle empty scene (no gaussians): create empty graph structures and return
+    if G == 0:
+        device = means.device
+        dtype = means.dtype
+        params['graph_nodes'] = torch.nn.Parameter(means.new_empty((0, 3)).requires_grad_(False))
+        params['graph_idx'] = torch.zeros((0, max(1, K)), dtype=torch.long, device=device)
+        params['graph_w'] = torch.zeros((0, max(1, K)), dtype=torch.float32, device=device)
+
+        # create empty per-node learnables
+        zeros = lambda *s: torch.zeros(*s, device=device, dtype=dtype)
+        params['node_v_xyz'] = torch.nn.Parameter(zeros(0, 3).requires_grad_(True))
+        params['node_a_xyz'] = torch.nn.Parameter(zeros(0, 3).requires_grad_(True))
+        params['node_v_ang'] = torch.nn.Parameter(zeros(0, 3).requires_grad_(True))
+        params['node_a_ang'] = torch.nn.Parameter(zeros(0, 3).requires_grad_(True))
+        params['node_v_s'] = torch.nn.Parameter(zeros(0, 3).requires_grad_(True))
+        params['node_a_s'] = torch.nn.Parameter(zeros(0, 3).requires_grad_(True))
+
+        params['node_ang0'] = torch.nn.Parameter(zeros(0, 3).requires_grad_(True))
+        params['node_s0'] = torch.nn.Parameter(zeros(0, 3).requires_grad_(True))
+        params['node_t0'] = torch.nn.Parameter(zeros(0, 3).requires_grad_(True))
+
+        if use_fourier and M > 0:
+            params['fourier_xyz_cos'] = torch.nn.Parameter(zeros(0, M, 3).requires_grad_(True))
+            params['fourier_xyz_sin'] = torch.nn.Parameter(zeros(0, M, 3).requires_grad_(True))
+            params['fourier_ang_cos'] = torch.nn.Parameter(zeros(0, M, 3).requires_grad_(True))
+            params['fourier_ang_sin'] = torch.nn.Parameter(zeros(0, M, 3).requires_grad_(True))
+            params['fourier_s_cos'] = torch.nn.Parameter(zeros(0, M, 3).requires_grad_(True))
+            params['fourier_s_sin'] = torch.nn.Parameter(zeros(0, M, 3).requires_grad_(True))
+
+        # keep a reference timescale if XYZT is not used
+        if 'timestep' not in params:
+            params['timestep'] = torch.zeros(0, device=device)
+        return params
 
     # 1) make nodes by FPS
     with torch.no_grad():
@@ -1314,10 +1355,9 @@ def grn_initialization(model,params,init_pt_cld,mean3_sq_dist,color,depth,mask =
         mask = mask[0,0,:,:].reshape(-1)
         
 
-    output = model(input).detach()
-
     # input is (1, 4, H, W); keep these to align GRN output
     _, _, H, W = input.shape
+    # Run the GRN once and reuse the output (avoid duplicate forward passes)
     output = model(input).detach()
     # bring GRN output to depth/color spatial size
     if output.shape[-2:] != depth.shape[-2:]:
@@ -1440,17 +1480,29 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
     depth_sil, _, _ = Renderer(raster_settings=curr_data['cam'])(**depth_sil_rendervar)
     silhouette = depth_sil[1, :, :]
     non_presence_sil_mask = (silhouette < sil_thres)
-    # Check for new foreground objects by using GT depth
-    gt_depth = curr_data['depth'][0, :, :]
+    # Check for new foreground objects by using GT depth (if available).
+    # Detect missing/empty GT depth and handle it gracefully.
+    gt_depth_raw = curr_data.get('depth', None)
+    if gt_depth_raw is None or gt_depth_raw.numel() == 0:
+        gt_depth = None
+        has_gt_depth = False
+    else:
+        gt_depth = gt_depth_raw[0, :, :]
+        has_gt_depth = True
     # gt_depth = (gt_depth-gt_depth.min())/(gt_depth.max()-gt_depth.min())*10+0.01
     
 
 
     render_depth = depth_sil[0, :, :]
-    depth_error = torch.abs(gt_depth - render_depth) * (gt_depth > 0)
-    non_presence_depth_mask = (render_depth > gt_depth) * (depth_error > 20*depth_error.mean())
+    if has_gt_depth:
+        depth_error = torch.abs(gt_depth - render_depth) * (gt_depth > 0)
+        non_presence_depth_mask = (render_depth > gt_depth) & (depth_error > 20 * (depth_error.mean() + 1e-12))
+    else:
+        non_presence_depth_mask = torch.zeros_like(render_depth, dtype=torch.bool)
     # Determine non-presence mask
     non_presence_mask = non_presence_sil_mask | non_presence_depth_mask
+    # Additional per-mask diagnostics: counts and fractions to help debug empty masks
+    H_r, W_r = silhouette.shape[0], silhouette.shape[1]
     # Flatten mask
     non_presence_mask = non_presence_mask.reshape(-1)
     if reduce_gaussians:
@@ -1480,10 +1532,19 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
         curr_w2c = torch.eye(4).cuda().float()
         curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
         curr_w2c[:3, 3] = curr_cam_tran
-        valid_depth_mask = (curr_data['depth'][0, :, :] > 0) & (curr_data['depth'][0, :, :] < 1e10)
+        # If GT depth exists, use it to mask; otherwise use rendered depth to
+        # determine valid pixels (rendered foreground).
+        if has_gt_depth:
+            valid_depth_mask = (curr_data['depth'][0, :, :] > 0) & (curr_data['depth'][0, :, :] < 1e10)
+        else:
+            valid_depth_mask = (render_depth > 0)
         non_presence_mask = non_presence_mask & valid_depth_mask.reshape(-1)
         valid_color_mask = energy_mask(curr_data['im']).squeeze()
         non_presence_mask = non_presence_mask & valid_color_mask.reshape(-1)        
+
+        
+        # If the renderer produced no signal, or the final mask is empty, dump diagnostics
+       
         new_pt_cld, mean3_sq_dist = get_pointcloud(curr_data['im'], curr_data['depth'], curr_data['intrinsics'], 
                                     curr_w2c, mask=non_presence_mask, compute_mean_sq_dist=True,
                                     mean_sq_dist_method=mean_sq_dist_method)
@@ -1585,9 +1646,14 @@ def align_shift_and_scale(gt_disp, pred_disp, mask):
     valid = ssum > 0
 
     if valid.sum() == 0:
-        # Return input as-is or raise a warning
-        print("⚠️ Warning: Empty valid mask in align_shift_and_scale")
-        return gt_disp, pred_disp, torch.tensor([0.0]), torch.tensor([1.0]), torch.tensor([0.0]), torch.tensor([1.0])
+        # If no valid pixels in the provided mask, fall back to using the whole image
+        # for alignment rather than bailing out. This avoids repeated warnings and
+        # keeps the pipeline running. If this fallback is undesirable, we could
+        # instead return defaults or raise an exception.
+        print("⚠️ Warning: Empty valid mask in align_shift_and_scale — falling back to whole-image alignment")
+        mask = torch.ones_like(mask, dtype=torch.bool)
+        ssum = torch.sum(mask, (1, 2))
+        valid = ssum > 0
     
     # Select valid pixels
     gt_selected = gt_disp[mask].view(valid.sum(), -1)

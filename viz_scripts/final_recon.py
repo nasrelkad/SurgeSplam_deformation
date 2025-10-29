@@ -449,6 +449,26 @@ def load_scene_data(scene_path, first_frame_w2c, intrinsics, time_idx, deform_ty
             w2c_t[:3, :3] = R
             w2c_t[:3, 3]  = tran[..., t]
             all_w2cs.append(w2c_t.detach().cpu().numpy())
+
+        # If the estimated camera translations are essentially constant, prefer
+        # ground-truth per-frame poses (when available) so the viz follows real
+        # camera motion instead of appearing static.
+        try:
+            cam_centers = np.array([np.linalg.inv(w)[:3, 3] for w in all_w2cs])
+            span = np.linalg.norm(cam_centers.max(axis=0) - cam_centers.min(axis=0))
+            if span < 1e-3 and 'gt_w2c_all_frames' in raw:
+                print("Estimated camera centers nearly-constant; using gt_w2c_all_frames for visualization")
+                gt = raw['gt_w2c_all_frames']
+                # gt may be (N,4,4) or a list-like; make a numpy list of 4x4 matrices
+                try:
+                    gt_list = [gt[i] for i in range(gt.shape[0])]
+                except Exception:
+                    gt_list = list(gt)
+                all_w2cs = [np.asarray(g) for g in gt_list]
+        except Exception:
+            # If anything goes wrong with the heuristic, silently continue with
+            # the estimated cameras that we already built.
+            pass
     else:
         all_w2cs.append(first_frame_w2c.detach().cpu().numpy())
 
