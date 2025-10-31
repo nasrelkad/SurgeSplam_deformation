@@ -488,8 +488,13 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification
     if not use_simplification:
         params['feature_rest'] = torch.zeros(num_pts, 45) # set SH degree 3 fixed
     if use_deforms:
-        if deform_type == 'gaussian':
-            params = initialize_deformations(params,nr_basis,use_distributed_biases=use_distributed_biases,total_timescale = total_timescale)
+        if deform_type in ('gaussian', 'deformgs'):
+            params = initialize_deformations(
+                params,
+                nr_basis,
+                use_distributed_biases=use_distributed_biases,
+                total_timescale=total_timescale
+            )
         elif deform_type == 'cv':
             params = initialize_cv_deformations(params)
 
@@ -716,11 +721,12 @@ def initialize_first_timestep(color,depth,intrinsics,pose, num_frames, scene_rad
 def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_weights, use_sil_for_loss, 
              sil_thres, use_l1,ignore_outlier_depth_loss, tracking=False, 
              mapping=False, do_ba=False, plot_dir=None, visualize_tracking_loss=False, tracking_iteration=None,use_gt_depth = True,gaussian_deformations = True,save_idx=0,
-             use_grn = False,deformation_type = 'gaussian'):
+             use_grn = False,deformation_type = 'gaussian', gate_thresh = None):
 
     global w2cs, w2ci
     # Initialize Loss Dictionary
     losses = {}
+    gate_thresh = 0.0 if gate_thresh is None else gate_thresh
     if gaussian_deformations: # If we train for deformations, the location of the means depends on the timestep
         if tracking:
             local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(params,iter_time_idx,deform_grad = True,deformation_type = deformation_type)
@@ -794,22 +800,32 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
     # print()
     if use_grn:
         rendervar = transformed_GRNparams2rendervar(params, transformed_pts,local_rots,local_scales,local_opacities,local_colors)
-
         depth_sil_rendervar = transformed_GRNparams2depthplussilhouette(params, curr_data['w2c'],
                                                                     transformed_pts,local_rots,local_scales,local_opacities)
-
     else:
         rendervar = transformed_params2rendervar(params, transformed_pts,local_rots,local_scales,local_opacities,local_colors)
-
         depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
                                                                     transformed_pts,local_rots,local_scales,local_opacities)
     
-    # Visualize the Rendered Images
+    # Apply temporal gating if available
+    time_gate = None
     if 't_mu' in params:    
-        gt = xyzt_time_gate(params, float(iter_time_idx))     # time index of this frame
-        rendervar = apply_xyzt_gate(
-            rendervar, gt, gate_thresh=0.001)
-        
+        time_gate = xyzt_time_gate(params, float(iter_time_idx))     # time index of this frame
+        rendervar = apply_xyzt_gate(rendervar, time_gate, gate_thresh=gate_thresh)
+        depth_sil_rendervar = apply_xyzt_gate(depth_sil_rendervar, time_gate, gate_thresh=gate_thresh)
+    
+    # Inter-frame consistency loss
+    prev_means = variables.get('prev_local_means', None)
+    prev_gate = variables.get('prev_time_gate', None)
+    if iter_time_idx > 0 and prev_means is not None:
+        min_gauss = min(prev_means.shape[0], local_means.shape[0])
+        if min_gauss > 0:
+            curr_means = local_means[:min_gauss]
+            prev_means_trim = prev_means[:min_gauss]
+            curr_gate = time_gate[:min_gauss] if time_gate is not None else torch.ones(min_gauss, device=curr_means.device, dtype=curr_means.dtype)
+            prev_gate_trim = prev_gate[:min_gauss] if (prev_gate is not None) else torch.ones_like(curr_gate)
+            gate_weights = curr_gate * prev_gate_trim
+            losses['inter_frame'] = ((curr_means - prev_means_trim) ** 2 * gate_weights.view(-1, 1)).sum(-1).mean()
 
     # RGB Rendering
     try:
@@ -820,6 +836,35 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
  
 
     im, radius, _ = Renderer(raster_settings=curr_data['cam'])(**rendervar)
+
+    inter_w = float(loss_weights.get('inter_frame_rgb', 0.0))
+    if inter_w > 0.0 and iter_time_idx > 0:
+        with torch.no_grad():
+            prev_local_means_full, prev_rots_full, prev_scales_full, prev_opac_full, prev_cols_full = \
+                deform_gaussians(params, iter_time_idx - 1, False, deformation_type=deformation_type)
+
+            prev_transformed_pts = transform_to_frame(
+                prev_local_means_full, params, iter_time_idx,
+                gaussians_grad=False, camera_grad=False
+            )
+
+            prev_rendervar = transformed_params2rendervar(
+                params,
+                prev_transformed_pts,
+                prev_rots_full,
+                prev_scales_full,
+                prev_opac_full,
+                prev_cols_full
+            )
+            if 't_mu' in params:
+                prev_gate_full = xyzt_time_gate(params, float(iter_time_idx - 1))
+                prev_rendervar = apply_xyzt_gate(prev_rendervar, prev_gate_full, gate_thresh=gate_thresh)
+
+            prev_im, _, _ = Renderer(raster_settings=curr_data['cam'])(**prev_rendervar)
+
+        rgb_cons = (im - prev_im).abs().mean()
+        losses['inter_frame_rgb'] = rgb_cons
+
     variables['means2D'] = rendervar['means2D'] # Gradient only accum from colour render for densification
     # plt.imshow(im.permute(1,2,0).cpu().detach())
     # plt.show()
@@ -947,7 +992,7 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
    
 
 
-    weighted_losses = {k: v * loss_weights[k] for k, v in losses.items()}
+    weighted_losses = {k: v * float(loss_weights.get(k, 0.0)) for k, v in losses.items()}
     loss = sum(weighted_losses.values())
 
     
@@ -984,6 +1029,11 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
 
     variables['max_2D_radius'][seen] = torch.max(radius[seen], variables['max_2D_radius'][seen])
     variables['seen'] = seen
+    # Cache current state for next iteration's temporal losses
+    with torch.no_grad():
+        variables['prev_local_means'] = local_means.detach().clone()
+        variables['prev_time_gate'] = time_gate.detach().clone() if time_gate is not None else None
+        variables['prev_time_idx'] = int(iter_time_idx)
     weighted_losses['loss'] = loss
     # print(weighted_losses)
     return loss, variables, weighted_losses
@@ -1153,7 +1203,7 @@ def optimize_initialization(params,params_init,curr_data,num_iters_initializatio
                     config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True,
                     visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
                     tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=None,gaussian_deformations=config['deforms']['use_deformations'],
-                    use_grn = config['GRN']['use_grn'],deformation_type = config['deforms']['deform_type'])
+                    use_grn = config['GRN']['use_grn'],deformation_type = config['deforms']['deform_type'], gate_thresh = config['deforms'].get('xyzt_gate_thresh', 0.0))
         loss.backward()
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
@@ -1645,7 +1695,7 @@ def rgbd_slam(config: dict):
                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
                                                    plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
                                                    tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=None,gaussian_deformations=config['deforms']['use_deformations'],
-                                                   use_grn = config['GRN']['use_grn'],deformation_type = config['deforms']['deform_type'])
+                                                   use_grn = config['GRN']['use_grn'],deformation_type = config['deforms']['deform_type'], gate_thresh = config['deforms'].get('xyzt_gate_thresh', 0.0))
                 # print(loss)
                 save_idx = save_idx+1
 
@@ -2109,7 +2159,8 @@ def rgbd_slam(config: dict):
     dataset = [dataset, eval_dataset, 'C3VD'] if dataset_config["train_or_test"] == 'train' else dataset
     with torch.no_grad():
         eval_save(dataset, params, eval_dir, sil_thres=config['mapping']['sil_thres'],
-                mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],use_grn = config['GRN']['use_grn'])
+                mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],use_grn = config['GRN']['use_grn'],
+                deformation_type=config['deforms']['deform_type'], gate_thresh=config['deforms'].get('xyzt_gate_thresh', 0.0))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

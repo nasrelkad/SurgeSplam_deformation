@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 from datasets.gradslam_datasets.geometryutils import relative_transformation
 from utils.recon_helpers import setup_camera, energy_mask
 from utils.slam_external import build_rotation,calc_psnr
-from utils.slam_helpers import transform_to_frame, transform_to_frame_eval, transformed_params2rendervar, transformed_params2depthplussilhouette,transformed_GRNparams2rendervar,transformed_GRNparams2depthplussilhouette,align_shift_and_scale
+from utils.slam_helpers import transform_to_frame, transform_to_frame_eval, transformed_params2rendervar, transformed_params2depthplussilhouette,transformed_GRNparams2rendervar,transformed_GRNparams2depthplussilhouette,align_shift_and_scale, xyzt_time_gate, apply_xyzt_gate
 from utils.slam_helpers import deform_gaussians as deform_gaussians_eval
 
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
@@ -39,25 +39,50 @@ def align(model, data):
 
     """
     np.set_printoptions(precision=3, suppress=True)
-    model_zerocentered = model - model.mean(1).reshape((3,-1))
-    data_zerocentered = data - data.mean(1).reshape((3,-1))
+    model = np.asarray(model)
+    data = np.asarray(data)
+
+    valid_mask = np.isfinite(model).all(axis=0) & np.isfinite(data).all(axis=0)
+    if valid_mask.sum() < 3:
+        # Not enough valid correspondences; fall back to identity transform.
+        rot = np.eye(3)
+        trans = np.zeros((3, 1))
+        trans_error = np.full((1,), np.nan)
+        return rot, trans, trans_error
+
+    model_valid = model[:, valid_mask]
+    data_valid = data[:, valid_mask]
+
+    model_mean = model_valid.mean(axis=1, keepdims=True)
+    data_mean = data_valid.mean(axis=1, keepdims=True)
+
+    model_zerocentered = model_valid - model_mean
+    data_zerocentered = data_valid - data_mean
 
     W = np.zeros((3, 3))
-    for column in range(model.shape[1] - 1):
-        W += np.outer(model_zerocentered[:,
-                         column], data_zerocentered[:, column])
-    U, d, Vh = np.linalg.linalg.svd(W.transpose())
-    S = np.matrix(np.identity(3))
+    for column in range(model_valid.shape[1]):
+        W += np.outer(model_zerocentered[:, column], data_zerocentered[:, column])
+
+    try:
+        U, d, Vh = np.linalg.svd(W.T)
+    except np.linalg.LinAlgError:
+        rot = np.eye(3)
+        trans = data_mean - rot @ model_mean
+        model_aligned = rot @ model_valid + trans
+        alignment_error = model_aligned - data_valid
+        trans_error = np.sqrt(np.sum(alignment_error * alignment_error, axis=0))
+        return rot, trans, trans_error
+
+    S = np.identity(3)
     if (np.linalg.det(U) * np.linalg.det(Vh) < 0):
         S[2, 2] = -1
-    rot = U*S*Vh
-    trans = data.mean(1).reshape((3,-1)) - rot * model.mean(1).reshape((3,-1))
+    rot = U @ S @ Vh
+    trans = data_mean - rot @ model_mean
 
-    model_aligned = rot * model + trans
-    alignment_error = model_aligned - data[:, :model_aligned.shape[1]]
+    model_aligned = rot @ model_valid + trans
+    alignment_error = model_aligned - data_valid
 
-    trans_error = np.sqrt(np.sum(np.multiply(
-        alignment_error, alignment_error), 0)).A[0]
+    trans_error = np.sqrt(np.sum(alignment_error * alignment_error, axis=0))
 
     return rot, trans, trans_error
 
@@ -110,7 +135,7 @@ def evaluate_ate(gt_traj, est_traj, plot_traj = False):
 
     rot, trans, trans_error = align(gt_traj_pts, est_traj_pts)
 
-    gt_traj_aligned = rot* gt_traj_pts+trans
+    gt_traj_aligned = rot @ gt_traj_pts + trans
     gt_traj_aligned = np.array(gt_traj_aligned)
     fig = plt.figure()
 
@@ -428,7 +453,8 @@ def compute_errors(gt, pred):
     return abs_rel, sq_rel, rmse, rmse_log, a1, a2, a3, psnr
 
 def eval_save(dataset, final_params, eval_dir, sil_thres, 
-         mapping_iters, add_new_gaussians, save_renders=True,use_grn = True):
+         mapping_iters, add_new_gaussians, save_renders=True, use_grn = True,
+         deformation_type: str = 'gaussian', gate_thresh: float = 0.0):
     # timer = Timer()
     # timer.start()
     split = False
@@ -440,6 +466,7 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
     else:
         num_frames = len(dataset)
     print("Evaluating Final Parameters ...")
+    gate_thresh = float(gate_thresh)
     psnr_list = []
     rmse_list = []
     l1_list = []
@@ -524,7 +551,7 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
             cam = setup_camera(color.shape[2], color.shape[1], intrinsics.cpu().numpy(), first_frame_w2c.detach().cpu().numpy())
         
         # Get current frame Gaussians
-        local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians_eval(final_params,total_time_idx,False,deformation_type = 'cv')
+        local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians_eval(final_params,total_time_idx,False,deformation_type = deformation_type)
         if dataset_type == 'train':
             cam_rot = F.normalize(final_params['cam_unnorm_rots'][..., time_idx].detach())
             cam_tran = final_params['cam_trans'][..., time_idx].detach()
@@ -558,6 +585,12 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
 
                 depth_sil_rendervar = transformed_params2depthplussilhouette(final_params, curr_data['w2c'],
                                                                             transformed_pts,local_rots,local_scales,local_opacities)
+
+            time_gate = None
+            if 't_mu' in final_params:
+                time_gate = xyzt_time_gate(final_params, float(total_time_idx))
+                rendervar = apply_xyzt_gate(rendervar, time_gate, gate_thresh=gate_thresh)
+                depth_sil_rendervar = apply_xyzt_gate(depth_sil_rendervar, time_gate, gate_thresh=gate_thresh)
 
             # Render Depth & Silhouette
             depth_sil, _, _ = Renderer(raster_settings=curr_data['cam'])(**depth_sil_rendervar)
@@ -720,7 +753,16 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
     # gt_w2c_list = valid_gt_w2c_list
 
     # # Calculate ATE RMSE
-    ate_rmse = evaluate_ate(gt_w2c_list, latest_est_w2c_list)
+    # Use the filtered/valid GT list that was constructed in `valid_gt_w2c_list` so
+    # the two lists passed to evaluation have matching entries. Using the raw
+    # `gt_w2c_list` here can cause an off-by-one length mismatch because
+    # `latest_est_w2c_list` was initialized with an extra seed element.
+    try:
+        ate_rmse = evaluate_ate(valid_gt_w2c_list, latest_est_w2c_list)
+    except Exception:
+        # Fallback to original if something unexpected happened; re-raise after logging
+        print('Warning: evaluate_ate with valid_gt_w2c_list failed, retrying with gt_w2c_list')
+        ate_rmse = evaluate_ate(gt_w2c_list, latest_est_w2c_list)
     print("Final Average ATE RMSE: {:.2f} mm".format(ate_rmse*100))
     depth_error_metrics = ['Abs Rel', 'Sq Rel', 'RMSE', 'RMSE Log', 'A1', 'A2', 'A3', 'PSNR']
     # Compute Average Metrics

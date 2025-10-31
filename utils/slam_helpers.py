@@ -615,10 +615,24 @@ def deform_gaussians(params, time, deform_grad, N=5, deformation_type='gaussian'
         return xyz, rots, scales, opacities, colors
 
     elif deformation_type == 'cv':  # constant velocity (add 'ca' with t^2 terms if desired)
-        t = torch.as_tensor(time, device=params['means3D'].device, dtype=params['means3D'].dtype).view(-1,1)
-        v_xyz  = params['cv_vel_xyz']          # [G,3]
-        v_lsg  = params['cv_vel_log_scales']   # [G,3]
-        w_aa   = params['cv_angvel_aa']        # [G,3]
+        means = params['means3D']
+        t = torch.as_tensor(time, device=means.device, dtype=means.dtype).view(-1, 1)
+
+        # Fallback to static gaussians when CV parameters are not present.
+        if 'cv_vel_xyz' in params:
+            v_xyz = params['cv_vel_xyz']
+        else:
+            v_xyz = torch.zeros_like(means)
+
+        if 'cv_vel_log_scales' in params:
+            v_lsg = params['cv_vel_log_scales']
+        else:
+            v_lsg = torch.zeros_like(params['log_scales'])
+
+        if 'cv_angvel_aa' in params:
+            w_aa = params['cv_angvel_aa']
+        else:
+            w_aa = torch.zeros_like(means)
 
         xyz = params['means3D'] + v_xyz * t
         base_q = F.normalize(params['unnorm_rotations'], dim=-1)
@@ -628,6 +642,65 @@ def deform_gaussians(params, time, deform_grad, N=5, deformation_type='gaussian'
 
         opacities = params['logit_opacities']; colors = params['rgb_colors']
         return xyz, rots, scales, opacities, colors
+
+    elif deformation_type == 'deformgs':
+        # 1) get canonical values (no detach if we want grads)
+        if deform_grad:
+            base_xyz  = params['means3D']
+            base_rots = params['unnorm_rotations']
+            base_scl  = params['log_scales']
+            base_op   = params['logit_opacities']
+            base_col  = params['rgb_colors']
+            W   = params['deform_weights']   # [G,B,10]
+            S_r = params['deform_stds']      # [G,B,10]
+            C   = params['deform_biases']    # [G,B,10]
+        else:
+            base_xyz  = params['means3D'].detach()
+            base_rots = params['unnorm_rotations'].detach()
+            base_scl  = params['log_scales'].detach()
+            base_op   = params['logit_opacities'].detach()
+            base_col  = params['rgb_colors'].detach()
+            W   = params['deform_weights'].detach()
+            S_r = params['deform_stds'].detach()
+            C   = params['deform_biases'].detach()
+
+        # 2) time → attention over bases (exactly like your gaussian branch)
+        t = torch.as_tensor(time, device=C.device, dtype=C.dtype)
+        while t.dim() < C.dim():
+            t = t.unsqueeze(0)
+
+        S = F.softplus(S_r) + 1e-3
+        score = -((t - C) ** 2) / (2.0 * (S ** 2) + 1e-12)
+        attn  = F.softmax(score / max(temperature, 1e-3), dim=1)
+
+        if N is not None and 0 < N < attn.shape[1]:
+            topv, topi = torch.topk(attn, k=N, dim=1)
+            m = torch.zeros_like(attn)
+            m.scatter_(1, topi, 1.0)
+            attn = attn * m
+            attn = attn / (attn.sum(dim=1, keepdim=True) + 1e-12)
+
+        # 3) this is the “scene flow” in DeformGS terms
+        flow_10 = torch.sum(attn * W, dim=1)      # [G,10]
+        d_xyz   = flow_10[:, :3]
+        d_quat  = flow_10[:, 3:7]
+        d_scl   = flow_10[:, 7:10]
+
+        # 4) apply to canonical
+        xyz = base_xyz + d_xyz
+
+        # rotation as delta-quat
+        base_q = F.normalize(base_rots, dim=-1)
+        delta_q = F.normalize(d_quat, dim=-1)
+        rots = _qmul(base_q, delta_q)
+
+        # log-scales additive
+        scales = base_scl + d_scl
+
+        opacities = base_op
+        colors    = base_col
+        return xyz, rots, scales, opacities, colors
+
 
 def initialize_cv_deformations(params):
     """Adds per-Gaussian constant-velocity params (very memory efficient)."""
@@ -657,13 +730,19 @@ def initialize_deformations(params, nr_basis, use_distributed_biases, total_time
         biases = torch.randn([N, nr_basis, 10], device=device, dtype=torch.float16) * 0.0
         biases = torch.nn.Parameter(biases, requires_grad=True)
     else:
-        # evenly distributed biases across the timespan; no need to backprop through these
-        interval = torch.ceil(torch.tensor(total_timescale / nr_basis, device=device))
-        arange   = torch.arange(0, total_timescale, interval, device=device).unsqueeze(0).unsqueeze(-1)
-        biases   = torch.tile(arange, (N, 1, 10)).to(dtype=torch.float16)
-        # keep as plain Tensor (no grad buffers)
-        # if your code expects Parameter type, you can still wrap with requires_grad=False
-        biases   = torch.nn.Parameter(biases, requires_grad=False)
+        max_time = float(total_timescale if total_timescale is not None else nr_basis)
+        if max_time <= 1.0:
+            centers = torch.zeros(nr_basis, device=device, dtype=torch.float16)
+        else:
+            centers = torch.linspace(
+                0.0,
+                max_time - 1.0,
+                steps=nr_basis,
+                device=device,
+                dtype=torch.float16,
+            )
+        biases = centers.view(1, nr_basis, 1).repeat(N, 1, 10)
+        biases = torch.nn.Parameter(biases, requires_grad=False)
 
     params['deform_weights'] = weights
     params['deform_stds']    = stds
@@ -698,10 +777,13 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis
             'log_scales': torch.ones_like(torch.tensor(means3D),dtype=torch.float).cuda()*init_scale,
         }
     # print(f'num pts {num_pts}')
-    if use_deform and deform_type == 'gaussian':
-        params = initialize_deformations(params, nr_basis=nr_basis,
-                                     use_distributed_biases=use_distributed_biases,
-                                     total_timescale=total_timescale)
+    if use_deform and deform_type in ('gaussian', 'deformgs'):
+        params = initialize_deformations(
+            params,
+            nr_basis=nr_basis,
+            use_distributed_biases=use_distributed_biases,
+            total_timescale=total_timescale
+        )
     elif use_deform and deform_type == 'cv':
         params = initialize_cv_deformations(params)
     if not use_simplification:

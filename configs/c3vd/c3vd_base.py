@@ -22,14 +22,14 @@ seed = 0
 try:    
     scene_name = scenes[int(os.environ["SCENE_NUM"])]
 except KeyError:
-    scene_name = "trans_t1_a"
+    scene_name = "trans_t2_c"
 
 map_every = 1
 keyframe_every = 8
 # mapping_window_size = 24
-tracking_iters = 25
-mapping_iters = 25
-frames = 200 # adjust untill which frame
+tracking_iters = 40
+mapping_iters = 60
+frames = 30 # adjust untill which frame
 group_name = "C3VD_base"
 run_name = scene_name
 
@@ -75,7 +75,7 @@ config = dict(
         scale_gt =   0.0034374421235340256    ,
     ), 
         deforms = dict(
-        use_deformations = True,
+        use_deformations = False,
         deform_type = 'cv',
         nr_basis = 50,
         use_xyzt=True,
@@ -90,7 +90,7 @@ config = dict(
     gaussian_reduction = dict(
         reduce_gaussians = True,
         reduction_type = 'laplace',
-        reduction_fraction = 0.8
+        reduction_fraction = 0.1
     ) ,  
     GRN = dict(
         use_grn = False,
