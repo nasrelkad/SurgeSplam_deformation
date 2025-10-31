@@ -181,7 +181,8 @@ def detect_collapse(color: torch.Tensor | None,
 
 
 def adaptive_collapse_densify(params, variables, curr_data, time_idx, mean_sq_dist_method,
-                              optimizer=None, prev_area_frac=None, aggressive_cfg: dict | None = None,
+                              config: dict | None = None, optimizer=None, prev_area_frac=None,
+                              aggressive_cfg: dict | None = None,
                               use_grn=False, grn_model=None, gate_conf=None, verbose=False):
     """
     If a collapse is detected on the current frame `curr_data`, call `add_new_gaussians`
@@ -209,26 +210,77 @@ def adaptive_collapse_densify(params, variables, curr_data, time_idx, mean_sq_di
     # Default aggressive settings
     # Aggressive defaults tuned for collapsed-lumen densification: smaller init scale,
     # more bases to cover local complexity, and random initialization to avoid bias.
+    # Derive defaults in the following precedence (highest -> lowest):
+    # aggressive_cfg -> config (experiment) -> params-derived heuristic -> hardcoded fallback
+    try:
+        if params is not None and isinstance(params, dict) and 'deform_weights' in params:
+            params_derived_nr_basis = int(params['deform_weights'].shape[1])
+        else:
+            params_derived_nr_basis = None
+    except Exception:
+        params_derived_nr_basis = None
+
+    aggressive_cfg = aggressive_cfg or {}
+
+    def _cfg_get(key, nested_keys=None, default=None):
+        # check aggressive_cfg first
+        if key in aggressive_cfg:
+            return aggressive_cfg[key]
+        # then check experiment config if provided
+        if config is not None:
+            # allow nested lookup via a list of keys
+            if nested_keys is None:
+                return config.get(key, default)
+            else:
+                cur = config
+                for nk in nested_keys:
+                    if isinstance(cur, dict) and nk in cur:
+                        cur = cur[nk]
+                    else:
+                        cur = None
+                        break
+                if cur is not None:
+                    return cur
+        return default
+
+    nr_basis = _cfg_get('nr_basis', nested_keys=['mapping', 'aggressive_nr_basis'], default=None)
+    if nr_basis is None:
+        # try known config locations
+        nr_basis = _cfg_get('nr_basis', nested_keys=['deforms', 'nr_basis'], default=None)
+    if nr_basis is None:
+        nr_basis = params_derived_nr_basis or 8
+
+    use_distributed_biases = _cfg_get('use_distributed_biases', nested_keys=['deforms', 'use_distributed_biases'], default=False)
+    total_timescale = _cfg_get('total_timescale', nested_keys=['deforms', 'total_timescale'], default=None)
+    use_grn_final = _cfg_get('use_grn', nested_keys=['GRN', 'use_grn'], default=use_grn)
+    use_deform = _cfg_get('use_deform', nested_keys=['deforms', 'use_deformations'], default=True)
+    deformation_type = _cfg_get('deformation_type', nested_keys=['deforms', 'deform_type'], default='gaussian')
+    num_frames = _cfg_get('num_frames', default=_cfg_get('num_frames', nested_keys=['data', 'num_frames'], default=1))
+    random_initialization = _cfg_get('random_initialization', nested_keys=['GRN', 'random_initialization'], default=True)
+    init_scale = _cfg_get('init_scale', nested_keys=['GRN', 'init_scale'], default=0.02)
+    cam = aggressive_cfg.get('cam', curr_data.get('cam', None))
+    reduce_gaussians = _cfg_get('reduce_gaussians', nested_keys=['gaussian_reduction', 'reduce_gaussians'], default=False)
+    reduction_type = _cfg_get('reduction_type', nested_keys=['gaussian_reduction', 'reduction_type'], default='random')
+    reduction_fraction = _cfg_get('reduction_fraction', nested_keys=['gaussian_reduction', 'reduction_fraction'], default=0.5)
+    gate_conf = gate_conf or _cfg_get('gate_conf', nested_keys=['deforms', 'gates'], default=gate_conf)
+
     aggressive_defaults = dict(
-        nr_basis=8,
-        use_distributed_biases=False,
-        total_timescale=None,
-        use_grn=use_grn,
+        nr_basis=int(nr_basis),
+        use_distributed_biases=bool(use_distributed_biases),
+        total_timescale=total_timescale,
+        use_grn=use_grn_final,
         grn_model=grn_model,
-        use_deform=True,
-        deformation_type='gaussian',
-        num_frames=1,
-        random_initialization=True,
-        init_scale=0.02,
-        cam=curr_data.get('cam', None),
-        reduce_gaussians=False,
-        reduction_type='random',
-        reduction_fraction=0.5,
+        use_deform=bool(use_deform),
+        deformation_type=deformation_type,
+        num_frames=int(num_frames) if num_frames is not None else 1,
+        random_initialization=bool(random_initialization),
+        init_scale=float(init_scale),
+        cam=cam,
+        reduce_gaussians=bool(reduce_gaussians),
+        reduction_type=reduction_type,
+        reduction_fraction=float(reduction_fraction),
         gate_conf=gate_conf,
     )
-
-    if aggressive_cfg is not None:
-        aggressive_defaults.update(aggressive_cfg)
 
     # Run detection using current data
     collapsed, stats = detect_collapse(curr_data.get('im', None), curr_data.get('depth', None), prev_area_frac=prev_area_frac)

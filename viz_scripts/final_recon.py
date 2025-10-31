@@ -425,10 +425,20 @@ def load_scene_data(scene_path, first_frame_w2c, intrinsics, time_idx, deform_ty
     if deform_mode in ('graph', 'hybrid'):
         missing = [k for k in ('graph_nodes', 'graph_idx', 'graph_w') if k not in params]
         if missing:
-            raise KeyError(f"Graph deformation requires keys {missing}")
-        params['graph_nodes'] = _Nx3(params['graph_nodes'])
-        params['graph_idx'] = params['graph_idx'].to(dtype=torch.long, device='cuda')
-        params['graph_w'] = params['graph_w'].to(dtype=torch.float32, device='cuda')
+            if deform_mode == 'hybrid' and all(k in params for k in ('cv_vel_xyz', 'cv_vel_log_scales', 'cv_angvel_aa')):
+                print(f"Warning: hybrid deformation missing graph keys {missing}; falling back to CV-only playback.")
+                deform_mode = 'cv'
+                params['_deform_type'] = deform_mode
+            elif deform_mode == 'graph':
+                print(f"Warning: graph deformation missing keys {missing}; falling back to static gaussians.")
+                deform_mode = 'gaussian'
+                params['_deform_type'] = deform_mode
+            else:
+                raise KeyError(f"Graph deformation requires keys {missing}")
+        if deform_mode in ('graph', 'hybrid'):
+            params['graph_nodes'] = _Nx3(params['graph_nodes'])
+            params['graph_idx'] = params['graph_idx'].to(dtype=torch.long, device='cuda')
+            params['graph_w'] = params['graph_w'].to(dtype=torch.float32, device='cuda')
     if deform_mode in ('cv', 'hybrid'):
         missing = [k for k in ('cv_vel_xyz', 'cv_vel_log_scales', 'cv_angvel_aa') if k not in params]
         if missing:

@@ -26,6 +26,7 @@ from utils.slam_helpers import (
     apply_xyzt_gate,
     compute_temporal_gate,
 )
+from utils.slam_helpers import initialize_graph_deformations, ensure_binding_buffers
 from utils.slam_external import build_rotation
 
 
@@ -433,7 +434,16 @@ def load_scene_data(scene_path, first_frame_w2c, intrinsics, time_idx, deform_ty
     if deform_mode in ('graph', 'hybrid'):
         missing = [k for k in ('graph_nodes', 'graph_idx', 'graph_w') if k not in params]
         if missing:
-            raise KeyError(f"Graph deformation requires keys {missing}")
+            # If the saved params don't include an explicit deformation graph,
+            # initialize a graph from the Gaussian means (safe fallback).
+            # This mirrors how the SLAM code constructs the graph when needed.
+            print(f"Graph keys {missing} missing from params — initializing graph from means3D")
+            try:
+                # Use defaults; this can be customized if needed
+                initialize_graph_deformations(params)
+                ensure_binding_buffers(params)
+            except Exception as e:
+                raise KeyError(f"Graph deformation requires keys {missing} and automatic initialization failed: {e}")
         params['graph_nodes'] = _Nx3(params['graph_nodes'])
         params['graph_idx'] = params['graph_idx'].to(dtype=torch.long, device='cuda')
         params['graph_w'] = params['graph_w'].to(dtype=torch.float32, device='cuda')
@@ -555,7 +565,8 @@ def render(w2c, k, timestep_data, timestep_depth_data, cfg):
             image_width=cam.image_width,
             tanfovx=cam.tanfovx,
             tanfovy=cam.tanfovy,
-            bg=torch.tensor([0, 0, 0], dtype=torch.float32, device="cuda"),
+                # Use white background so black RGB points are visible in the viewer.
+                bg=torch.tensor([1, 1, 1], dtype=torch.float32, device="cuda"),
             scale_modifier=cam.scale_modifier,
             viewmatrix=cam.viewmatrix,
             projmatrix=cam.projmatrix,
@@ -607,8 +618,21 @@ def rgbd2pcd(color, depth, w2c, intrinsics, cfg):
         cols = cols * bg_mask[:, None] + (1 - bg_mask[:, None]) * np.array([0, 0, 0]) # np.array([1.0, 1.0, 1.0])
         cols = o3d.utility.Vector3dVector(cols)
     else:
-        cols = torch.permute(color, (1, 2, 0)).reshape(-1, 3)
-        cols = o3d.utility.Vector3dVector(cols.contiguous().double().cpu().numpy())
+        cols_t = torch.permute(color, (1, 2, 0)).reshape(-1, 3)
+        cols_np = cols_t.contiguous().double().cpu().numpy()
+        # If the renderer produced all-black RGBs, fall back to depth-based coloring
+        if np.allclose(cols_np, 0.0):
+            # Use jet colormap on depth values (same as depth branch)
+            cols_depth = z_depth
+            bg_mask = (cols_depth < 15).astype(float)
+            colormap = plt.get_cmap('jet')
+            cNorm = plt.Normalize(vmin=0, vmax=np.max(cols_depth))
+            scalarMap = plt.cm.ScalarMappable(norm=cNorm, cmap=colormap)
+            cols = scalarMap.to_rgba(cols_depth)[:, :3]
+            cols = cols * bg_mask[:, None] + (1 - bg_mask[:, None]) * np.array([0, 0, 0])
+            cols = o3d.utility.Vector3dVector(cols)
+        else:
+            cols = o3d.utility.Vector3dVector(cols_np)
     return pts, cols
 
 
@@ -640,6 +664,45 @@ def visualize(scene_path, cfg,experiment):
     pcd.points = init_pts
     pcd.colors = init_cols
     vis.add_geometry(pcd)
+
+    # Also add Gaussian centers as an overlay so you can inspect the learned Gaussians
+    # even when the RGB renderer returns black images.
+    try:
+        centers = scene_data['means3D'].contiguous().double().cpu().numpy()
+        center_cols = scene_data.get('colors_precomp', None)
+        if center_cols is not None:
+            # handle Tensor or numpy array
+            try:
+                center_cols = center_cols.detach().contiguous().double().cpu().numpy()
+            except Exception:
+                center_cols = np.asarray(center_cols).astype(float)
+        else:
+            # fallback to white if no colors
+            center_cols = np.ones((centers.shape[0], 3), dtype=float)
+        centers_pcd = o3d.geometry.PointCloud()
+        centers_pcd.points = o3d.utility.Vector3dVector(centers)
+        centers_pcd.colors = o3d.utility.Vector3dVector(center_cols)
+        vis.add_geometry(centers_pcd)
+
+        # Add graph nodes overlay (sparser, easier to inspect). Color them red.
+        if 'graph_nodes' in params:
+            try:
+                gnodes_t = params['graph_nodes']
+                import torch
+                if isinstance(gnodes_t, torch.Tensor):
+                    gnodes = gnodes_t.detach().contiguous().double().cpu().numpy()
+                else:
+                    gnodes = np.asarray(gnodes_t).astype(float)
+                if gnodes.shape[0] > 0:
+                    gpc = o3d.geometry.PointCloud()
+                    gpc.points = o3d.utility.Vector3dVector(gnodes)
+                    red_cols = np.tile(np.array([[1.0, 0.0, 0.0]]), (gnodes.shape[0], 1))
+                    gpc.colors = o3d.utility.Vector3dVector(red_cols)
+                    vis.add_geometry(gpc)
+            except Exception as e:
+                print('Warning: could not add graph_nodes overlay:', e)
+    except Exception as _e:
+        print('Warning: could not add centers overlay:', _e)
 
     w = cfg['viz_w']
     h = cfg['viz_h']
@@ -694,7 +757,8 @@ def visualize(scene_path, cfg,experiment):
     view_control.convert_from_pinhole_camera_parameters(cparams, allow_arbitrary=True)
 
     render_options = vis.get_render_option()
-    render_options.point_size = cfg['view_scale']
+    # Increase point size so small Gaussian centers and graph nodes are visible.
+    render_options.point_size = max(cfg.get('view_scale', 1), 3)
     render_options.light_on = False
 
     ts = time()

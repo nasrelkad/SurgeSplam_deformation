@@ -1119,6 +1119,65 @@ def _cv_deformation(params, time):
     colors = params['rgb_colors']
     return xyz, rots, scales, opacities, colors
 
+def _ensure_gaussian_deform_params(params, default_basis=10):
+    """
+    Backfills missing gaussian deformation tensors when older checkpoints are loaded.
+    Keeps existing tensors (and their dtype/device) intact and only allocates what
+    is missing so downstream code can assume the keys exist.
+    """
+    required_keys = ('deform_weights', 'deform_stds', 'deform_biases')
+    missing = [k for k in required_keys if k not in params]
+    if not missing:
+        return params
+
+    means = params.get('means3D')
+    if isinstance(means, torch.Tensor):
+        device = means.device
+        base_dtype = means.dtype
+        num_gaussians = means.shape[0]
+    else:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        base_dtype = torch.float32
+        num_gaussians = int(np.array(means).shape[0]) if means is not None else 0
+
+    # Try to infer basis size/dtype/device from any existing deformation tensor.
+    basis = default_basis
+    ref_dtype = None
+    ref_device = None
+    for key in required_keys:
+        tensor = params.get(key)
+        if tensor is None:
+            continue
+        if isinstance(tensor, torch.nn.Parameter):
+            tensor = tensor.data
+        basis = tensor.shape[1]
+        ref_dtype = tensor.dtype
+        ref_device = tensor.device
+        break
+
+    dtype = ref_dtype or base_dtype if base_dtype in (torch.float16, torch.float32, torch.float64) else torch.float32
+    device = ref_device or device
+
+    def _to_parameter(tensor, requires_grad=True):
+        if isinstance(tensor, torch.nn.Parameter):
+            return tensor
+        return torch.nn.Parameter(tensor, requires_grad=requires_grad)
+
+    if 'deform_weights' not in params:
+        weights = torch.zeros((num_gaussians, basis, 10), device=device, dtype=dtype)
+        params['deform_weights'] = _to_parameter(weights, requires_grad=True)
+
+    if 'deform_stds' not in params:
+        stds = torch.ones((num_gaussians, basis, 10), device=device, dtype=dtype) * 10.0
+        params['deform_stds'] = _to_parameter(stds, requires_grad=True)
+
+    if 'deform_biases' not in params:
+        biases = torch.zeros((num_gaussians, basis, 10), device=device, dtype=dtype)
+        # Biases can be frozen depending on configuration, so we respect existing flag if present.
+        params['deform_biases'] = _to_parameter(biases, requires_grad=True)
+
+    return params
+
 def deform_gaussians(params, time, deform_grad, N=5, deformation_type='gaussian', temperature=0.5):
     """
     Gaussian deformation:
@@ -1129,6 +1188,7 @@ def deform_gaussians(params, time, deform_grad, N=5, deformation_type='gaussian'
     
     """
     if deformation_type == 'gaussian':
+        params = _ensure_gaussian_deform_params(params)
         # Pull tensors with/without grad
         if deform_grad:
             W = params['deform_weights']      # [G,B,10]
@@ -1460,6 +1520,53 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
         pad = torch.full(pad_shape, fill_value, dtype=tensor.dtype, device=tensor.device)
         return torch.cat([tensor, pad], dim=1)
 
+    def _match_tensor_dims(tensor, ref_tensor, fill_value=0.0):
+        """
+        Ensure tensor and ref_tensor match in all dims except dim 0 (batch/new-gaussians dim).
+        If tensor has fewer columns in any trailing dimension, pad with fill_value. If it has
+        more, truncate. Returns a tensor with same dtype/device as ref_tensor.
+        """
+        if ref_tensor is None:
+            return tensor
+        # Convert to plain tensor if it's a Parameter
+        if isinstance(tensor, torch.nn.Parameter):
+            t = tensor.detach()
+        else:
+            t = tensor
+        if isinstance(ref_tensor, torch.nn.Parameter):
+            r = ref_tensor.detach()
+        else:
+            r = ref_tensor
+
+        # If shapes already compatible (except dim 0), return as-is
+        if t.ndim != r.ndim:
+            # If dims differ, try to add singleton dims to tensor to match r
+            # e.g., allow 2D vs 3D by unsqueezing at the end
+            while t.ndim < r.ndim:
+                t = t.unsqueeze(-1)
+        # Now ensure trailing dims match
+        out = t
+        for dim in range(1, r.ndim):
+            ref_size = r.shape[dim]
+            out_size = out.shape[dim]
+            if out_size == ref_size:
+                continue
+            if out_size > ref_size:
+                # truncate
+                idx = [slice(None)] * out.ndim
+                idx[dim] = slice(0, ref_size)
+                out = out[tuple(idx)]
+            else:
+                # pad
+                pad_sizes = list(out.shape)
+                pad_sizes[dim] = ref_size - out_size
+                pad = torch.full(tuple(pad_sizes), fill_value, dtype=out.dtype, device=out.device)
+                out = torch.cat([out, pad], dim=dim)
+
+        # Cast to ref dtype/device
+        out = out.to(device=r.device, dtype=r.dtype)
+        return out
+
     # Silhouette Rendering
     if use_deform == True:
         local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(params,time_idx,True,deformation_type =deformation_type)
@@ -1602,7 +1709,17 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
                 combined = torch.cat((base_tensor, new_tensor), dim=0)
                 params_iter[k] = combined
                 continue
-            params_iter[k] = torch.nn.Parameter(torch.cat((params[k], v), dim=0).requires_grad_(True))
+            base = params_iter.get(k, None)
+            if base is None:
+                # nothing to match against, just assign
+                params_iter[k] = v.detach() if isinstance(v, torch.nn.Parameter) else v
+            else:
+                base_tensor = base.detach() if isinstance(base, torch.nn.Parameter) else base
+                new_tensor = v.detach() if isinstance(v, torch.nn.Parameter) else v
+                # ensure trailing dims match (pad/truncate as needed)
+                new_tensor = _match_tensor_dims(new_tensor, base_tensor, fill_value=0.0)
+                combined = torch.cat((base_tensor, new_tensor), dim=0)
+                params_iter[k] = torch.nn.Parameter(combined.requires_grad_(True))
 
         # Grow XYZT gating tensors if they already exist
         new_gauss = new_pt_cld.shape[0]

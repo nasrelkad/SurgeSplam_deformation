@@ -499,24 +499,35 @@ def deform_gaussians(params, time, deform_grad, N=5, deformation_type='gaussian'
 
 
 def compute_errors(gt, pred):
-    """Computation of error metrics between predicted and ground truth depths
+    """Computation of error metrics between predicted and ground truth depths.
+
+    Both inputs are expected to be flat numpy arrays.  If there are no valid
+    pixels (finite and strictly positive), all metrics return NaN to signal
+    the absence of supervision.
     """
-    thresh = np.maximum((gt / pred), (pred / gt))
-    a1 = (thresh < 1.25     ).mean()
+    gt = np.asarray(gt, dtype=np.float64)
+    pred = np.asarray(pred, dtype=np.float64)
+    mask = np.isfinite(gt) & np.isfinite(pred) & (gt > 0) & (pred > 0)
+    if mask.sum() == 0:
+        return tuple(float("nan") for _ in range(8))
+
+    gt_valid = np.clip(gt[mask], 1e-6, None)
+    pred_valid = np.clip(pred[mask], 1e-6, None)
+
+    thresh = np.maximum(gt_valid / pred_valid, pred_valid / gt_valid)
+    a1 = (thresh < 1.25).mean()
     a2 = (thresh < 1.25 ** 2).mean()
     a3 = (thresh < 1.25 ** 3).mean()
 
-    rmse = (gt - pred) ** 2
-    rmse = np.sqrt(rmse.mean())
+    rmse = np.sqrt(np.mean((gt_valid - pred_valid) ** 2))
+    rmse_log = np.sqrt(np.mean((np.log(gt_valid) - np.log(pred_valid)) ** 2))
+    abs_rel = np.mean(np.abs(gt_valid - pred_valid) / gt_valid)
+    sq_rel = np.mean(((gt_valid - pred_valid) ** 2) / gt_valid)
 
-    rmse_log = (np.log(gt) - np.log(pred)) ** 2
-    rmse_log = np.sqrt(rmse_log.mean())
-
-    abs_rel = np.mean(np.abs(gt - pred) / gt)
-
-    sq_rel = np.mean(((gt - pred) ** 2) / gt)
-
-    psnr = 20*np.log10(np.max(gt)/np.sqrt(rmse))
+    max_gt = np.max(gt_valid)
+    psnr = float("nan")
+    if np.isfinite(max_gt) and rmse > 0:
+        psnr = 20.0 * np.log10(max_gt / rmse)
 
     return abs_rel, sq_rel, rmse, rmse_log, a1, a2, a3, psnr
 
@@ -727,6 +738,14 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
                     presence_sil_mask = (silhouette > sil_thres)
             
             
+            valid_px = int(valid_depth_mask.sum())
+            if valid_px < 1:
+                print(f"No valid depth pixels for frame {total_time_idx}; skipping depth-aligned metrics.")
+                depth_errors_list.append(tuple(float("nan") for _ in range(8)))
+                rmse_list.append(np.nan)
+                l1_list.append(np.nan)
+                continue
+
             # Render RGB and Calculate PSNR
             # timer.lap('rest part', stage=0)
             # for _ in range(100):
@@ -885,13 +904,16 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
     for error in depth_errors_list:
         for id,metric in enumerate(error):
             depth_errors_np[depth_error_metrics[id]].append(metric)
-    avg_psnr = psnr_list.mean()
-    avg_rmse = rmse_list.mean()
-    avg_l1 = l1_list.mean()
-    avg_ssim = ssim_list.mean()
-    avg_lpips = lpips_list.mean()
-    avg_depth_errors = {key: np.mean(depth_errors_np[key]) for key in depth_errors_np.keys()}
-    avg_gaussians = nr_gaussians_list.mean()
+    def _nanmean(arr):
+        return float(np.nanmean(arr)) if arr.size else float("nan")
+
+    avg_psnr = _nanmean(psnr_list)
+    avg_rmse = _nanmean(rmse_list)
+    avg_l1 = _nanmean(l1_list)
+    avg_ssim = _nanmean(ssim_list)
+    avg_lpips = _nanmean(lpips_list)
+    avg_depth_errors = {key: _nanmean(np.array(depth_errors_np[key])) for key in depth_errors_np.keys()}
+    avg_gaussians = _nanmean(nr_gaussians_list)
     print("Average PSNR: {:.2f}".format(avg_psnr))
     print("Average Depth RMSE: {:.2f} mm".format(avg_rmse*100))
     print("Average Depth L1: {:.2f} mm".format(avg_l1*100))

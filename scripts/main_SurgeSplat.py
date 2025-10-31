@@ -55,6 +55,71 @@ import matplotlib.pyplot as plt
 
 from PIL import Image
 
+# Optimizer logging helper
+def _log_optimizer_state(optimizer, params_dict, output_dir, tag="", pre=True):
+    """
+    Append a concise snapshot of optimizer/parameter state to output_dir/optimizer_steps.log.
+    - optimizer: torch optimizer
+    - params_dict: dict-like of parameter tensors (e.g., params or params_iter)
+    - output_dir: directory to write log into
+    - tag: free-text tag (e.g., f"time{time_idx}_iter{iter}")
+    - pre: True for pre-step, False for post-step
+    """
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        log_path = os.path.join(output_dir, 'optimizer_steps.log')
+        with open(log_path, 'a') as lf:
+            lf.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} [{tag}] {'PRE' if pre else 'POST'} step\n")
+            # Per-parameter-group summary (gradient norms / non-finite counts)
+            try:
+                for gi, group in enumerate(optimizer.param_groups):
+                    lf.write(f"  group[{gi}] lr={group.get('lr', None)} params={len(group.get('params', []))}\n")
+                    for pj, p in enumerate(group.get('params', [])):
+                        try:
+                            if p is None:
+                                continue
+                            shape = tuple(p.shape) if hasattr(p, 'shape') else None
+                            dev = getattr(p, 'device', None)
+                            grad = getattr(p, 'grad', None)
+                            if grad is None:
+                                lf.write(f"    p[{pj}] shape={shape} device={dev} grad=None\n")
+                            else:
+                                # compute stats safely
+                                try:
+                                    n_bad = int((~torch.isfinite(grad)).sum().item())
+                                    gnorm = float(torch.norm(grad).cpu().item())
+                                except Exception:
+                                    n_bad = -1
+                                    gnorm = float('nan')
+                                lf.write(f"    p[{pj}] shape={shape} device={dev} grad_nonfinite={n_bad} grad_norm={gnorm:.6e}\n")
+                        except Exception as e:
+                            lf.write(f"    p[{pj}] read-error: {e}\n")
+            except Exception as e:
+                lf.write(f"  failed to iterate param_groups: {e}\n")
+
+            # Parameter dictionary-level finiteness checks (by name when available)
+            try:
+                for k, v in (params_dict.items() if isinstance(params_dict, dict) else []):
+                    try:
+                        if isinstance(v, torch.Tensor):
+                            nbad = int((~torch.isfinite(v)).sum().item())
+                            if nbad > 0:
+                                lf.write(f"  PARAM {k}: non-finite={nbad}/{v.numel()} shape={tuple(v.shape)}\n")
+                    except Exception:
+                        lf.write(f"  PARAM {k}: error checking finiteness\n")
+            except Exception:
+                # params_dict might not be a dict; skip
+                pass
+
+            lf.write('\n')
+    except Exception:
+        # best-effort logging; don't crash training
+        try:
+            print('WARNING: failed optimizer logging')
+        except Exception:
+            pass
+
+
 
 class GaussianRegressionNetwork(nn.Module):
     def __init__(self):
@@ -1367,8 +1432,18 @@ def optimize_initialization(params,params_init,curr_data,num_iters_initializatio
                     use_grn = config['GRN']['use_grn'],deformation_type = config['deforms']['deform_type'], gate_thresh = config['deforms']['xyzt_gate_thresh'],
                     gate_config=gate_conf)
         loss.backward()
+        # Log optimizer/grad state (pre-step)
+        try:
+            _log_optimizer_state(optimizer, params, '/tmp', tag=f'init_time{iter_time_idx}_iter{iter}', pre=True)
+        except Exception:
+            pass
         optimizer.step()
         _clamp_cv_deform(params)
+        # Log optimizer/param state (post-step)
+        try:
+            _log_optimizer_state(optimizer, params, '/tmp', tag=f'init_time{iter_time_idx}_iter{iter}', pre=False)
+        except Exception:
+            pass
         optimizer.zero_grad(set_to_none=True)
         save_idx +=1
 
@@ -1409,8 +1484,22 @@ def rgbd_slam(config: dict):
     eval_dir = os.path.join(output_dir, "eval")
     os.makedirs(eval_dir, exist_ok=True)
 
+    # Nan detection / diagnostics
+    nan_detected_first = False
+    nan_log_path = os.path.join(output_dir, "nan_detection.log")
+    nan_diag_dir = os.path.join(output_dir, "nan_diagnostics")
+
     # Get Device
     device = torch.device(config["primary_device"])
+
+    # AMP GradScaler for mixed-precision training (safe no-op on CPU)
+    scaler = None
+    if device.type == 'cuda':
+        try:
+            from torch.cuda.amp import GradScaler
+            scaler = GradScaler()
+        except Exception:
+            scaler = None
 
     # Load Dataset
     print("Loading Dataset ...")
@@ -1912,18 +2001,89 @@ def rgbd_slam(config: dict):
                 # print(loss)
                 save_idx = save_idx+1
 
-                # Backprop
-                
-                loss.backward()
-                # Optimizer Update
-
-                # weight_grad = params['deform_weights'].grad.mean()
-                # bias_grad = params['deform_biases'].grad.mean()
-                # stds_grad = params['deform_stds'].grad.mean()
-                # cam_pos_grad = params['cam_trans'].grad.mean()
-                # cam_rot_grad = params['cam_unnorm_rots'].grad.mean()
-                optimizer.step()
+                # Backprop (AMP-safe when running on CUDA)
+                # Log pre-step optimizer/grad state
+                try:
+                    _log_optimizer_state(optimizer, params_iter, output_dir, tag=f"time{time_idx}_iter{iter}", pre=True)
+                except Exception:
+                    pass
+                if scaler is not None:
+                    # scale the loss, backward, unscale for clipping, then step via scaler
+                    scaler.scale(loss).backward()
+                    try:
+                        # Unscale gradients before clipping
+                        scaler.unscale_(optimizer)
+                    except Exception:
+                        pass
+                    # Gradient clipping (configurable). Set negative to disable.
+                    max_norm = float(config.get('amp_clip_grad_norm', 1.0))
+                    if max_norm > 0:
+                        torch.nn.utils.clip_grad_norm_(
+                            [p for group in optimizer.param_groups for p in group['params'] if getattr(p, 'grad', None) is not None],
+                            max_norm
+                        )
+                    # Step using scaler
+                    scaler.step(optimizer)
+                    scaler.update()
+                    # Log post-step optimizer/param state
+                    try:
+                        _log_optimizer_state(optimizer, params_iter, output_dir, tag=f"time{time_idx}_iter{iter}", pre=False)
+                    except Exception:
+                        pass
+                else:
+                    # Fallback: plain FP32 backward/step
+                    loss.backward()
+                    max_norm = float(config.get('amp_clip_grad_norm', 1.0))
+                    if max_norm > 0:
+                        torch.nn.utils.clip_grad_norm_(
+                            [p for group in optimizer.param_groups for p in group['params'] if getattr(p, 'grad', None) is not None],
+                            max_norm
+                        )
+                    optimizer.step()
+                    try:
+                        _log_optimizer_state(optimizer, params_iter, output_dir, tag=f"time{time_idx}_iter{iter}", pre=False)
+                    except Exception:
+                        pass
+                # Ensure CV deformations are clamped after the optimizer update
                 _clamp_cv_deform(params_iter)
+
+                # Post-step finiteness check: detect the first occurrence of non-finite params
+                try:
+                    if not nan_detected_first:
+                        bad_keys = []
+                        for k, v in params_iter.items():
+                            try:
+                                if isinstance(v, torch.Tensor):
+                                    n_bad = int((~torch.isfinite(v)).sum().item())
+                                    if n_bad > 0:
+                                        bad_keys.append((k, n_bad, tuple(v.shape)))
+                                elif isinstance(v, list):
+                                    total_bad = 0
+                                    for x in v:
+                                        if isinstance(x, torch.Tensor):
+                                            total_bad += int((~torch.isfinite(x)).sum().item())
+                                    if total_bad > 0:
+                                        bad_keys.append((k, total_bad, None))
+                            except Exception:
+                                continue
+                        if len(bad_keys) > 0:
+                            nan_detected_first = True
+                            os.makedirs(nan_diag_dir, exist_ok=True)
+                            with open(nan_log_path, 'a') as lf:
+                                lf.write(f"First non-finite detected at time_idx={time_idx}, tracking_iter={iter}\n")
+                                for kname, cnt, shape in bad_keys:
+                                    lf.write(f"  {kname}: non-finite={cnt}, shape={shape}\n")
+                            # Save diagnostic checkpoint for inspection
+                            try:
+                                save_params_ckpt(params_iter, nan_diag_dir, f"nan_time{time_idx}_iter{iter}")
+                            except Exception as e:
+                                with open(nan_log_path, 'a') as lf:
+                                    lf.write(f"  Failed to save diagnostic checkpoint: {e}\n")
+                            print(f"Non-finite parameters detected at time {time_idx}, iter {iter}. Diagnostic saved to {nan_diag_dir}.")
+                except Exception:
+                    # Don't let the finiteness check crash training
+                    pass
+
                 optimizer.zero_grad(set_to_none=True)
                 with torch.no_grad():
                     # Save the best candidate rotation & translation
@@ -2117,7 +2277,7 @@ def rgbd_slam(config: dict):
                     # aggressively when a collapse is detected; otherwise it is a noop.
                     params_iter, variables, collapse_info = adaptive_collapse_densify(
                         params_iter, variables, densify_curr_data, time_idx,
-                        config['mean_sq_dist_method'], prev_area_frac=prev_area_frac,
+                        config['mean_sq_dist_method'], config=config, prev_area_frac=prev_area_frac,
                         aggressive_cfg=None, use_grn=config['GRN']['use_grn'],
                         grn_model=grn_model, gate_conf=gate_conf, verbose=config.get('verbose', False)
                     )
@@ -2279,71 +2439,7 @@ def rgbd_slam(config: dict):
                     # Write a brief pre-densify debug snapshot to help trace HxW vs G mismatches
                     
 
-                    try:
-                        Np = int(params_iter['means3D'].shape[0])
-                        for _name in ('means2D_gradient_accum', 'denom', 'max_2D_radius'):
-                            if _name in variables:
-                                v = variables[_name]
-                                if v.shape[0] != Np:
-                                    try:
-                                        if v.shape[0] > Np:
-                                            variables[_name] = v[:Np]
-                                        else:
-                                            pad = torch.zeros((Np - v.shape[0],) + v.shape[1:], device=v.device, dtype=v.dtype)
-                                            variables[_name] = torch.cat([v, pad], dim=0)
-                                        print(f"[align] resized variables['{_name}'] from {v.shape[0]} to {Np}")
-                                    except Exception:
-                                        # best-effort: convert to tensor of correct length
-                                        variables[_name] = torch.zeros(Np, device=v.device if hasattr(v,'device') else 'cuda')
-                    except Exception:
-                        pass
-                    try:
-                        params_iter, variables = densify(params_iter, variables, optimizer, mapping_iter, config['mapping']['densify_dict'])
-                    except Exception as e:
-                        # Enhanced diagnostics: capture dataset/resolution and key variable shapes
-                        
-                        print(f"Warning: densify failed at frame {time_idx}, iter {mapping_iter}: {e}")
-                        print("DENSIFY DIAGNOSTICS:")
-                        try:
-                            ds = dataset_config if 'dataset_config' in locals() else config.get('data', {})
-                            H = ds.get('desired_image_height', None)
-                            W = ds.get('desired_image_width', None)
-                            densH = ds.get('densification_image_height', None)
-                            densW = ds.get('densification_image_width', None)
-                            print(f" dataset desired HxW={H}x{W}, dens HxW={densH}x{densW}")
-                        except Exception:
-                            print("  (failed to read dataset sizes)")
-                        try:
-                            # Print some useful variable shapes if present
-                            for k in ('means2D_gradient_accum', 'denom', 'max_2D_radius', 'means3D', 'logit_opacities'):
-                                if k in variables:
-                                    v = variables[k]
-                                    try:
-                                        print(f" variables[{k}].shape={tuple(v.shape)} numel={v.numel()}")
-                                    except Exception:
-                                        print(f" variables[{k}] present but cannot get shape")
-                        except Exception:
-                            pass
-                        # Append full traceback and brief context to run log for offline inspection
-                        try:
-                            wd = '.'
-                            if 'curr_data' in locals() and isinstance(curr_data, dict):
-                                wd = curr_data.get('workdir', wd)
-                            else:
-                                try:
-                                    cfg = globals().get('config', None)
-                                    if isinstance(cfg, dict):
-                                        wd = cfg.get('workdir', wd)
-                                except Exception:
-                                    pass
-                            os.makedirs(wd, exist_ok=True)
-                            logf = os.path.join(wd, 'densify_shape_mismatch.log')
-                            with open(logf, 'a') as f:
-                                f.write(f"Frame {time_idx} iter {mapping_iter} Exception: {repr(e)}\n")
-                                traceback.print_exc(file=f)
-                                f.write('\n')
-                        except Exception:
-                            pass
+                    
                 #         # Optimizer Update
                 #         optimizer.step()
                 #         optimizer.zero_grad(set_to_none=True)

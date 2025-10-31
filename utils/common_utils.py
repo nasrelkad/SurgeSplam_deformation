@@ -34,8 +34,37 @@ def params2cpu(params):
 def save_params(output_params, output_dir):
     # Convert to CPU Numpy Arrays
     to_save = params2cpu(output_params)
-    # Save the Parameters containing the Gaussian Trajectories
+    # Pre-save finiteness validation: do not overwrite a good checkpoint with NaNs/Infs.
+    nonfinite_info = {}
+    for k, v in to_save.items():
+        try:
+            if isinstance(v, np.ndarray):
+                # Count non-finite entries
+                n_nonfinite = int((~np.isfinite(v)).sum())
+                if n_nonfinite > 0:
+                    nonfinite_info[k] = (n_nonfinite, v.shape)
+        except Exception:
+            # If any unexpected object, skip finiteness check for that key
+            continue
+
     os.makedirs(output_dir, exist_ok=True)
+    if len(nonfinite_info) > 0:
+        # Save a diagnostic copy and warn instead of overwriting the main checkpoint.
+        print(f"Warning: detected non-finite values in parameters; not saving main params.npz. Keys: {list(nonfinite_info.keys())}")
+        diag_dir = os.path.join(output_dir, "bad_checkpoints")
+        os.makedirs(diag_dir, exist_ok=True)
+        bad_path = os.path.join(diag_dir, "params.bad.npz")
+        # Save the bad checkpoint for debugging
+        np.savez(bad_path, **to_save)
+        # Also write a small textual report
+        report_path = os.path.join(diag_dir, "params.bad.report.txt")
+        with open(report_path, "w") as rf:
+            rf.write(f"Detected non-finite parameters when attempting to save to {output_dir}\n")
+            for k, (cnt, shape) in nonfinite_info.items():
+                rf.write(f"{k}: non-finite={cnt}, shape={shape}\n")
+        return
+
+    # Save the Parameters containing the Gaussian Trajectories
     print(f"Saving parameters to: {output_dir}")
     save_path = os.path.join(output_dir, "params.npz")
     np.savez(save_path, **to_save)
@@ -67,8 +96,33 @@ end_header
 def save_params_ckpt(output_params, output_dir, time_idx):
     # Convert to CPU Numpy Arrays
     to_save = params2cpu(output_params)
-    # Save the Parameters containing the Gaussian Trajectories
+    # Pre-save finiteness validation for checkpoints
+    nonfinite_info = {}
+    for k, v in to_save.items():
+        try:
+            if isinstance(v, np.ndarray):
+                n_nonfinite = int((~np.isfinite(v)).sum())
+                if n_nonfinite > 0:
+                    nonfinite_info[k] = (n_nonfinite, v.shape)
+        except Exception:
+            continue
+
     os.makedirs(output_dir, exist_ok=True)
+    if len(nonfinite_info) > 0:
+        # Save a diagnostic copy and warn; include time_idx in filename for traceability
+        print(f"Warning: detected non-finite values in checkpoint params at time {time_idx}; saving diagnostic copy instead of canonical checkpoint.")
+        diag_dir = os.path.join(output_dir, "bad_checkpoints")
+        os.makedirs(diag_dir, exist_ok=True)
+        bad_path = os.path.join(diag_dir, "params"+str(time_idx)+".bad.npz")
+        np.savez(bad_path, **to_save)
+        report_path = os.path.join(diag_dir, "params"+str(time_idx)+".bad.report.txt")
+        with open(report_path, "w") as rf:
+            rf.write(f"Detected non-finite parameters in checkpoint time {time_idx}\n")
+            for k, (cnt, shape) in nonfinite_info.items():
+                rf.write(f"{k}: non-finite={cnt}, shape={shape}\n")
+        return
+
+    # Save the Parameters containing the Gaussian Trajectories
     print(f"Saving parameters to: {output_dir}")
     save_path = os.path.join(output_dir, "params"+str(time_idx)+".npz")
     np.savez(save_path, **to_save)

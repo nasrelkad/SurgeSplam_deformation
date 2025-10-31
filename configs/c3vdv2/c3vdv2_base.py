@@ -18,7 +18,7 @@ keyframe_every = 8
 # mapping_window_size = 24
 tracking_iters = 48
 mapping_iters = 50
-frames = 20  # full sequence length for C3VDv2 c1_transverse1_t4_v4
+frames = 10  # full sequence length for C3VDv2 c1_transverse1_t4_v4
 group_name = "C3VDv2_base"
 run_name = scene_name
 
@@ -58,14 +58,14 @@ config = dict(
         model_size = 'vitb',
         normalization_means = [0.46888983, 0.29536288, 0.28712815], 
         normalization_stds = [0.24689102 ,0.21034359, 0.21188641],
-        shift_pred = 2.0192598978494627   ,
-        scale_pred = 0.5414197885483871 ,
-        shift_gt =   0.016469928791720198   ,
-        scale_gt =   0.0034374421235340256    ,
+        shift_pred =  0.9331077337265015   ,
+        scale_pred = 1.030671057478422 ,
+        shift_gt =   0.9331077337265015   ,
+        scale_gt =   1.030671057478422    ,
     ), 
         deforms = dict(
         use_deformations = True,
-        deform_type = 'gaussians',
+        deform_type = 'hybrid',
         nr_basis = 50,
         use_xyzt=True,
         graph = dict(
@@ -169,7 +169,7 @@ config = dict(
         loss_weights=dict(
             im=0.5,
             depth=0.5,
-            deform = 0.0,
+            deform = 0.5,
             arap=5e-3,         # graph rigidity
             node_vel_l2=1e-4,
             node_acc_l2=1e-5,  # CA regularizer
@@ -228,7 +228,7 @@ config = dict(
         loss_weights=dict(
             im=1.0,
             depth=0.5,
-            deform = 0.0,
+            deform = 0.5,
             arap=5e-3, node_vel_l2=1e-4, node_acc_l2=1e-5, fourier_l2=1e-5
         ),
         lrs=dict(
