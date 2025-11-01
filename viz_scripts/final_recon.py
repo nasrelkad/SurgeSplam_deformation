@@ -406,19 +406,30 @@ def render(w2c, k, timestep_data, timestep_depth_data, cfg):
             campos=cam.campos,
             prefiltered=cam.prefiltered
         )
-        im, _, depth = Renderer(raster_settings=white_bg_cam)(**timestep_data)
-        # depth_sil, _, _ = Renderer(raster_settings=white_bg_cam)(**timestep_depth_data)
-        # differentiable_depth = depth_sil[0, :, :].unsqueeze(0)
-        # sil = depth_sil[1, :, :].unsqueeze(0)
-        return im, depth, _
+        im, _, _ = Renderer(raster_settings=white_bg_cam)(**timestep_data)
+        depth_sil, _, _ = Renderer(raster_settings=white_bg_cam)(**timestep_depth_data)
+        return im, depth_sil
 
 
-def rgbd2pcd(color, depth, w2c, intrinsics, cfg):
+def rgbd2pcd(color, depth_sil, w2c, intrinsics, cfg):
     width, height = color.shape[2], color.shape[1]
     CX = intrinsics[0][2]
     CY = intrinsics[1][2]
     FX = intrinsics[0][0]
     FY = intrinsics[1][1]
+
+    depth = depth_sil[0:1, ...]
+    silhouette = depth_sil[1:2, ...]
+    valid_depth = torch.isfinite(depth) & (depth > 0)
+    depth_clip = cfg.get('viz_depth_max', None)
+    if depth_clip is not None:
+        valid_depth &= (depth < depth_clip)
+    sil_thres = cfg.get('viz_sil_thres', None)
+    if sil_thres is not None:
+        valid_mask = valid_depth & (silhouette > sil_thres)
+    else:
+        valid_mask = valid_depth
+    mask_flat = valid_mask.reshape(-1)
 
     # Compute indices
     xx = torch.tile(torch.arange(width).cuda(), (height,))
@@ -434,14 +445,20 @@ def rgbd2pcd(color, depth, w2c, intrinsics, cfg):
     c2w = torch.inverse(torch.tensor(w2c).cuda().float())
     pts = (c2w @ pts4.T).T[:, :3]
 
+    if mask_flat.sum() > 0:
+        pts = pts[mask_flat]
+        z_depth = z_depth[mask_flat]
+    else:
+        mask_flat = None
+
     # Convert to Open3D format
     pts = o3d.utility.Vector3dVector(pts.contiguous().double().cpu().numpy())
     
     # Colorize point cloud
     if cfg['render_mode'] == 'depth':
         cols = z_depth
-        bg_mask = (cols < 15).float()
-        cols = cols * bg_mask
+        cutoff = depth_clip if depth_clip is not None else 15
+        bg_mask = (cols < cutoff).float()
         colormap = plt.get_cmap('jet')
         cNorm = plt.Normalize(vmin=0, vmax=torch.max(cols))
         scalarMap = plt.cm.ScalarMappable(norm=cNorm, cmap=colormap)
@@ -451,6 +468,8 @@ def rgbd2pcd(color, depth, w2c, intrinsics, cfg):
         cols = o3d.utility.Vector3dVector(cols)
     else:
         cols = torch.permute(color, (1, 2, 0)).reshape(-1, 3)
+        if mask_flat is not None:
+            cols = cols[mask_flat]
         cols = o3d.utility.Vector3dVector(cols.contiguous().double().cpu().numpy())
     return pts, cols
 
@@ -472,8 +491,8 @@ def visualize(scene_path, cfg,experiment):
                       height=int(cfg['viz_h'] * cfg['view_scale']),
                       visible=True)
 
-    im, depth, _ = render(w2c, k, scene_data, scene_depth_data, cfg)
-    init_pts, init_cols = rgbd2pcd(im, depth, w2c, k, cfg)
+    im, depth_sil = render(w2c, k, scene_data, scene_depth_data, cfg)
+    init_pts, init_cols = rgbd2pcd(im, depth_sil, w2c, k, cfg)
     pcd = o3d.geometry.PointCloud()
     pcd.points = init_pts
     pcd.colors = init_cols
@@ -560,10 +579,8 @@ def visualize(scene_path, cfg,experiment):
             pts = o3d.utility.Vector3dVector(scene_data['means3D'].contiguous().double().cpu().numpy())
             cols = o3d.utility.Vector3dVector(scene_data['colors_precomp'].contiguous().double().cpu().numpy())
         else:
-            im, depth, _ = render(w2c, k, scene_data, scene_depth_data, cfg)
-            # if cfg['show_sil']:
-            #     im = (1-sil).repeat(3, 1, 1)
-            pts, cols = rgbd2pcd(im, depth, w2c, k, cfg)
+            im, depth_sil = render(w2c, k, scene_data, scene_depth_data, cfg)
+            pts, cols = rgbd2pcd(im, depth_sil, w2c, k, cfg)
         
         # Update Gaussians
         pcd.points = pts
