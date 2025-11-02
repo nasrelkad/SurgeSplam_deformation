@@ -39,7 +39,7 @@ from utils.slam_helpers import (
     add_new_gaussians,grn_initialization,deform_gaussians,initialize_deformations,initialize_new_params,grn_initialization,
     get_mask,align_shift_and_scale, initialize_cv_deformations, initialize_xyzt, xyzt_time_gate, apply_xyzt_gate
 )
-from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, densify
+from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, densify, remove_points
 from utils.vis_utils import plot_video
 from utils.time_helper import Timer
 
@@ -51,6 +51,274 @@ from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 import matplotlib.pyplot as plt
 
 from PIL import Image
+from typing import Dict, Optional
+import math
+
+
+def _ensure_motion_state(variables: Dict) -> Dict:
+    state = variables.get('motion_state')
+    if state is None:
+        state = {
+            'prev_tran': None,
+            'pause_counter': 0,
+            'is_contraction': False,
+            'delta': 0.0,
+            'last_step': 0.0,
+            'forward_dir': None
+        }
+        variables['motion_state'] = state
+    return state
+
+
+def _compute_gate_thresh(base_gate: float, motion_cfg: Dict, motion_state: Dict) -> float:
+    if not motion_cfg.get('enable', False):
+        return base_gate
+    gate = base_gate
+    if motion_state.get('is_contraction'):
+        gate += motion_cfg.get('gate_thresh_boost', 0.0)
+    else:
+        gate += motion_cfg.get('moving_gate_offset', 0.0)
+    gate_cap = motion_cfg.get('gate_thresh_cap', 0.99)
+    return float(max(0.0, min(gate, gate_cap)))
+
+
+def _update_motion_state(variables: Dict, params_iter, time_idx: int, motion_cfg: Dict) -> Dict:
+    state = _ensure_motion_state(variables)
+    curr = params_iter['cam_trans'][..., time_idx].detach().view(-1).float().cpu()
+    prev = state.get('prev_tran')
+
+    delta = 0.0
+    direction_min = motion_cfg.get('direction_min_delta', motion_cfg.get('contraction_speed_thresh', 1e-3))
+    contraction_thresh = motion_cfg.get('contraction_speed_thresh', 1e-3)
+    pause_frames = motion_cfg.get('min_pause_frames', 2)
+
+    if prev is not None and prev.shape == curr.shape:
+        delta_vec = curr - prev
+        delta = torch.norm(delta_vec).item()
+        if delta > direction_min:
+            state['forward_dir'] = (delta_vec / (delta + 1e-8)).clone()
+            state['last_step'] = delta
+        else:
+            state['last_step'] = state.get('last_step', 0.0) * motion_cfg.get('pause_forward_decay', 0.5)
+    else:
+        state['last_step'] = state.get('last_step', 0.0)
+
+    if delta < contraction_thresh:
+        state['pause_counter'] = state.get('pause_counter', 0) + 1
+    else:
+        state['pause_counter'] = 0
+    state['is_contraction'] = state['pause_counter'] >= pause_frames
+    state['delta'] = delta
+    state['prev_tran'] = curr
+    return state
+
+
+def _update_scene_state(variables, motion_state, added_this_frame, missing_ratio=None, cfg=None):
+    """
+    Decide if we stay in 'protect' (no pruning) or go to 'slam' (normal).
+    """
+    state = variables.get("scene_state")
+    if state is None:
+        state = {"mode": "protect", "open_frames": 0, "recent_big_adds": 0}
+        variables["scene_state"] = state
+
+    mode = state.get("mode", "protect")
+
+    motion_cfg = cfg.get('motion', {}) if cfg is not None else {}
+
+    # thresholds – now partly configurable
+    min_forward_speed = motion_cfg.get('min_forward_speed', 1e-3)        # if cam moves more than this → counts as forward
+    needed_open_frames = motion_cfg.get('protect_open_frames', 15)       # how many good frames in a row to switch
+    big_add_thresh = motion_cfg.get('big_add_thresh', 1500)              # if we added > this, scene is still revealing things
+    max_recent_big_adds = 3         # allow a few big-add frames before switching
+    openness_needed = 0.25          # if we pass missing_ratio, we can count it as open
+
+    cam_is_moving = motion_state.get("delta", 0.0) > min_forward_speed
+    still_adding_a_lot = added_this_frame is not None and added_this_frame > big_add_thresh
+    scene_filled_enough = (missing_ratio is not None and missing_ratio < (1.0 - openness_needed))
+
+    if mode == "protect":
+        if still_adding_a_lot:
+            # reset counter – we are still discovering tissue
+            state["recent_big_adds"] = min(state["recent_big_adds"] + 1, max_recent_big_adds)
+            state["open_frames"] = 0
+        else:
+            # no big add this frame → maybe scene is opening
+            state["recent_big_adds"] = max(state["recent_big_adds"] - 1, 0)
+            if cam_is_moving or scene_filled_enough:
+                state["open_frames"] += 1
+            else:
+                # paused and still not adding – just keep waiting
+                state["open_frames"] = max(state["open_frames"] - 1, 0)
+
+        # switch condition: a few consecutive frames with no big adds AND camera moving
+        if state["open_frames"] >= needed_open_frames and state["recent_big_adds"] == 0:
+            state["mode"] = "slam"
+            state["recent_big_adds"] = 0
+
+    else:  # mode == "slam"
+        # optional: if we suddenly start adding tons again (new big collapse),
+        # we can fall back to protect
+        if still_adding_a_lot and not cam_is_moving:
+            state["mode"] = "protect"
+            state["open_frames"] = 0
+            state["recent_big_adds"] = 0
+
+    return state
+
+
+def _prob_to_logit(prob: float, eps: float = 1e-4) -> float:
+    prob = max(min(prob, 1.0 - eps), eps)
+    return math.log(prob / (1.0 - prob))
+
+
+def _clamp_gaussian_params(params: Dict, maint_cfg: Dict) -> None:
+    if not maint_cfg.get('enable', False):
+        return
+    with torch.no_grad():
+        log_scales = params.get('log_scales')
+        if log_scales is not None:
+            clamp_min = maint_cfg.get('log_scale_min', None)
+            clamp_max = maint_cfg.get('log_scale_max', None)
+            if clamp_min is not None or clamp_max is not None:
+                clamp_min = float(clamp_min) if clamp_min is not None else None
+                clamp_max = float(clamp_max) if clamp_max is not None else None
+                if clamp_min is not None and clamp_max is not None:
+                    log_scales.data.clamp_(min=clamp_min, max=clamp_max)
+                elif clamp_min is not None:
+                    log_scales.data.clamp_(min=clamp_min)
+                elif clamp_max is not None:
+                    log_scales.data.clamp_(max=clamp_max)
+        logit_opacities = params.get('logit_opacities')
+        if logit_opacities is not None:
+            clamp_min = maint_cfg.get('logit_min', None)
+            clamp_max = maint_cfg.get('logit_max', None)
+            if clamp_min is not None or clamp_max is not None:
+                clamp_min = float(clamp_min) if clamp_min is not None else None
+                clamp_max = float(clamp_max) if clamp_max is not None else None
+                if clamp_min is not None and clamp_max is not None:
+                    logit_opacities.data.clamp_(min=clamp_min, max=clamp_max)
+                elif clamp_min is not None:
+                    logit_opacities.data.clamp_(min=clamp_min)
+                elif clamp_max is not None:
+                    logit_opacities.data.clamp_(max=clamp_max)
+
+
+def _update_opacity_and_visibility(params: Dict, variables: Dict, frame_idx: int,
+                                   maint_cfg: Dict, active_mask: Optional[torch.Tensor]) -> None:
+    if not maint_cfg.get('enable', False):
+        return
+    if 'logit_opacities' not in params or 'last_seen' not in variables:
+        return
+
+    logits = params['logit_opacities']
+    device = logits.device
+    last_seen = variables['last_seen']
+    visibility_hits = variables['visibility_hits']
+    frame_tensor = torch.tensor(float(frame_idx), device=device, dtype=last_seen.dtype)
+
+    with torch.no_grad():
+        decay_rate = float(maint_cfg.get('opacity_decay', 0.0))
+        if decay_rate > 0.0:
+            if last_seen.shape[0] != logits.shape[0]:
+                # Geometry changed elsewhere; postpone maintenance until arrays are realigned.
+                return
+            dt = torch.where(last_seen >= 0.0, frame_tensor - last_seen, torch.zeros_like(last_seen))
+            dt = torch.clamp(dt, min=0.0)
+            decay = (dt * decay_rate).unsqueeze(-1) if logits.dim() > 1 else dt * decay_rate
+            logits.data -= decay
+
+        floor_prob = maint_cfg.get('opacity_floor', None)
+        if floor_prob is not None:
+            min_logit = _prob_to_logit(float(floor_prob))
+            min_tensor = torch.tensor(min_logit, device=device, dtype=logits.dtype)
+            logits.data = torch.maximum(logits.data, min_tensor)
+
+        cap_prob = maint_cfg.get('opacity_cap', None)
+        if cap_prob is not None:
+            max_logit = _prob_to_logit(float(cap_prob))
+            max_tensor = torch.tensor(max_logit, device=device, dtype=logits.dtype)
+            logits.data = torch.minimum(logits.data, max_tensor)
+
+        if active_mask is None:
+            active_mask = torch.zeros_like(last_seen, dtype=torch.bool, device=device)
+        else:
+            active_mask = active_mask.to(device)
+
+        if active_mask.any():
+            boost = float(maint_cfg.get('recency_boost', 0.0))
+            if boost != 0.0:
+                if logits.dim() == 1:
+                    logits.data[active_mask] += boost
+                else:
+                    logits.data[active_mask] += boost
+            updated_last_seen = last_seen.clone()
+            updated_last_seen[active_mask] = frame_tensor
+            last_seen = updated_last_seen
+
+            updated_hits = visibility_hits.clone()
+            updated_hits[active_mask] += 1.0
+            visibility_hits = updated_hits
+
+        variables['last_seen'] = last_seen
+        variables['visibility_hits'] = visibility_hits
+        variables['frame_idx'] = frame_tensor
+
+
+def _cull_stale_gaussians(params: Dict, variables: Dict, optimizer, frame_idx: int,
+                          maint_cfg: Dict, time_idx: int, config: Dict) -> Dict:
+    if not maint_cfg.get('enable', False):
+        return params, variables
+    if 'last_seen' not in variables:
+        return params, variables
+
+    device = params['logit_opacities'].device
+    num_pts = params['logit_opacities'].shape[0]
+    def _resize_tensor(t, target_len, fill_value=0.0):
+        if t.shape[0] == target_len:
+            return t
+        if t.shape[0] > target_len:
+            return t[:target_len]
+        pad_shape = (target_len - t.shape[0],) + t.shape[1:]
+        pad = torch.full(pad_shape, fill_value, device=t.device, dtype=t.dtype)
+        return torch.cat((t, pad), dim=0)
+
+    variables['last_seen'] = _resize_tensor(variables['last_seen'], num_pts, fill_value=-1.0)
+    variables['visibility_hits'] = _resize_tensor(variables['visibility_hits'], num_pts, fill_value=0.0)
+
+    to_remove = torch.zeros(num_pts, dtype=torch.bool, device=device)
+    frame_tensor = torch.tensor(float(frame_idx), device=device, dtype=variables['last_seen'].dtype)
+
+    stale_frames = int(maint_cfg.get('visibility_prune_frames', 0))
+    if stale_frames > 0:
+        last_seen = variables['last_seen']
+        stale_mask = (last_seen >= 0.0) & ((frame_tensor - last_seen) >= float(stale_frames))
+        min_hits = maint_cfg.get('visibility_min_hits', 0)
+        if min_hits and min_hits > 0:
+            stale_mask &= (variables['visibility_hits'] <= float(min_hits))
+        to_remove |= stale_mask
+
+    near_thresh = float(maint_cfg.get('near_camera_thresh', 0.0))
+    if near_thresh > 0.0:
+        with torch.no_grad():
+            if config['deforms']['use_deformations']:
+                local_means, _, _, _, _ = deform_gaussians(
+                    params, time_idx, deform_grad=False, deformation_type=config['deforms']['deform_type']
+                )
+            else:
+                local_means = params['means3D'].detach()
+            transformed_pts = transform_to_frame(local_means, params, time_idx,
+                                                 gaussians_grad=False, camera_grad=False)
+            dist = torch.norm(transformed_pts, dim=1)
+            if to_remove.shape[0] != dist.shape[0]:
+                to_remove = _resize_tensor(to_remove, dist.shape[0], fill_value=False)
+                to_remove |= (dist < near_thresh)
+
+    if to_remove.any():
+        print(f"Gaussian maintenance removed {int(to_remove.sum())} elements (stale/near-camera).")
+        params, variables = remove_points(to_remove, params, variables, optimizer)
+
+    return params, variables
 
 
 class GaussianRegressionNetwork(nn.Module):
@@ -517,7 +785,24 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification
     variables = {'max_2D_radius': torch.zeros(params['means3D'].shape[0]).cuda().float(),
                  'means2D_gradient_accum': torch.zeros(params['means3D'].shape[0]).cuda().float(),
                  'denom': torch.zeros(params['means3D'].shape[0]).cuda().float(),
-                 'timestep': torch.zeros(params['means3D'].shape[0]).cuda().float()}
+                 'timestep': torch.zeros(params['means3D'].shape[0]).cuda().float(),
+                 'last_seen': torch.full((params['means3D'].shape[0],), -1.0, device="cuda").float(),
+                 'visibility_hits': torch.zeros(params['means3D'].shape[0], device="cuda").float(),
+                 'frame_idx': torch.tensor(0.0, device="cuda").float(),
+                 'motion_state': {
+                     'prev_tran': None,
+                     'pause_counter': 0,
+                     'is_contraction': False,
+                     'delta': 0.0,
+                     'last_step': 0.0,
+                     'forward_dir': None
+                 }}
+    scene_state = {
+        "mode": "protect",          # "protect" | "slam"
+        "open_frames": 0,
+        "recent_big_adds": 0,
+    }
+    variables["scene_state"] = scene_state
     # If we use simple deformations, we want a list of all parameters for easier optimization
     if use_deforms:
         if deform_type =='simple':
@@ -798,6 +1083,119 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
         local_opacities = local_opacities+bloat
     # Initialize Render Variables
     # print()
+    time_gate = None
+    if 't_mu' in params:    
+        time_gate = xyzt_time_gate(params, float(iter_time_idx))     # time index of this frame
+
+    # ---- predicted-depth-aware cull (training) ----
+    scene_state = variables.get("scene_state", {"mode": "slam"})
+    if scene_state.get("mode", "slam") == "slam":
+        pred_depth = curr_data['depth']
+        if not torch.is_tensor(pred_depth):
+            pred_depth = torch.as_tensor(pred_depth, device=transformed_pts.device, dtype=transformed_pts.dtype)
+        else:
+            pred_depth = pred_depth.to(device=transformed_pts.device, dtype=transformed_pts.dtype)
+        pred_depth = pred_depth.detach()
+        if pred_depth.dim() == 2:
+            pred_depth = pred_depth.unsqueeze(0)
+        elif pred_depth.dim() == 3 and pred_depth.shape[0] > 1:
+            pred_depth = pred_depth[:1]
+
+        intrinsics_tensor = curr_data['intrinsics']
+        if torch.is_tensor(intrinsics_tensor):
+            intrinsics_tensor = intrinsics_tensor.to(device=transformed_pts.device, dtype=transformed_pts.dtype)
+        else:
+            intrinsics_tensor = torch.as_tensor(intrinsics_tensor, device=transformed_pts.device, dtype=transformed_pts.dtype)
+
+        fx = intrinsics_tensor[0, 0]
+        fy = intrinsics_tensor[1, 1]
+        cx = intrinsics_tensor[0, 2]
+        cy = intrinsics_tensor[1, 2]
+
+        pts_cam = transformed_pts
+        z_vals = pts_cam[:, 2].clamp_min(1e-4)
+        u = (pts_cam[:, 0] * fx / z_vals) + cx
+        v = (pts_cam[:, 1] * fy / z_vals) + cy
+
+        H, W = pred_depth.shape[1], pred_depth.shape[2]
+        in_w = (u >= 0) & (u <= (W - 1))
+        in_h = (v >= 0) & (v <= (H - 1))
+        pix_valid = in_w & in_h
+
+        if pix_valid.any():
+            u_pix = torch.clamp(u[pix_valid], 0, W - 1).long()
+            v_pix = torch.clamp(v[pix_valid], 0, H - 1).long()
+            pred_z = pred_depth[0, v_pix, u_pix]
+            tol = 0.03
+            valid_depth_mask = pred_z > 1e-4
+            depth_keep = torch.ones_like(pred_z, dtype=torch.bool)
+            depth_keep[valid_depth_mask] = z_vals[pix_valid][valid_depth_mask] <= (pred_z[valid_depth_mask] + tol)
+            final_keep = torch.ones_like(pix_valid, dtype=torch.bool)
+            final_keep[pix_valid] = depth_keep
+            num_valid = int(pix_valid.sum().item())
+            if num_valid > 0:
+                min_keep = max(1, int(0.1 * num_valid))
+                if final_keep.sum().item() < min_keep:
+                    tmp = final_keep.clone()
+                    tmp[pix_valid] = True
+                    final_keep = tmp
+            if final_keep.sum().item() == 0:
+                final_keep = pix_valid
+
+            transformed_pts = transformed_pts[final_keep]
+            local_means     = local_means[final_keep]
+            local_rots      = local_rots[final_keep]
+            local_scales    = local_scales[final_keep]
+            local_opacities = local_opacities[final_keep]
+            local_colors    = local_colors[final_keep]
+            if time_gate is not None:
+                time_gate = time_gate[final_keep]
+
+    # --- camera-space handling of near/front gaussians ---
+    # transformed_pts is in *current camera* frame because you called transform_to_frame(...)
+    # we fade gaussians that drift close to the lens, and still hard-zero those that
+    # are both too close and not strongly gated for this frame.
+    cam_z = transformed_pts[:, 2]
+
+    # Soft fade out gaussians that get very close to the camera regardless of gating.
+    fade_near, fade_far = 0.02, 0.04
+    local_opacities_modified = False
+
+    fade_zone = (cam_z < fade_far) & (cam_z >= fade_near)
+    if fade_zone.any():
+        local_opacities = local_opacities.clone()
+        local_opacities_modified = True
+        fade = (cam_z[fade_zone] - fade_near) / (fade_far - fade_near)
+        fade = torch.log(fade + 1e-6) * 2.0
+        if fade.dim() == 1 and local_opacities[fade_zone].dim() > 1:
+            fade = fade.unsqueeze(-1)
+        local_opacities[fade_zone] += fade
+
+    too_close_all = cam_z < fade_near
+    if too_close_all.any():
+        if not local_opacities_modified:
+            local_opacities = local_opacities.clone()
+            local_opacities_modified = True
+        local_opacities[too_close_all] = -10.0
+
+    near_thresh = 0.025  # ~2.5 cm in your colon scale, tune 0.015-0.04
+
+    # if we have time_gate, use it, otherwise pretend everything is active
+    if time_gate is not None:
+        active = (time_gate > gate_thresh).reshape(-1)
+    else:
+        active = torch.ones_like(cam_z, dtype=torch.bool)
+
+    too_close = cam_z < near_thresh
+    kill_mask = too_close & (~active)
+
+    if kill_mask.any():
+        # hard-zero their opacities for this frame
+        if not local_opacities_modified:
+            local_opacities = local_opacities.clone()
+            local_opacities_modified = True
+        local_opacities[kill_mask] = -10.0  # sigmoid(-10) ~ 0
+
     if use_grn:
         rendervar = transformed_GRNparams2rendervar(params, transformed_pts,local_rots,local_scales,local_opacities,local_colors)
         depth_sil_rendervar = transformed_GRNparams2depthplussilhouette(params, curr_data['w2c'],
@@ -808,9 +1206,7 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
                                                                     transformed_pts,local_rots,local_scales,local_opacities)
     
     # Apply temporal gating if available
-    time_gate = None
-    if 't_mu' in params:    
-        time_gate = xyzt_time_gate(params, float(iter_time_idx))     # time index of this frame
+    if time_gate is not None:
         rendervar = apply_xyzt_gate(rendervar, time_gate, gate_thresh=gate_thresh)
         depth_sil_rendervar = apply_xyzt_gate(depth_sil_rendervar, time_gate, gate_thresh=gate_thresh)
     
@@ -1169,33 +1565,57 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
 #     return params_iter, variables
 
 
-def initialize_camera_pose(params, curr_time_idx, forward_prop):
+def initialize_camera_pose(params, curr_time_idx, forward_prop, motion_state: Optional[Dict] = None, motion_cfg: Optional[Dict] = None):
     with torch.no_grad():
+        if curr_time_idx == 0:
+            return params
+
+        prev_rot = params['cam_unnorm_rots'][..., curr_time_idx-1].detach()
+        prev_tran = params['cam_trans'][..., curr_time_idx-1].detach()
+
         if curr_time_idx > 1 and forward_prop:
             # Initialize the camera pose for the current frame based on a constant velocity model
             # Rotation
-            prev_rot1 = F.normalize(params['cam_unnorm_rots'][..., curr_time_idx-1].detach())
+            prev_rot1 = F.normalize(prev_rot)
             prev_rot2 = F.normalize(params['cam_unnorm_rots'][..., curr_time_idx-2].detach())
             new_rot = F.normalize(prev_rot1 + (prev_rot1 - prev_rot2))
             params['cam_unnorm_rots'][..., curr_time_idx] = new_rot.detach()
             # Translation
-            prev_tran1 = params['cam_trans'][..., curr_time_idx-1].detach()
+            prev_tran1 = prev_tran
             prev_tran2 = params['cam_trans'][..., curr_time_idx-2].detach()
             new_tran = prev_tran1 + (prev_tran1 - prev_tran2)
             params['cam_trans'][..., curr_time_idx] = new_tran.detach()
         else:
             # Initialize the camera pose for the current frame
-            params['cam_unnorm_rots'][..., curr_time_idx] = params['cam_unnorm_rots'][..., curr_time_idx-1].detach()
-            params['cam_trans'][..., curr_time_idx] = params['cam_trans'][..., curr_time_idx-1].detach()
+            params['cam_unnorm_rots'][..., curr_time_idx] = prev_rot
+            params['cam_trans'][..., curr_time_idx] = prev_tran
+
+        if motion_cfg and motion_cfg.get('enable', False) and motion_state:
+            if not motion_state.get('is_contraction', False):
+                forward_dir = motion_state.get('forward_dir')
+                last_step = motion_state.get('last_step', 0.0)
+                if forward_dir is not None and last_step > 0.0:
+                    step_gain = motion_cfg.get('forward_step_gain', 1.0)
+                    step = last_step * step_gain
+                    max_step = motion_cfg.get('max_forward_step')
+                    if max_step is not None:
+                        step = min(step, max_step)
+                    forward_dir_tensor = forward_dir.to(params['cam_trans'].device).view_as(prev_tran)
+                    new_tran = prev_tran + forward_dir_tensor * step
+                    params['cam_trans'][..., curr_time_idx] = new_tran.detach()
+            else:
+                # decay the expected step while paused to avoid stale forward predictions
+                motion_state['last_step'] = motion_state.get('last_step', 0.0) * motion_cfg.get('pause_forward_decay', 0.5)
     
     return params
 
-def optimize_initialization(params,params_init,curr_data,num_iters_initialization,variables,iter_time_idx,config):
+def optimize_initialization(params,params_init,curr_data,num_iters_initialization,variables,iter_time_idx,config, gate_override: Optional[float] = None):
     optimizer = initialize_optimizer(params,config['GRN']['random_initialization_lrs'])
     iter = 0
     save_idx = 0
 
     progress_bar = tqdm(range(num_iters_initialization), desc=f"Initial optimization")
+    active_gate_thresh = config['deforms'].get('xyzt_gate_thresh', 0.0) if gate_override is None else gate_override
 
     while True:
         loss, variables, losses = get_loss(params, params_init,curr_data, variables, iter_time_idx, config['tracking']['loss_weights'],
@@ -1203,7 +1623,7 @@ def optimize_initialization(params,params_init,curr_data,num_iters_initializatio
                     config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True,
                     visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
                     tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=None,gaussian_deformations=config['deforms']['use_deformations'],
-                    use_grn = config['GRN']['use_grn'],deformation_type = config['deforms']['deform_type'], gate_thresh = config['deforms'].get('xyzt_gate_thresh', 0.0))
+                    use_grn = config['GRN']['use_grn'],deformation_type = config['deforms']['deform_type'], gate_thresh = active_gate_thresh)
         loss.backward()
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
@@ -1592,8 +2012,29 @@ def rgbd_slam(config: dict):
         else:
             params_iter = params
             params_init = params
+        iter_time_idx = time_idx
+        motion_cfg = config.get('motion', {})
+        motion_state = _ensure_motion_state(variables)
+        base_gate_thresh = config['deforms'].get('xyzt_gate_thresh', 0.0)
+        gate_thresh_tracking = _compute_gate_thresh(base_gate_thresh, motion_cfg, motion_state)
+        maint_cfg = config.get('gaussian_maintenance', {})
+        scene_state = variables.get('scene_state', {"mode": "slam"})
+        maintenance_active_mask = None
+        if maint_cfg.get('enable', False) and scene_state.get("mode", "slam") == "slam":
+            with torch.no_grad():
+                if maint_cfg.get('use_time_gate', True) and 't_mu' in params_iter:
+                    gate_vals = xyzt_time_gate(params_iter, float(iter_time_idx))
+                    gate_vals = gate_vals.reshape(-1)
+                    slack = float(maint_cfg.get('active_gate_slack', 0.0))
+                    effective_gate = max(0.0, gate_thresh_tracking - slack)
+                    maintenance_active_mask = gate_vals > effective_gate
+                else:
+                    n_gauss = params_iter['logit_opacities'].shape[0]
+                    maintenance_active_mask = torch.ones(n_gauss, device=params_iter['logit_opacities'].device, dtype=torch.bool)
+            _update_opacity_and_visibility(params_iter, variables, time_idx, maint_cfg, maintenance_active_mask)
+            _clamp_gaussian_params(params_iter, maint_cfg)
         # timer.lap("iterating over frame "+str(time_idx), 0)
-    
+
 
 
         print() # always show global iteration
@@ -1654,14 +2095,29 @@ def rgbd_slam(config: dict):
         
         # Initialize the camera pose for the current frame
         if time_idx > 0:
-            params_iter = initialize_camera_pose(params_iter, time_idx, forward_prop=config['tracking']['forward_prop'])
+            params_iter = initialize_camera_pose(
+                params_iter,
+                time_idx,
+                forward_prop=config['tracking']['forward_prop'],
+                motion_state=motion_state,
+                motion_cfg=motion_cfg
+            )
 
         # timer.lap("initialized data", 1)
         # If gaussians are randomly initialized, we need to optimize them enough to be able to perform tracking
         num_iters_initialization = config['GRN']['num_iters_initialization']
         if time_idx == 0:
             if config['GRN']['random_initialization']:        
-                params_iter = optimize_initialization(params_iter, params_init,curr_data,num_iters_initialization,variables,iter_time_idx,config)
+                params_iter = optimize_initialization(
+                    params_iter,
+                    params_init,
+                    curr_data,
+                    num_iters_initialization,
+                    variables,
+                    iter_time_idx,
+                    config,
+                    gate_override=gate_thresh_tracking
+                )
         # Tracking
         tracking_start_time = time.time()
         save_idx = 0
@@ -1695,7 +2151,7 @@ def rgbd_slam(config: dict):
                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
                                                    plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
                                                    tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=None,gaussian_deformations=config['deforms']['use_deformations'],
-                                                   use_grn = config['GRN']['use_grn'],deformation_type = config['deforms']['deform_type'], gate_thresh = config['deforms'].get('xyzt_gate_thresh', 0.0))
+                                                   use_grn = config['GRN']['use_grn'],deformation_type = config['deforms']['deform_type'], gate_thresh = gate_thresh_tracking)
                 # print(loss)
                 save_idx = save_idx+1
 
@@ -1778,6 +2234,13 @@ def rgbd_slam(config: dict):
         tracking_end_time = time.time()
         tracking_frame_time_sum += tracking_end_time - tracking_start_time
         tracking_frame_time_count += 1
+        motion_state = _update_motion_state(variables, params_iter, time_idx, motion_cfg)
+        gate_thresh_mapping = _compute_gate_thresh(base_gate_thresh, motion_cfg, motion_state)
+        # we will fill this later after densify; init with 0
+        added_this_frame = 0
+        missing_ratio = None
+        variables['added_this_frame'] = 0
+
         # plt.imshow(curr_data['depth'].permute(1,2,0).cpu().detach())
         # plt.colorbar()
         # plt.show()
@@ -1862,7 +2325,12 @@ def rgbd_slam(config: dict):
                     # params, variables = remove_floating_gaussians(params, variables, densify_curr_data, time_idx)
                     densification_start_time = time.time()
                     # Add new Gaussians to the scene based on the Silhouette
-                    params_iter, variables = add_new_gaussians(params_iter, variables, densify_curr_data, 
+                    pre_pts = params_iter['means3D'].shape[0]
+                    scene_state_local = variables.get('scene_state', {"mode": "slam"})
+                    in_protect = scene_state_local.get("mode", "slam") == "protect"
+                    reduce_flag = False if in_protect else config['gaussian_reduction']['reduce_gaussians']
+                    big_add_thresh_now = motion_cfg.get('big_add_thresh', 1500)
+                    params_iter, variables, maybe_missing = add_new_gaussians(params_iter, variables, densify_curr_data, 
                                                         config['mapping']['sil_thres'], time_idx,
                                                         config['mean_sq_dist_method'], 
                                                         config['gaussian_simplification'],
@@ -1876,12 +2344,22 @@ def rgbd_slam(config: dict):
                                                         num_frames = num_frames,
                                                         random_initialization=config['GRN']['random_initialization'],
                                                         init_scale=config['GRN']['init_scale'],cam = cam,
-                                                        reduce_gaussians = config['gaussian_reduction']['reduce_gaussians'],
+                                                        reduce_gaussians = reduce_flag,
                                                         reduction_type = config['gaussian_reduction']['reduction_type'],
                                                         reduction_fraction=config['gaussian_reduction']['reduction_fraction'] )                     # if config['GRN']['random_initialization']:
+                    post_pts = params_iter['means3D'].shape[0]
+                    added_this_frame = max(0, post_pts - pre_pts)
+                    missing_ratio = maybe_missing
+                    if added_this_frame > big_add_thresh_now:
+                        state_now = variables.get('scene_state', {"mode": "protect", "open_frames": 0, "recent_big_adds": 0})
+                        state_now["mode"] = "protect"
+                        state_now["open_frames"] = 0
+                        state_now["recent_big_adds"] = 1
+                        variables['scene_state'] = state_now
+                    _clamp_gaussian_params(params_iter, maint_cfg)
 
-                    post_num_pts = params_iter['means3D'].shape[0]-params_init['means3D'].shape[0]
-                    added_new_gaussians.append(post_num_pts)
+                    added_new_gaussians.append(added_this_frame)
+                    variables['added_this_frame'] = added_this_frame
                     densification_end_time = time.time()
                     densification_frame_time_sum += densification_end_time - densification_start_time
                     densification_frame_time_count += 1
@@ -1910,6 +2388,48 @@ def rgbd_slam(config: dict):
                 # # Reset Optimizer & Learning Rates for Full Map Optimization
                 _set_requires_grad_for_phase(params_iter, config['mapping']['lrs'])
                 optimizer = initialize_optimizer(params_iter, config['mapping']['lrs']) 
+                if variables.get('scene_state', {"mode": "slam"}).get("mode", "slam") == "slam":
+                    params_iter, variables = _cull_stale_gaussians(
+                        params_iter, variables, optimizer, time_idx, maint_cfg, iter_time_idx, config
+                    )
+                _clamp_gaussian_params(params_iter, maint_cfg)
+
+                with torch.no_grad():
+                    if config['deforms']['use_deformations']:
+                        local_means_tmp, _, _, _, _ = deform_gaussians(
+                            params_iter, iter_time_idx, deform_grad=False, deformation_type=config['deforms']['deform_type']
+                        )
+                    else:
+                        local_means_tmp = params_iter['means3D'].detach()
+
+                    transformed_pts_tmp = transform_to_frame(
+                        local_means_tmp, params_iter, iter_time_idx,
+                        gaussians_grad=False, camera_grad=False
+                    )
+                    cam_z = transformed_pts_tmp[:, 2]
+                    if 't_mu' in params_iter:
+                        time_gate_tmp = xyzt_time_gate(params_iter, float(iter_time_idx))
+                        active = (time_gate_tmp > gate_thresh_mapping).reshape(-1)
+                    else:
+                        active = torch.ones_like(cam_z, dtype=torch.bool)
+
+                    near_thresh = 0.025
+                    stale = (cam_z < near_thresh) & (~active)
+
+                    counter = variables.get('front_gate_counter')
+                    if counter is None or counter.shape[0] != cam_z.shape[0]:
+                        counter = torch.zeros_like(cam_z, dtype=torch.int32, device=cam_z.device)
+                    else:
+                        counter = counter.clone()
+
+                    counter[stale] += 1
+                    counter[~stale] = 0
+                    variables['front_gate_counter'] = counter
+
+                    stale_mask = counter > 6
+                    if stale_mask.any():
+                        params_iter, variables = remove_points(stale_mask, params_iter, variables, optimizer)
+                        torch.cuda.empty_cache()
 
                 # # timer.lap("Densification Done at frame "+str(time_idx), 3)
 
@@ -1971,8 +2491,15 @@ def rgbd_slam(config: dict):
                 #     loss.backward()
                 #     with torch.no_grad():
                 #         # Prune Gaussians
-                if config['mapping']['prune_gaussians']:
-                    params_iter, variables = prune_gaussians(params_iter, variables, optimizer, time_idx, config['mapping']['pruning_dict'],config['GRN']['use_grn'])
+                if config['mapping']['prune_gaussians'] and variables.get('scene_state', {"mode": "slam"}).get("mode", "slam") == "slam":
+                    pruning_cfg = config['mapping']['pruning_dict']
+                    if motion_cfg.get('enable', False) and motion_state.get('is_contraction') and motion_cfg.get('pause_prune_override', False):
+                        pruning_cfg = dict(pruning_cfg)
+                        pruning_cfg['remove_big_after'] = min(pruning_cfg.get('remove_big_after', time_idx), time_idx)
+                        pause_thresh = motion_cfg.get('pause_prune_thresh')
+                        if pause_thresh is not None:
+                            pruning_cfg['prune_size_thresh'] = min(pruning_cfg.get('prune_size_thresh', pause_thresh), pause_thresh)
+                    params_iter, variables = prune_gaussians(params_iter, variables, optimizer, time_idx, pruning_cfg,config['GRN']['use_grn'])
                 #         # Gaussian-Splatting's Gradient-based Densification
                 #         if config['mapping']['use_gaussian_splatting_densification']:
                 #             params, variables = densify(params, variables, optimizer, iter, config['mapping']['densify_dict'])
@@ -1994,7 +2521,14 @@ def rgbd_slam(config: dict):
                 # # Update the runtime numbers
                 num_iters_initialization = config['GRN']['num_iters_initialization_added_gaussians']
 
-                params_iter = optimize_initialization(params_iter,params_init,curr_data,num_iters_initialization,variables,iter_time_idx,config)
+                big_add_limit = config.get('big_add_limit', motion_cfg.get('big_add_thresh', 1500))
+                recent_added = variables.get('added_this_frame', added_this_frame)
+                if recent_added > big_add_limit:
+                    with torch.no_grad():
+                        _clamp_gaussian_params(params_iter, maint_cfg)
+                    print(f"[init] skipped optimize_initialization ({recent_added} new gaussians)")
+                else:
+                    params_iter = optimize_initialization(params_iter,params_init,curr_data,num_iters_initialization,variables,iter_time_idx,config, gate_override=gate_thresh_mapping)
 
                 mapping_end_time = time.time()
                 mapping_frame_time_sum += mapping_end_time - mapping_start_time
@@ -2014,23 +2548,26 @@ def rgbd_slam(config: dict):
             
             # timer.lap('Mapping Done.', 4)
 
+        variables['added_this_frame'] = added_this_frame
+        scene_state = _update_scene_state(variables, motion_state, added_this_frame, missing_ratio, config)
+        variables['scene_state'] = scene_state
 
 
-            # Add frame to keyframe list
-            if ((time_idx == 0) or ((time_idx+1) % config['keyframe_every'] == 0) or \
-                        (time_idx == num_frames-2)) and (not torch.isinf(curr_gt_w2c[-1]).any()) and (not torch.isnan(curr_gt_w2c[-1]).any()):
-                with torch.no_grad():
-                    # Get the current estimated rotation & translation
-                    curr_cam_rot = F.normalize(params_iter['cam_unnorm_rots'][..., time_idx].detach())
-                    curr_cam_tran = params_iter['cam_trans'][..., time_idx].detach()
-                    curr_w2c = torch.eye(4).cuda().float()
-                    curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
-                    curr_w2c[:3, 3] = curr_cam_tran
-                    # Initialize Keyframe Info
-                    curr_keyframe = {'id': time_idx, 'est_w2c': curr_w2c, 'color': color, 'depth': depth}
-                    # Add to keyframe list
-                    keyframe_list.append(curr_keyframe)
-                    keyframe_time_indices.append(time_idx)
+        # Add frame to keyframe list
+        if ((time_idx == 0) or ((time_idx+1) % config['keyframe_every'] == 0) or \
+                    (time_idx == num_frames-2)) and (not torch.isinf(curr_gt_w2c[-1]).any()) and (not torch.isnan(curr_gt_w2c[-1]).any()):
+            with torch.no_grad():
+                # Get the current estimated rotation & translation
+                curr_cam_rot = F.normalize(params_iter['cam_unnorm_rots'][..., time_idx].detach())
+                curr_cam_tran = params_iter['cam_trans'][..., time_idx].detach()
+                curr_w2c = torch.eye(4).cuda().float()
+                curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
+                curr_w2c[:3, 3] = curr_cam_tran
+                # Initialize Keyframe Info
+                curr_keyframe = {'id': time_idx, 'est_w2c': curr_w2c, 'color': color, 'depth': depth}
+                # Add to keyframe list
+                keyframe_list.append(curr_keyframe)
+                keyframe_time_indices.append(time_idx)
 
         if time_idx < num_frames-1:
             with torch.no_grad():
@@ -2158,9 +2695,18 @@ def rgbd_slam(config: dict):
         # Evaluate Final Parameters
     dataset = [dataset, eval_dataset, 'C3VD'] if dataset_config["train_or_test"] == 'train' else dataset
     with torch.no_grad():
-        eval_save(dataset, params, eval_dir, sil_thres=config['mapping']['sil_thres'],
-                mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],use_grn = config['GRN']['use_grn'],
-                deformation_type=config['deforms']['deform_type'], gate_thresh=config['deforms'].get('xyzt_gate_thresh', 0.0))
+        eval_save(
+            dataset,
+            params,
+            eval_dir,
+            sil_thres=config['mapping']['sil_thres'],
+            mapping_iters=config['mapping']['num_iters'],
+            add_new_gaussians=config['mapping']['add_new_gaussians'],
+            use_grn=config['GRN']['use_grn'],
+            deformation_type=config['deforms']['deform_type'],
+            gate_thresh=config['deforms'].get('xyzt_gate_thresh', 0.0),
+            use_gt_depth=config['depth']['use_gt_depth'],
+        )
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

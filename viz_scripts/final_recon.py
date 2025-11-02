@@ -1,629 +1,268 @@
-import argparse
+#!/usr/bin/env python3
 import os
+import argparse
+import numpy as np
+from tqdm import tqdm
 import sys
-from importlib.machinery import SourceFileLoader
+import torch
+import torch.nn.functional as F
+from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 sys.path.insert(0, _BASE_DIR)
+from utils.recon_helpers import setup_camera # you already have these
+from utils.slam_helpers import (
+    deform_gaussians as deform_gaussians_eval,
+    transformed_params2rendervar,
+    transformed_params2depthplussilhouette,
+    xyzt_time_gate,
+    apply_xyzt_gate,
+)
 
-import torch
-import torch.nn.functional as F
-import matplotlib.pyplot as plt
-import numpy as np
-import open3d as o3d
+"""
+Updated final_recon.py
 
-from diff_gaussian_rasterization import GaussianRasterizer as Renderer
-from diff_gaussian_rasterization import GaussianRasterizationSettings as Camera
+- dynamic playback over all timesteps
+- uses SAME deformation as SLAM
+- uses XYZT gate (dynamic) but softened for nicer video
+- saves frames to disk so you can ffmpeg them into a video
 
-from utils.common_utils import seed_everything
-from utils.recon_helpers import setup_camera
-from utils.slam_helpers import get_depth_and_silhouette, xyzt_time_gate, apply_xyzt_gate
-from utils.slam_external import build_rotation
-
-
-from time import time
-w2cs = []
-
-
-# def deform_gaussians(params, time, deform_grad, N=5,deformation_type = 'gaussian'):
-#     """
-#     Calculate deformations using the N closest basis functions based on |time - bias|.
-
-#     Args:
-#         params (dict): Dictionary containing deformation parameters.
-#         time (torch.Tensor): Current time step.
-#         deform_grad (bool): Whether to calculate gradients for deformations.
-#         N (int): Number of closest basis functions to consider.
-
-#     Returns:
-#         xyz (torch.Tensor): Updated 3D positions.
-#         rots (torch.Tensor): Updated rotations.
-#         scales (torch.Tensor): Updated scales.
-#     """
-#     if deformation_type =='gaussian':
-#         if deform_grad:
-#             weights = params['deform_weights']
-#             stds = params['deform_stds']
-#             biases = params['deform_biases']
-#         else:
-#             weights = params['deform_weights'].detach()
-#             stds = params['deform_stds'].detach()
-#             biases = params['deform_biases'].detach()
-
-#         # Calculate the absolute difference between time and biases
-#         time_diff = torch.abs(time - biases)
-
-#         # Get the indices of the N smallest time differences
-#         _, top_indices = torch.topk(-time_diff, N, dim=1)  # Negative for smallest values
-
-#         # Create a mask to select only the top N basis functions
-#         mask = torch.zeros_like(time_diff, dtype=torch.float)
-#         mask.scatter_(1, top_indices, 1.0).detach()
-
-#         # Register a gradient hook to zero out gradients for irrelevant basis functions
-#         if deform_grad:
-#             def zero_out_irrelevant_gradients(grad):
-#                 return grad * mask
-
-#             weights.register_hook(zero_out_irrelevant_gradients)
-#             biases.register_hook(zero_out_irrelevant_gradients)
-#             stds.register_hook(zero_out_irrelevant_gradients)
-
-#         # Calculate deformations
-#         deform = torch.sum(
-#             weights * torch.exp(-1 / (2 * stds**2) * (time - biases)**2), dim=1
-#         )  # Nx10 gaussians deformations
-
-#         deform_xyz = deform[:, :3]
-#         deform_rots = deform[:, 3:7]
-#         deform_scales = deform[:, 7:10]
-
-#         xyz = params['means3D'] + deform_xyz
-#         rots = params['unnorm_rotations'] + deform_rots
-#         scales = params['log_scales'] + deform_scales
-
-    
-#     elif deformation_type == 'simple':
-#         with torch.no_grad():
-#             xyz = params['means3D'][...,time]
-#             rots = params['unnorm_rotations'][...,time]
-#             scales = params['log_scales'][...,time]
-#     # print(deformation_type)
-#     return xyz, rots, scales
-def _aa_to_quat(aa, eps=1e-12):
-    theta = torch.linalg.norm(aa, dim=-1, keepdim=True).clamp_min(eps)
-    half = 0.5 * theta
-    k = torch.sin(half) / theta
-    xyz = aa * k
-    w = torch.cos(half)
-    return torch.cat([w, xyz], dim=-1)
-
-def _qmul(q1, q2):
-    w1,x1,y1,z1 = q1.unbind(-1); w2,x2,y2,z2 = q2.unbind(-1)
-    return torch.stack([w1*w2 - x1*x2 - y1*y2 - z1*z2,
-                        w1*x2 + x1*w2 + y1*z2 - z1*y2,
-                        w1*y2 - x1*z2 + y1*w2 + z1*x2,
-                        w1*z2 + x1*y2 - y1*x2 + z1*w2], dim=-1)
+Usage:
+    python final_recon.py --scene path/to/params.npz --out dynamic_out --dynamic
+    ffmpeg -r 30 -i dynamic_out/frame_%04d.png -c:v libx264 -pix_fmt yuv420p colon_dynamic.mp4
+"""
 
 
-def _exp_scales(log_scales: torch.Tensor) -> torch.Tensor:
-    """Convert log-space scales to positive anisotropic scales expected by the renderer."""
-    if log_scales.dim() == 1:
-        log_scales = log_scales.unsqueeze(-1)
-    if log_scales.shape[-1] == 1:
-        log_scales = log_scales.expand(-1, 3)
-    return torch.exp(log_scales)
-                        
-def deform_gaussians(params, time, deform_grad, N=5, deformation_type='gaussian'):
+def load_params(scene_path, device="cuda"):
+    data = np.load(scene_path, allow_pickle=True)
+    params = {}
+    for k in data.files:
+        arr = data[k]
+        if isinstance(arr, np.ndarray):
+            t = torch.from_numpy(arr).to(device)
+            # train code saves some scalars as 0-d arrays
+            if t.dtype == torch.float64:
+                t = t.float()
+            params[k] = t
+        else:
+            params[k] = arr
+    return params
+
+
+def build_w2cs(params):
     """
-    Mimic utils.slam_helpers.deform_gaussians for visualization so saved checkpoints
-    render consistently regardless of the deformation mode used during training.
+    Rebuild per-frame world-to-camera matrices from saved cam_unnorm_rots + cam_trans
     """
-    if deformation_type in ('gaussian', 'deformgs'):
-        if deform_grad:
-            weights = params['deform_weights']
-            stds = params['deform_stds']
-            biases = params['deform_biases']
-            base_xyz = params['means3D']
-            base_rots = params['unnorm_rotations']
-            base_scales = params['log_scales']
-            opacities = params['logit_opacities']
-            colors = params['rgb_colors']
-        else:
-            weights = params['deform_weights'].detach()
-            stds = params['deform_stds'].detach()
-            biases = params['deform_biases'].detach()
-            base_xyz = params['means3D'].detach()
-            base_rots = params['unnorm_rotations'].detach()
-            base_scales = params['log_scales'].detach()
-            opacities = params['logit_opacities'].detach()
-            colors = params['rgb_colors'].detach()
+    cam_rots = F.normalize(params["cam_unnorm_rots"], dim=1)  # [3, T] or [B,4,T] in some setups
+    cam_trans = params["cam_trans"]  # [3, T]
+    T = cam_trans.shape[-1]
+    w2cs = []
+    from utils.slam_external import build_rotation  # you have this
 
-        time_tensor = torch.as_tensor(time, device=biases.device, dtype=biases.dtype)
-        while time_tensor.dim() < biases.dim():
-            time_tensor = time_tensor.unsqueeze(0)
+    for t in range(T):
+        rot = build_rotation(cam_rots[..., t])
+        trans = cam_trans[..., t]
+        w2c = torch.eye(4, device=rot.device, dtype=rot.dtype)
+        w2c[:3, :3] = rot
+        w2c[:3, 3] = trans
+        w2cs.append(w2c)
+    return w2cs
 
-        stds_pos = F.softplus(stds) + 1e-3
-        score = -((time_tensor - biases) ** 2) / (2.0 * stds_pos ** 2 + 1e-12)
-        attn = F.softmax(score, dim=1)
-        if N is not None and isinstance(N, int) and 0 < N < attn.shape[1]:
-            topv, topi = torch.topk(attn, k=N, dim=1)
-            mask = torch.zeros_like(attn)
-            mask.scatter_(1, topi, 1.0)
-            attn = attn * mask
-            attn = attn / (attn.sum(dim=1, keepdim=True) + 1e-12)
 
-        flow = torch.sum(attn * weights, dim=1)
-        d_xyz = flow[:, :3]
-        d_quat = flow[:, 3:7]
-        d_log_scale = flow[:, 7:10]
-
-        xyz = base_xyz + d_xyz
-        base_q = F.normalize(base_rots, dim=-1)
-        delta_q = F.normalize(d_quat, dim=-1)
-        rots = F.normalize(_qmul(base_q, delta_q), dim=-1)
-        scales = base_scales + d_log_scale
-
-    elif deformation_type == 'cv':
-        device = params['means3D'].device
-        dtype = params['means3D'].dtype
-        means = params['means3D']
-        n_gauss = means.shape[0]
-
-        def _select_time_slice(arr, idx):
-            if isinstance(arr, torch.Tensor) and arr.dim() >= 3:
-                try:
-                    return arr[..., idx]
-                except Exception:
-                    return arr[..., 0]
-            return arr
-
-        t = torch.as_tensor(time, device=device, dtype=dtype).view(1, 1)
-
-        if 'cv_vel_xyz' in params:
-            v_xyz = _select_time_slice(params['cv_vel_xyz'], time)
-            v_xyz = v_xyz.reshape(n_gauss, 3) if v_xyz.dim() > 2 else v_xyz
-        else:
-            v_xyz = torch.zeros((n_gauss, 3), device=device, dtype=dtype)
-
-        if 'cv_vel_log_scales' in params:
-            v_lsg = _select_time_slice(params['cv_vel_log_scales'], time)
-            v_lsg = v_lsg.reshape(n_gauss, 3) if v_lsg.dim() > 2 else v_lsg
-        else:
-            v_lsg = torch.zeros((n_gauss, 3), device=device, dtype=dtype)
-
-        if 'cv_angvel_aa' in params:
-            w_aa = _select_time_slice(params['cv_angvel_aa'], time)
-            w_aa = w_aa.reshape(n_gauss, 3) if w_aa.dim() > 2 else w_aa
-        else:
-            w_aa = torch.zeros((n_gauss, 3), device=device, dtype=dtype)
-
-        if means.dim() == 3:
-            try:
-                base_means = means[..., time]
-            except Exception:
-                base_means = means[..., 0]
-        else:
-            base_means = means
-
-        xyz = base_means + v_xyz * t
-        base_q = F.normalize(params['unnorm_rotations'], dim=-1)
-        dq = _aa_to_quat(w_aa * t)
-        while dq.dim() < base_q.dim():
-            dq = dq.unsqueeze(-1)
-        try:
-            dq = dq.expand_as(base_q)
-        except Exception:
-            target_shape = list(base_q.shape[:-1]) + [4]
-            dq = dq.expand(*target_shape)
-        rots = F.normalize(_qmul(base_q, dq), dim=-1)
-        scales = params['log_scales'] + v_lsg * t
-        opacities = params['logit_opacities']
-        colors = params['rgb_colors']
-        return xyz, rots, scales, opacities, colors
-
-    elif deformation_type == 'simple':
-        xyz = params['means3D'][time]
-        rots = params['unnorm_rotations'][time]
-        scales = params['log_scales'][time]
-        opacities = params['logit_opacities'][time]
-        colors = params['rgb_colors'][time]
-
+def make_intrinsics_from_params(params, viz_w, viz_h):
+    """
+    Your runs usually save 'k' or separate fx,fy,cx,cy.
+    Try to reconstruct a 3x3.
+    """
+    if "k" in params:
+        k = params["k"].clone()
+        k[0, 2] = min(k[0, 2], viz_w - 1)
+        k[1, 2] = min(k[1, 2], viz_h - 1)
+        return k
     else:
-        raise ValueError(f"Unsupported deformation_type '{deformation_type}' for final_recon.")
-
-    return xyz, rots, scales, opacities, colors
-
-def load_camera(cfg, scene_path):
-    all_params = dict(np.load(scene_path, allow_pickle=True))
-    params = all_params
-    org_width = params['org_width']
-    org_height = params['org_height']
-    w2c = params['w2c']
-    intrinsics = params['intrinsics']
-    k = intrinsics[:3, :3]
-
-    # Scale intrinsics to match the visualization resolution
-    k[0, :] *= cfg['viz_w'] / org_width
-    k[1, :] *= cfg['viz_h'] / org_height
-    return w2c, k
+        fx = params.get("fx", torch.tensor(800., device="cuda"))
+        fy = params.get("fy", torch.tensor(800., device="cuda"))
+        cx = params.get("cx", torch.tensor(viz_w / 2., device="cuda"))
+        cy = params.get("cy", torch.tensor(viz_h / 2., device="cuda"))
+        k = torch.tensor([[fx, 0, cx],
+                          [0, fy, cy],
+                          [0, 0, 1]], device="cuda").float()
+        return k
 
 
-def load_scene_data(scene_path, first_frame_w2c, intrinsics, time_idx, deformation_type=None, gate_thresh=0.0):
-    # Load Scene Data
-    print(f"Loading data from {scene_path}")
-    all_params = dict(np.load(scene_path, allow_pickle=True))
-    intrinsics = torch.tensor(intrinsics).cuda().float()
-    first_frame_w2c = torch.tensor(first_frame_w2c).cuda().float()
-    try:
-        all_params = {k: torch.tensor(all_params[k]).cuda().float() for k in all_params.keys()}
+def render_dynamic(params, out_dir, cfg):
+    os.makedirs(out_dir, exist_ok=True)
 
+    # figure out how many frames we have
+    if "num_frames" in params:
+        num_frames = int(params["num_frames"].item())
+    else:
+        # fall back to camera count
+        num_frames = params["cam_trans"].shape[-1]
 
-        keys = [k for k in all_params.keys() if
-                k not in ['org_width', 'org_height', 'w2c', 'intrinsics', 
-                        'gt_w2c_all_frames', 'cam_unnorm_rots',
-                        'cam_trans', 'keyframe_time_indices']]
+    w2cs = build_w2cs(params)
+    device = params["means3D"].device
 
-        params = all_params
-        for k in keys:
-            if not isinstance(all_params[k], torch.Tensor):
-                params[k] = torch.tensor(all_params[k]).cuda().float()
-            else:
-                params[k] = all_params[k].cuda().float()
-    except:
-        # keys = [k for k in all_params.keys() if
-        #         k not in ['org_width', 'org_height', 'w2c', 'intrinsics', 
-        #                 'gt_w2c_all_frames', 'cam_unnorm_rots',
-        #                 'cam_trans', 'keyframe_time_indices']]
-        params={}
-        for key in all_params.keys():
-            try:
-                params[key] = torch.tensor(all_params[key]).cuda()
-            except:
-                params[key] = [torch.tensor(all_params[key][i]).cuda() for i in range(all_params[key].shape[0])]
+    viz_w = cfg.get("viz_w", 640)
+    viz_h = cfg.get("viz_h", 480)
+    k = make_intrinsics_from_params(params, viz_w, viz_h)
 
-    all_w2cs = []
-    num_t = params['cam_unnorm_rots'].shape[-1]
-    for t_i in range(num_t):
-        cam_rot = F.normalize(params['cam_unnorm_rots'][..., t_i])
-        cam_tran = params['cam_trans'][..., t_i]
-        rel_w2c = torch.eye(4).cuda().float()
-        rel_w2c[:3, :3] = build_rotation(cam_rot)
-        rel_w2c[:3, 3] = cam_tran
-        all_w2cs.append(rel_w2c.cpu().numpy())
-        
-
-
-    local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(params,time_idx,False,deformation_type=deformation_type)
-    transformed_pts = local_means
-
-    scales_exp = _exp_scales(local_scales)
-
-    rendervar = {
-        'means3D': transformed_pts,
-        'rotations': torch.nn.functional.normalize(local_rots),
-        'opacities': torch.sigmoid(local_opacities),
-        'means2D': torch.zeros_like(local_means, device="cuda")
-    }
-    depth_rendervar = {
-        'means3D': transformed_pts,
-        'colors_precomp': get_depth_and_silhouette(transformed_pts, first_frame_w2c),
-        'rotations': torch.nn.functional.normalize(local_rots),
-        'opacities': torch.sigmoid(local_opacities),
-        'means2D': torch.zeros_like(local_means, device="cuda")
-    }
-
-    if "feature_rest" in params:
-        rendervar['scales'] = scales_exp
-        depth_rendervar['scales'] = scales_exp
-        sh_feats = params['feature_rest']
-        rendervar['shs'] = torch.cat(
-            (
-                local_colors.reshape(local_colors.shape[0], 3, -1).transpose(1, 2),
-                sh_feats.reshape(local_colors.shape[0], 3, -1).transpose(1, 2)
-            ),
-            dim=1
+    for t in tqdm(range(num_frames), desc="render dynamic"):
+        # 1) deform to time t (uses SAME code as SLAM)
+        local_means, local_rots, local_scales, local_opacities, local_colors = deform_gaussians_eval(
+            params,
+            float(t),
+            False,                      # no grad
+            N=cfg.get("N_bases_eval", 5),
+            deformation_type=cfg.get("deformation_type", "gaussian"),
         )
-    else:
-        rendervar['scales'] = scales_exp
-        depth_rendervar['scales'] = scales_exp
-        rendervar['colors_precomp'] = local_colors
 
-    # Apply temporal gating if the checkpoint carries xyzt parameters
-    if 't_mu' in params:
-        time_gate = xyzt_time_gate(params, float(time_idx))
-        rendervar = apply_xyzt_gate(rendervar, time_gate, gate_thresh=gate_thresh)
-        depth_rendervar = apply_xyzt_gate(depth_rendervar, time_gate, gate_thresh=gate_thresh)
-    return rendervar, depth_rendervar, all_w2cs, params
-
-
-def deform_and_render(params, time_idx, deformation_type, w2c, gate_thresh=0.0):
-    w2c = torch.tensor(w2c).cuda().float()
-    local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(params,time_idx,False,deformation_type=deformation_type)
-    transformed_pts = local_means
-
-    scales_exp = _exp_scales(local_scales)
-
-    rendervar = {
-        'means3D': transformed_pts,
-        'rotations': torch.nn.functional.normalize(local_rots),
-        'opacities': torch.sigmoid(local_opacities),
-        'means2D': torch.zeros_like(local_means, device="cuda")
-    }
-    if "feature_rest" in params:
-        rendervar['scales'] = scales_exp
-        rendervar['shs'] = torch.cat(
-            (
-                local_colors.reshape(local_colors.shape[0], 3, -1).transpose(1, 2),
-                params['feature_rest'].reshape(local_colors.shape[0], 3, -1).transpose(1, 2)
-            ),
-            dim=1
+        # 2) build renderer input
+        rendervar = transformed_params2rendervar(
+            params,
+            local_means,
+            local_rots,
+            local_scales,
+            local_opacities,
+            local_colors,
         )
-    else:
-        rendervar['scales'] = scales_exp
-        rendervar['colors_precomp'] = local_colors
-    depth_rendervar = {
-        'means3D': transformed_pts,
-        'colors_precomp': get_depth_and_silhouette(transformed_pts, w2c),
-        'rotations': torch.nn.functional.normalize(local_rots),
-        'opacities': torch.sigmoid(local_opacities),
-        'scales': scales_exp,
-        'means2D': torch.zeros_like(local_means, device="cuda")
-    }
-    if 't_mu' in params:
-        time_gate = xyzt_time_gate(params, float(time_idx))
-        rendervar = apply_xyzt_gate(rendervar, time_gate, gate_thresh=gate_thresh)
-        depth_rendervar = apply_xyzt_gate(depth_rendervar, time_gate, gate_thresh=gate_thresh)
-    return rendervar, depth_rendervar, params
 
-def make_lineset(all_pts, all_cols, num_lines):
-    linesets = []
-    for pts, cols, num_lines in zip(all_pts, all_cols, num_lines):
-        lineset = o3d.geometry.LineSet()
-        lineset.points = o3d.utility.Vector3dVector(np.ascontiguousarray(pts, np.float64))
-        lineset.colors = o3d.utility.Vector3dVector(np.ascontiguousarray(cols, np.float64))
-        pt_indices = np.arange(len(lineset.points))
-        line_indices = np.stack((pt_indices, pt_indices - num_lines), -1)[num_lines:]
-        lineset.lines = o3d.utility.Vector2iVector(np.ascontiguousarray(line_indices, np.int32))
-        linesets.append(lineset)
-    return linesets
+        # 3) temporal gate (SOFT)
+        if "t_mu" in params and "t_logvar" in params:
+            time_gate = xyzt_time_gate(params, float(t))  # [G]
+            # soften so gaussians don't blink
+            time_gate = 0.3 * time_gate + 0.7
+            rendervar = apply_xyzt_gate(rendervar, time_gate, gate_thresh=0.0)
+            if "opacities" in rendervar:
+                rendervar["opacities"] = torch.clamp(rendervar["opacities"], min=0.05)
 
-
-def render(w2c, k, timestep_data, timestep_depth_data, cfg):
-    with torch.no_grad():
-        cam = setup_camera(cfg['viz_w'], cfg['viz_h'], k, w2c, cfg['viz_near'], cfg['viz_far'], use_simplification=cfg['gaussian_simplification'])
-        white_bg_cam = Camera(
-            image_height=cam.image_height,
-            image_width=cam.image_width,
-            tanfovx=cam.tanfovx,
-            tanfovy=cam.tanfovy,
-            bg=torch.tensor([0, 0, 0], dtype=torch.float32, device="cuda"),
-            scale_modifier=cam.scale_modifier,
-            viewmatrix=cam.viewmatrix,
-            projmatrix=cam.projmatrix,
-            sh_degree=cam.sh_degree,
-            campos=cam.campos,
-            prefiltered=cam.prefiltered
+        # 4) setup camera
+        w2c = w2cs[t]
+        cam = setup_camera(
+            viz_w,
+            viz_h,
+            k,
+            w2c,
+            cfg.get("viz_near", 0.01),
+            cfg.get("viz_far", 20.0),
+            use_simplification=cfg.get("gaussian_simplification", False),
         )
-        im, _, _ = Renderer(raster_settings=white_bg_cam)(**timestep_data)
-        depth_sil, _, _ = Renderer(raster_settings=white_bg_cam)(**timestep_depth_data)
-        return im, depth_sil
+
+        # 5) render
+        im, depth_sil, _ = Renderer(
+            w2c,
+            8,              # sh degree – same as training
+            rendervar,
+            {},             # depth data not needed for viz
+            cfg,
+            cam=cam,
+        )
+
+        # 6) save rgb
+        im_np = (im.permute(1, 2, 0).clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
+        out_path = os.path.join(out_dir, f"frame_{t:04d}.png")
+        import imageio
+        imageio.imwrite(out_path, im_np)
 
 
-def rgbd2pcd(color, depth_sil, w2c, intrinsics, cfg):
-    width, height = color.shape[2], color.shape[1]
-    CX = intrinsics[0][2]
-    CY = intrinsics[1][2]
-    FX = intrinsics[0][0]
-    FY = intrinsics[1][1]
+def render_single(params, out_path, cfg, time_idx=None):
+    if time_idx is None:
+        if "num_frames" in params:
+            time_idx = int(params["num_frames"].item()) // 2
+        else:
+            time_idx = params["cam_trans"].shape[-1] // 2
 
-    depth = depth_sil[0:1, ...]
-    silhouette = depth_sil[1:2, ...]
-    valid_depth = torch.isfinite(depth) & (depth > 0)
-    depth_clip = cfg.get('viz_depth_max', None)
-    if depth_clip is not None:
-        valid_depth &= (depth < depth_clip)
-    sil_thres = cfg.get('viz_sil_thres', None)
-    if sil_thres is not None:
-        valid_mask = valid_depth & (silhouette > sil_thres)
-    else:
-        valid_mask = valid_depth
-    mask_flat = valid_mask.reshape(-1)
+    w2cs = build_w2cs(params)
+    device = params["means3D"].device
 
-    # Compute indices
-    xx = torch.tile(torch.arange(width).cuda(), (height,))
-    yy = torch.repeat_interleave(torch.arange(height).cuda(), width)
-    xx = (xx - CX) / FX
-    yy = (yy - CY) / FY
-    z_depth = depth[0].reshape(-1)
+    viz_w = cfg.get("viz_w", 640)
+    viz_h = cfg.get("viz_h", 480)
+    k = make_intrinsics_from_params(params, viz_w, viz_h)
 
-    # Initialize point cloud
-    pts_cam = torch.stack((xx * z_depth, yy * z_depth, z_depth), dim=-1)
-    pix_ones = torch.ones(height * width, 1).cuda().float()
-    pts4 = torch.cat((pts_cam, pix_ones), dim=1)
-    c2w = torch.inverse(torch.tensor(w2c).cuda().float())
-    pts = (c2w @ pts4.T).T[:, :3]
-
-    if mask_flat.sum() > 0:
-        pts = pts[mask_flat]
-        z_depth = z_depth[mask_flat]
-    else:
-        mask_flat = None
-
-    # Convert to Open3D format
-    pts = o3d.utility.Vector3dVector(pts.contiguous().double().cpu().numpy())
-    
-    # Colorize point cloud
-    if cfg['render_mode'] == 'depth':
-        cols = z_depth
-        cutoff = depth_clip if depth_clip is not None else 15
-        bg_mask = (cols < cutoff).float()
-        colormap = plt.get_cmap('jet')
-        cNorm = plt.Normalize(vmin=0, vmax=torch.max(cols))
-        scalarMap = plt.cm.ScalarMappable(norm=cNorm, cmap=colormap)
-        cols = scalarMap.to_rgba(cols.contiguous().cpu().numpy())[:, :3]
-        bg_mask = bg_mask.cpu().numpy()
-        cols = cols * bg_mask[:, None] + (1 - bg_mask[:, None]) * np.array([0, 0, 0]) # np.array([1.0, 1.0, 1.0])
-        cols = o3d.utility.Vector3dVector(cols)
-    else:
-        cols = torch.permute(color, (1, 2, 0)).reshape(-1, 3)
-        if mask_flat is not None:
-            cols = cols[mask_flat]
-        cols = o3d.utility.Vector3dVector(cols.contiguous().double().cpu().numpy())
-    return pts, cols
-
-
-def visualize(scene_path, cfg,experiment):
-    # Load Scene Data
-    time_idx = 0
-    deformation_cfg = experiment.config.get('deforms', {})
-    deformation_type = deformation_cfg.get('deform_type', 'gaussian')
-    gate_thresh = deformation_cfg.get('xyzt_gate_thresh', 0.0)
-    w2c, k = load_camera(cfg, scene_path)
-    scene_data, scene_depth_data, all_w2cs, params = load_scene_data(
-        scene_path, w2c, k, time_idx, deformation_type=deformation_type, gate_thresh=gate_thresh
+    # deform
+    local_means, local_rots, local_scales, local_opacities, local_colors = deform_gaussians_eval(
+        params,
+        float(time_idx),
+        False,
+        N=cfg.get("N_bases_eval", 5),
+        deformation_type=cfg.get("deformation_type", "gaussian"),
     )
 
-    # vis.create_window()
-    vis = o3d.visualization.Visualizer()
-    vis.create_window(width=int(cfg['viz_w'] * cfg['view_scale']), 
-                      height=int(cfg['viz_h'] * cfg['view_scale']),
-                      visible=True)
+    rendervar = transformed_params2rendervar(
+        params,
+        local_means,
+        local_rots,
+        local_scales,
+        local_opacities,
+        local_colors,
+    )
 
-    im, depth_sil = render(w2c, k, scene_data, scene_depth_data, cfg)
-    init_pts, init_cols = rgbd2pcd(im, depth_sil, w2c, k, cfg)
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = init_pts
-    pcd.colors = init_cols
-    vis.add_geometry(pcd)
+    if "t_mu" in params and "t_logvar" in params:
+        time_gate = xyzt_time_gate(params, float(time_idx))
+        time_gate = 0.3 * time_gate + 0.7
+        rendervar = apply_xyzt_gate(rendervar, time_gate, gate_thresh=0.0)
+        if "opacities" in rendervar:
+            rendervar["opacities"] = torch.clamp(rendervar["opacities"], min=0.05)
 
-    w = cfg['viz_w']
-    h = cfg['viz_h']
+    w2c = w2cs[time_idx]
+    cam = setup_camera(
+        viz_w,
+        viz_h,
+        k,
+        w2c,
+        cfg.get("viz_near", 0.01),
+        cfg.get("viz_far", 20.0),
+        use_simplification=cfg.get("gaussian_simplification", False),
+    )
 
-    if cfg['visualize_cams']:
-        # Initialize Estimated Camera Frustums
-        frustum_size = 0.4
-        num_t = len(all_w2cs)
-        cam_centers = []
-        cam_colormap = plt.get_cmap('cool')
-        norm_factor = 0.5
-        for i_t in range(0, num_t):
-            frustum = o3d.geometry.LineSet.create_camera_visualization(w, h, k, all_w2cs[i_t], frustum_size)
-            frustum.paint_uniform_color(np.array(cam_colormap(i_t * norm_factor / num_t)[:3]))
-            vis.add_geometry(frustum)
-            cam_centers.append(np.linalg.inv(all_w2cs[i_t])[:3, 3])
-        
-        # Initialize Camera Trajectory
-        num_lines = [1]
-        total_num_lines = num_t - 1
-        cols = []
-        line_colormap = plt.get_cmap('cool')
-        norm_factor = 0.5
-        for line_t in range(total_num_lines):
-            cols.append(np.array(line_colormap((line_t * norm_factor / total_num_lines)+norm_factor)[:3]))
-        cols = np.array(cols)
-        all_cols = [cols]
-        out_pts = [np.array(cam_centers)]
-        linesets = make_lineset(out_pts, all_cols, num_lines)
-        lines = o3d.geometry.LineSet()
-        lines.points = linesets[0].points
-        lines.colors = linesets[0].colors
-        lines.lines = linesets[0].lines
-        vis.add_geometry(lines)
-        coordinate_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1, origin=[0, 0, 0])
-        vis.add_geometry(coordinate_frame)
-        
-    # Initialize View Control
-    view_k = k * cfg['view_scale']
-    view_k[2, 2] = 1
-    view_control = vis.get_view_control()
-    cparams = o3d.camera.PinholeCameraParameters()
-    if cfg['offset_first_viz_cam']:
-        view_w2c = w2c
-        view_w2c[:3, 3] = view_w2c[:3, 3] + np.array([0, 0, 0.5])
+    im, depth_sil, _ = Renderer(
+        w2c,
+        8,
+        rendervar,
+        {},
+        cfg,
+        cam=cam,
+    )
+
+    im_np = (im.permute(1, 2, 0).clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
+    import imageio
+    imageio.imwrite(out_path, im_np)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--scene", required=True, help="path to params.npz")
+    parser.add_argument("--out", default="dynamic_out", help="output dir / image")
+    parser.add_argument("--dynamic", action="store_true", help="export all frames")
+    parser.add_argument("--time", type=int, default=None, help="single frame index")
+    args = parser.parse_args()
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    params = load_params(args.scene, device=device)
+
+    # viz cfg – can be tweaked
+    cfg = dict(
+        viz_w=640,
+        viz_h=480,
+        viz_near=0.01,
+        viz_far=20.0,
+        gaussian_simplification=False,
+        deformation_type="gaussian",
+        N_bases_eval=5,
+    )
+
+    if args.dynamic:
+        render_dynamic(params, args.out, cfg)
     else:
-        view_w2c = w2c
-    cparams.extrinsic = view_w2c
-    cparams.intrinsic.intrinsic_matrix = view_k
-    cparams.intrinsic.height = int(cfg['viz_h'] * cfg['view_scale'])
-    cparams.intrinsic.width = int(cfg['viz_w'] * cfg['view_scale'])
-    view_control.convert_from_pinhole_camera_parameters(cparams, allow_arbitrary=True)
-
-    render_options = vis.get_render_option()
-    render_options.point_size = cfg['view_scale']
-    render_options.light_on = False
-
-    ts = time()
-    # Interactive Rendering
-    while True:
-        # scene_data, scene_depth_data, all_w2cs = load_scene_data(scene_path, w2c, k,time_idx,deformation_type=deformation_type)
-        scene_data, scene_depth_data, params = deform_and_render(
-            params, time_idx, deformation_type, all_w2cs[time_idx], gate_thresh=gate_thresh
-        )
-
-        cam_params = view_control.convert_to_pinhole_camera_parameters()
-        view_k = cam_params.intrinsic.intrinsic_matrix
-        k = view_k / cfg['view_scale']
-        k[2, 2] = 1
-        w2c = cam_params.extrinsic
-        if time() - ts > 0.033:
-            if len(w2cs) == 613 // 8 * 7 + 7: # 765, 700, 613
-                np.save("w2cs.npy", np.array(w2cs))
-                exit()
-            print(len(w2cs))
-            w2cs.append(w2c)
-            ts = time()
-        
-        if cfg['render_mode'] == 'centers':
-            pts = o3d.utility.Vector3dVector(scene_data['means3D'].contiguous().double().cpu().numpy())
-            cols = o3d.utility.Vector3dVector(scene_data['colors_precomp'].contiguous().double().cpu().numpy())
+        # if out is a dir, write frame.png inside it
+        if os.path.isdir(args.out):
+            os.makedirs(args.out, exist_ok=True)
+            out_path = os.path.join(args.out, "frame.png")
         else:
-            im, depth_sil = render(w2c, k, scene_data, scene_depth_data, cfg)
-            pts, cols = rgbd2pcd(im, depth_sil, w2c, k, cfg)
-        
-        # Update Gaussians
-        pcd.points = pts
-        pcd.colors = cols
-        vis.update_geometry(pcd)
-
-        if not vis.poll_events():
-            break
-            # time_idx = 0
-        vis.update_renderer()
-        if time_idx >= len(all_w2cs) - 1:
-            time_idx = 0
-        else:
-            time_idx+=1
-        
-    # Cleanup
-    vis.destroy_window()
-    del view_control
-    del vis
-    del render_options
+            out_path = args.out
+        render_single(params, out_path, cfg, time_idx=args.time)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument("experiment", type=str, help="Path to experiment file")
-
-    args = parser.parse_args()
-
-    experiment = SourceFileLoader(
-        os.path.basename(args.experiment), args.experiment
-    ).load_module()
-
-    seed_everything(seed=experiment.config["seed"])
-
-    if "scene_path" not in experiment.config:
-        results_dir = os.path.join(
-            experiment.config["workdir"], experiment.config["run_name"]
-        )
-        scene_path = os.path.join(results_dir, "params.npz")
-    else:
-        scene_path = experiment.config["scene_path"]
-    viz_cfg = experiment.config["viz"]
-
-    # Visualize Final Reconstruction
-    visualize(scene_path, viz_cfg,experiment)
+    main()

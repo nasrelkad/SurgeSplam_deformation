@@ -211,7 +211,7 @@ def remove_points(to_remove, params, variables, optimizer):
             return torch.cat([v, pad], dim=0)
         return v
 
-    for name in ('means2D_gradient_accum', 'denom', 'radii', 'opacity', 'visibility_filter'):
+    for name in ('means2D_gradient_accum', 'denom', 'radii', 'opacity', 'visibility_filter', 'last_seen', 'visibility_hits', 'front_gate_counter'):
         if name in variables:
             variables[name] = _resize_like(variables[name], N)
 
@@ -263,7 +263,20 @@ def densify(params, variables, optimizer, iter, densify_dict):
             to_clone = torch.logical_and(grads >= grad_thresh, (
                         torch.max(torch.exp(params['log_scales']), dim=1).values <= 0.01 * variables['scene_radius']))
             new_params = {k: v[to_clone] for k, v in params.items() if k not in ['cam_unnorm_rots', 'cam_trans']}
+            num_new = new_params['means3D'].shape[0] if 'means3D' in new_params else 0
             params = cat_params_to_optimizer(new_params, params, optimizer)
+            if num_new > 0:
+                if 'last_seen' in variables:
+                    frame_val = variables.get('frame_idx', torch.tensor(0.0, device="cuda", dtype=variables['last_seen'].dtype))
+                    frame_scalar = frame_val.detach().cpu()
+                    frame_scalar = float(frame_scalar.item()) if frame_scalar.numel() == 1 else float(frame_scalar.reshape(-1)[0].item())
+                    new_last = torch.full((num_new,), frame_scalar, device=variables['last_seen'].device,
+                                          dtype=variables['last_seen'].dtype)
+                    variables['last_seen'] = torch.cat((variables['last_seen'], new_last), dim=0)
+                if 'visibility_hits' in variables:
+                    new_hits = torch.zeros(num_new, device=variables['visibility_hits'].device,
+                                           dtype=variables['visibility_hits'].dtype)
+                    variables['visibility_hits'] = torch.cat((variables['visibility_hits'], new_hits), dim=0)
             num_pts = params['means3D'].shape[0]
 
             padded_grad = torch.zeros(num_pts, device="cuda")
@@ -279,7 +292,20 @@ def densify(params, variables, optimizer, iter, densify_dict):
             rots = build_rotation(params['unnorm_rotations'][to_split]).repeat(n, 1, 1)
             new_params['means3D'] += torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1)
             new_params['log_scales'] = torch.log(torch.exp(new_params['log_scales']) / (0.8 * n))
+            num_split = new_params['means3D'].shape[0] if 'means3D' in new_params else 0
             params = cat_params_to_optimizer(new_params, params, optimizer)
+            if num_split > 0:
+                if 'last_seen' in variables:
+                    frame_val = variables.get('frame_idx', torch.tensor(0.0, device="cuda", dtype=variables['last_seen'].dtype))
+                    frame_scalar = frame_val.detach().cpu()
+                    frame_scalar = float(frame_scalar.item()) if frame_scalar.numel() == 1 else float(frame_scalar.reshape(-1)[0].item())
+                    new_last = torch.full((num_split,), frame_scalar, device=variables['last_seen'].device,
+                                          dtype=variables['last_seen'].dtype)
+                    variables['last_seen'] = torch.cat((variables['last_seen'], new_last), dim=0)
+                if 'visibility_hits' in variables:
+                    new_hits = torch.zeros(num_split, device=variables['visibility_hits'].device,
+                                           dtype=variables['visibility_hits'].dtype)
+                    variables['visibility_hits'] = torch.cat((variables['visibility_hits'], new_hits), dim=0)
             num_pts = params['means3D'].shape[0]
 
             variables['means2D_gradient_accum'] = torch.zeros(num_pts, device="cuda")

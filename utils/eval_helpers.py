@@ -4,6 +4,7 @@ import os
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
+import math
 import numpy as np
 import matplotlib.pyplot as plt
 from datasets.gradslam_datasets.geometryutils import relative_transformation
@@ -181,17 +182,35 @@ def plot_rgbd_silhouette(color, depth, rastered_color, rastered_depth, presence_
     rastered_color = torch.clamp(rastered_color, 0, 1)
     axs[1, 0].imshow(rastered_color.cpu().permute(1, 2, 0))
     axs[1, 0].set_title("Rasterized RGB, PSNR: {:.2f}".format(psnr))
-    axs[1, 1].imshow(rastered_depth[0, :, :].cpu(), cmap='jet', vmin=0, vmax=6)
-    axs[1, 1].set_title("Rasterized Depth, L1: {:.2f}".format(depth_l1))
+    rastered_depth_img = rastered_depth[0, :, :].cpu()
+    axs[1, 1].imshow(rastered_depth_img, cmap='jet', vmin=0, vmax=6)
+    if torch.is_tensor(depth_l1):
+        depth_l1_val = float(depth_l1.detach().cpu().item())
+    else:
+        depth_l1_val = float(depth_l1)
+    if math.isnan(depth_l1_val):
+        depth_title = "Rasterized Depth (no gt depth)"
+    else:
+        depth_title = "Rasterized Depth, L1: {:.2f}".format(depth_l1_val)
+    axs[1, 1].set_title(depth_title)
     if diff_rgb is not None:
         axs[0, 2].imshow(diff_rgb.cpu(), cmap='jet', vmin=0, vmax=6)
         axs[0, 2].set_title("Diff RGB L1")
     else:
         axs[0, 2].imshow(presence_sil_mask, cmap='gray')
         axs[0, 2].set_title("Rasterized Silhouette")
-    diff_depth_l1 = diff_depth_l1.cpu().squeeze(0)
-    axs[1, 2].imshow(diff_depth_l1, cmap='jet', vmin=0, vmax=6)
-    axs[1, 2].set_title("Diff Depth L1")
+    diff_depth_map = diff_depth_l1
+    if torch.is_tensor(diff_depth_map):
+        diff_depth_map = diff_depth_map.detach().cpu().squeeze(0)
+        diff_depth_map = torch.nan_to_num(diff_depth_map, nan=0.0).numpy()
+    else:
+        diff_depth_map = np.nan_to_num(np.asarray(diff_depth_map), nan=0.0)
+    axs[1, 2].imshow(diff_depth_map, cmap='jet', vmin=0, vmax=6)
+    if math.isnan(depth_l1_val):
+        diff_depth_title = "Diff Depth L1 (no gt depth)"
+    else:
+        diff_depth_title = "Diff Depth L1"
+    axs[1, 2].set_title(diff_depth_title)
     for ax in axs.flatten():
         ax.axis('off')
     fig.suptitle(fig_title, y=0.95, fontsize=16)
@@ -454,7 +473,7 @@ def compute_errors(gt, pred):
 
 def eval_save(dataset, final_params, eval_dir, sil_thres, 
          mapping_iters, add_new_gaussians, save_renders=True, use_grn = True,
-         deformation_type: str = 'gaussian', gate_thresh: float = 0.0):
+         deformation_type: str = 'gaussian', gate_thresh: float = 0.0, use_gt_depth: bool = True):
     # timer = Timer()
     # timer.start()
     split = False
@@ -474,6 +493,7 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
     ssim_list = []
     depth_errors_list = []
     nr_gaussians_list = []
+    depth_error_metrics = ['Abs Rel', 'Sq Rel', 'RMSE', 'RMSE Log', 'A1', 'A2', 'A3', 'PSNR']
     plot_dir = os.path.join(eval_dir, "plots")
     os.makedirs(plot_dir, exist_ok=True)
     if save_renders:
@@ -561,7 +581,115 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
             # w2c[:3, :3] = torch.Tensor(rot) @ w2c[:3, :3]
             w2c[:3, 3] = torch.Tensor(horn_gt_position[total_time_idx])
             transformed_pts = transform_to_frame_eval(final_params,local_means, rel_w2c=w2c.cuda()) # use gt pose to render
-            
+
+        # ---- loose frustum cull (temporary, until depth-aware is on) ----
+        # transformed_pts: [G, 3] in *camera* frame
+        render_keep_mask = None
+        z = transformed_pts[:, 2]
+
+        # much looser range for your colon scale
+        z_min = 0.005
+        z_max = 2.0     # was 0.35, that's why everything vanished
+        valid_z = (z > z_min) & (z < z_max)
+
+        xy = transformed_pts[:, :2] / z.unsqueeze(1).clamp_min(1e-4)  # [G,2]
+        r = torch.linalg.norm(xy, dim=1)  # radial distance
+        # also make FOV looser – your scope is wide & distortive
+        fov_radius = 1.8
+        valid_fov = r < fov_radius
+        mask_fov = valid_z & valid_fov
+        if mask_fov.sum() == 0:
+            mask_fov = torch.zeros_like(mask_fov)
+            mask_fov[torch.argmin(z)] = True  # keep nearest just in case
+
+        transformed_pts = transformed_pts[mask_fov]
+        local_means     = local_means[mask_fov]
+        local_rots      = local_rots[mask_fov]
+        local_scales    = local_scales[mask_fov]
+        local_opacities = local_opacities[mask_fov]
+        local_colors    = local_colors[mask_fov]
+        cull_mask = mask_fov.clone()
+
+        # ---- optional predicted-depth-aware cull ----
+        # depth right now is your predicted depth, not GT
+        # shape: [1, H, W]
+        pred_depth = depth  # already C,H,W
+        if not torch.is_tensor(pred_depth):
+            pred_depth = torch.as_tensor(pred_depth, device=transformed_pts.device, dtype=transformed_pts.dtype)
+        else:
+            pred_depth = pred_depth.to(device=transformed_pts.device, dtype=transformed_pts.dtype)
+
+        if pred_depth.dim() == 2:
+            pred_depth = pred_depth.unsqueeze(0)
+        elif pred_depth.dim() == 3 and pred_depth.shape[0] > 1:
+            pred_depth = pred_depth[:1]
+
+        H, W = pred_depth.shape[1], pred_depth.shape[2]
+
+        # intrinsics is 3x3
+        if torch.is_tensor(intrinsics):
+            intrinsics_tensor = intrinsics.to(device=transformed_pts.device, dtype=transformed_pts.dtype)
+        else:
+            intrinsics_tensor = torch.as_tensor(intrinsics, device=transformed_pts.device, dtype=transformed_pts.dtype)
+        fx = intrinsics_tensor[0, 0]
+        fy = intrinsics_tensor[1, 1]
+        cx = intrinsics_tensor[0, 2]
+        cy = intrinsics_tensor[1, 2]
+
+        pts_cam = transformed_pts  # [G,3]
+        z = pts_cam[:, 2].clamp_min(1e-4)
+        u = (pts_cam[:, 0] * fx / z) + cx
+        v = (pts_cam[:, 1] * fy / z) + cy
+
+        # pixel-valid mask
+        in_w = (u >= 0) & (u <= (W - 1))
+        in_h = (v >= 0) & (v <= (H - 1))
+        pix_valid = in_w & in_h
+
+        if pix_valid.any():
+            u_pix = torch.clamp(u[pix_valid], 0, W - 1).long()
+            v_pix = torch.clamp(v[pix_valid], 0, H - 1).long()
+
+            # predicted depth at those pixels
+            pred_z = pred_depth[0, v_pix, u_pix]  # [N_valid]
+
+            # if your predicted depth is in mm or 0..1, scale here
+            # e.g. if it's 0..1 but your z is in meters: pred_z = pred_z * 1.0
+
+            # tolerance: allow gaussians a bit behind the depth
+            tol = 0.03  # 3 cm
+            valid_depth_mask = pred_z > 1e-4
+            depth_keep = torch.ones_like(pred_z, dtype=torch.bool)
+            depth_keep[valid_depth_mask] = z[pix_valid][valid_depth_mask] <= (pred_z[valid_depth_mask] + tol)
+
+            # start from all-kept
+            final_keep = torch.ones_like(pix_valid, dtype=torch.bool)
+            # for valid pixels, enforce depth test
+            final_keep[pix_valid] = depth_keep
+
+            # if nearly all would be dropped, relax to avoid thrashing
+            num_valid = int(pix_valid.sum().item())
+            if num_valid > 0:
+                min_keep = max(1, int(0.1 * num_valid))
+                if final_keep.sum().item() < min_keep:
+                    tmp = final_keep.clone()
+                    tmp[pix_valid] = True
+                    final_keep = tmp
+
+            # if that throws everything away, relax
+            if final_keep.sum().item() == 0:
+                final_keep = pix_valid  # fall back
+
+            transformed_pts = transformed_pts[final_keep]
+            local_means     = local_means[final_keep]
+            local_rots      = local_rots[final_keep]
+            local_scales    = local_scales[final_keep]
+            local_opacities = local_opacities[final_keep]
+            local_colors    = local_colors[final_keep]
+            cull_mask[mask_fov] = final_keep
+
+        render_keep_mask = cull_mask
+        
         # Define current frame data
         curr_data = {'cam': cam, 'im': color, 'depth': depth, 'id': time_idx, 'intrinsics': intrinsics, 'w2c': first_frame_w2c}
 
@@ -588,9 +716,25 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
 
             time_gate = None
             if 't_mu' in final_params:
+                # 1) get per-gaussian time weights
                 time_gate = xyzt_time_gate(final_params, float(total_time_idx))
-                rendervar = apply_xyzt_gate(rendervar, time_gate, gate_thresh=gate_thresh)
-                depth_sil_rendervar = apply_xyzt_gate(depth_sil_rendervar, time_gate, gate_thresh=gate_thresh)
+
+                # 2) if we frustum-culled above, we have to cull the gate too
+                if render_keep_mask is not None:
+                    time_gate = time_gate[render_keep_mask]
+
+                # 3) --- key fix ---
+                # some runs have t_mu near 0 while evaluating at later frames
+                # clamp so gaussians never vanish entirely after gating
+                time_gate = torch.clamp(time_gate, min=0.3)
+
+                # 4) apply to both rgb and depth/silhouette render vars
+                rendervar = apply_xyzt_gate(rendervar, time_gate, gate_thresh=0.0)
+                depth_sil_rendervar = apply_xyzt_gate(depth_sil_rendervar, time_gate, gate_thresh=0.0)
+                if "opacities" in rendervar:
+                    rendervar["opacities"] = torch.clamp(rendervar["opacities"], min=0.05)
+                if "opacities" in depth_sil_rendervar:
+                    depth_sil_rendervar["opacities"] = torch.clamp(depth_sil_rendervar["opacities"], min=0.05)
 
             # Render Depth & Silhouette
             depth_sil, _, _ = Renderer(raster_settings=curr_data['cam'])(**depth_sil_rendervar)
@@ -639,59 +783,49 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
             # gt_depth_aligned[gt_depth_aligned>150] = 150
             # rastered_depth_aligned[rastered_depth_aligned>150] = 150
             gt_depth_aligned = curr_data['depth']
-            
+            if torch.is_tensor(valid_depth_mask):
+                has_valid_gt_depth = bool(valid_depth_mask.any().item())
+            else:
+                has_valid_gt_depth = bool(np.any(valid_depth_mask))
+            evaluate_depth = use_gt_depth and has_valid_gt_depth
 
-            _,_,t_gt,s_gt,t_pred,s_pred = align_shift_and_scale(curr_data['depth'], rastered_depth_viz,valid_depth_mask)
-            rastered_depth_aligned = (rastered_depth_viz-t_pred)*(s_gt/s_pred)+t_gt
+            if evaluate_depth:
+                _, _, t_gt, s_gt, t_pred, s_pred = align_shift_and_scale(curr_data['depth'], rastered_depth_viz, valid_depth_mask)
+                rastered_depth_aligned = (rastered_depth_viz - t_pred) * (s_gt / s_pred) + t_gt
+                print("s_gt: {:.2f}, t_gt: {:.2f}, s_pred: {:.2f}, t_pred: {:.2f}".format(s_gt.item(), t_gt.item(), s_pred.item(), t_pred.item()))
 
-            # fig,ax = plt.subplots(2,3)
-            # im0 = ax[0,0].imshow(gt_depth_aligned.squeeze().cpu().detach())
-            # ax[0,0].set_title("GT Depth aligned, s_gt: {:.2f}, t_gt: {:.2f}".format(s_gt.item(),t_gt.item()))
-            # plt.colorbar(im0,ax=ax[0,0])
-            # im1 = ax[0,1].imshow(rastered_depth_aligned.squeeze().cpu().detach())
-            # ax[0,1].set_title("Rastered Depth aligned, s_pred: {:.2f}, t_pred: {:.2f}".format(s_pred.item(),t_pred.item()))
-            # plt.colorbar(im1,ax=ax[0,1])
-            # im2 = ax[0,2].imshow(np.abs(gt_depth_aligned.squeeze().cpu().detach()-rastered_depth_aligned.squeeze().cpu().detach()*valid_depth_mask.squeeze().cpu().detach()))
-            # plt.colorbar(im2,ax=ax[0,2])
+                error = compute_errors(
+                    gt_depth_aligned[valid_depth_mask].cpu().detach().numpy(),
+                    rastered_depth_aligned[valid_depth_mask].cpu().detach().numpy()
+                )
+                depth_errors_list.append(error)
+                print("Abs Rel: {:.4f}, Sq Rel: {:.4f}, RMSE: {:.4f}, RMSE Log: {:.4f}, A1: {:.4f}, A2: {:.4f}, A3: {:.4f}, PSNR: {:.4f}".format(*error))
 
+                diff_depth_rmse = torch.sqrt((rastered_depth_aligned - gt_depth_aligned) ** 2)
+                diff_depth_rmse = diff_depth_rmse * valid_depth_mask
+                rmse = diff_depth_rmse.sum() / valid_depth_mask.sum()
 
-            # im3 = ax[1,0].imshow(curr_data['depth'].squeeze().cpu().detach())
-            # ax[1,0].set_title("GT Depth (not aligned)")
-            # plt.colorbar(im3,ax=ax[1,0])
-            # im4 = ax[1,1].imshow(rastered_depth_viz.squeeze().cpu().detach())
-            # ax[1,1].set_title("Rastered Depth (not aligned)")
-            # plt.colorbar(im4,ax=ax[1,1])
-            # im5 = ax[1,2].imshow(valid_depth_mask.squeeze().cpu().detach())
-            # ax[1,2].set_title("Valid Depth Mask")
-            # plt.colorbar(im5,ax=ax[1,2])
-            # plt.show()
+                diff_depth_l1 = torch.abs(rastered_depth_aligned - gt_depth_aligned)
+                diff_depth_l1 = diff_depth_l1 * valid_depth_mask
+                depth_l1 = diff_depth_l1.sum() / valid_depth_mask.sum()
+                rmse_value = float(rmse.detach().cpu().item())
+                depth_l1_value = float(depth_l1.detach().cpu().item())
+            else:
+                rastered_depth_aligned = rastered_depth_viz
+                diff_depth_rmse = torch.zeros_like(rastered_depth_viz)
+                diff_depth_l1 = torch.full_like(rastered_depth_viz, float('nan'))
+                rmse = torch.tensor(float('nan'), device=rastered_depth_viz.device)
+                depth_l1 = torch.tensor(float('nan'), device=rastered_depth_viz.device)
+                rmse_value = float('nan')
+                depth_l1_value = float('nan')
+                depth_errors_list.append(tuple(np.full(len(depth_error_metrics), np.nan)))
+                if not use_gt_depth:
+                    print("No GT depth in config; skipping depth metrics for eval frame {}".format(total_time_idx))
+                else:
+                    print("No valid GT depth pixels; skipping depth metrics for eval frame {}".format(total_time_idx))
 
-
-            # gt_depth_aligned = curr_data['depth'][valid_depth_mask].cpu().detach().numpy()
-            # rastered_depth_aligned = rastered_depth_viz[valid_depth_mask].cpu().detach().numpy()
-            # gt_depth_aligned[gt_depth_aligned<1e-3] = 1e-3
-            # rastered_depth_aligned[rastered_depth_aligned<1e-3] = 1e-3
-            # gt_depth_aligned[gt_depth_aligned>150] = 150
-            # rastered_depth_aligned[rastered_depth_aligned>150] = 150
-
-            # rastered_depth_aligned,t_gt,s_gt,t_pred,s_pred = align_shift_and_scale( gt_depth_aligned,rastered_depth_aligned)
-
-
-
-            print("s_gt: {:.2f}, t_gt: {:.2f}, s_pred: {:.2f}, t_pred: {:.2f}".format(s_gt.item(),t_gt.item(),s_pred.item(),t_pred.item()))
-
-            error = compute_errors((gt_depth_aligned[valid_depth_mask].cpu().detach().numpy()), (rastered_depth_aligned[valid_depth_mask].cpu().detach().numpy()))
-            depth_errors_list.append(error)
-            print("Abs Rel: {:.4f}, Sq Rel: {:.4f}, RMSE: {:.4f}, RMSE Log: {:.4f}, A1: {:.4f}, A2: {:.4f}, A3: {:.4f}, PSNR: {:.4f}".format(*error))
-
-            diff_depth_rmse = torch.sqrt((((rastered_depth_aligned - gt_depth_aligned)) ** 2))
-            diff_depth_rmse = diff_depth_rmse * valid_depth_mask
-            rmse = diff_depth_rmse.sum() / valid_depth_mask.sum()
-            diff_depth_l1 = torch.abs((rastered_depth_aligned - gt_depth_aligned))
-            diff_depth_l1 = diff_depth_l1 * valid_depth_mask
-            depth_l1 = diff_depth_l1.sum() / valid_depth_mask.sum()
-            rmse_list.append(rmse.cpu().numpy())
-            l1_list.append(depth_l1.cpu().numpy())
+            rmse_list.append(rmse_value)
+            l1_list.append(depth_l1_value)
 
             if save_renders:
                 # Save Rendered RGB and Depth
@@ -764,7 +898,6 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
         print('Warning: evaluate_ate with valid_gt_w2c_list failed, retrying with gt_w2c_list')
         ate_rmse = evaluate_ate(gt_w2c_list, latest_est_w2c_list)
     print("Final Average ATE RMSE: {:.2f} mm".format(ate_rmse*100))
-    depth_error_metrics = ['Abs Rel', 'Sq Rel', 'RMSE', 'RMSE Log', 'A1', 'A2', 'A3', 'PSNR']
     # Compute Average Metrics
     psnr_list = np.array(psnr_list)
     rmse_list = np.array(rmse_list)
@@ -776,13 +909,13 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
     for error in depth_errors_list:
         for id,metric in enumerate(error):
             depth_errors_np[depth_error_metrics[id]].append(metric)
-    avg_psnr = psnr_list.mean()
-    avg_rmse = rmse_list.mean()
-    avg_l1 = l1_list.mean()
-    avg_ssim = ssim_list.mean()
-    avg_lpips = lpips_list.mean()
-    avg_depth_errors = {key: np.mean(depth_errors_np[key]) for key in depth_errors_np.keys()}
-    avg_gaussians = nr_gaussians_list.mean()
+    avg_psnr = np.nanmean(psnr_list) if psnr_list.size else float('nan')
+    avg_rmse = np.nanmean(rmse_list) if rmse_list.size else float('nan')
+    avg_l1 = np.nanmean(l1_list) if l1_list.size else float('nan')
+    avg_ssim = np.nanmean(ssim_list) if ssim_list.size else float('nan')
+    avg_lpips = np.nanmean(lpips_list) if lpips_list.size else float('nan')
+    avg_depth_errors = {key: np.nanmean(depth_errors_np[key]) if len(depth_errors_np[key]) else float('nan') for key in depth_errors_np.keys()}
+    avg_gaussians = np.nanmean(nr_gaussians_list) if nr_gaussians_list.size else float('nan')
     print("Average PSNR: {:.2f}".format(avg_psnr))
     print("Average Depth RMSE: {:.2f} mm".format(avg_rmse*100))
     print("Average Depth L1: {:.2f} mm".format(avg_l1*100))

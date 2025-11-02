@@ -744,7 +744,7 @@ def rgbd_slam(config: dict):
                 # params, variables = remove_floating_gaussians(params, variables, densify_curr_data, time_idx)
                 
                 # Add new Gaussians to the scene based on the Silhouette
-                params, variables = add_new_gaussians(params, variables, densify_curr_data, 
+                params, variables, _ = add_new_gaussians(params, variables, densify_curr_data, 
                                                       config['mapping']['sil_thres'], time_idx,
                                                       config['mean_sq_dist_method'], 
                                                       config['gaussian_simplification'])
@@ -926,8 +926,15 @@ def rgbd_slam(config: dict):
     # Evaluate Final Parameters
     dataset = [dataset, eval_dataset, 'C3VD'] if dataset_config["train_or_test"] == 'train' else dataset
     with torch.no_grad():
-        eval_save(dataset, params, eval_dir, sil_thres=config['mapping']['sil_thres'],
-                mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'])
+        eval_save(
+            dataset,
+            params,
+            eval_dir,
+            sil_thres=config['mapping']['sil_thres'],
+            mapping_iters=config['mapping']['num_iters'],
+            add_new_gaussians=config['mapping']['add_new_gaussians'],
+            use_gt_depth=config['depth']['use_gt_depth'],
+        )
 
     # Add Camera Parameters to Save them
     params['timestep'] = variables['timestep']

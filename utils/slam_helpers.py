@@ -904,6 +904,7 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
                       nr_basis = 10,use_distributed_biases = False,total_timescale = None,use_grn=False,grn_model=None,
                       use_deform = True,deformation_type = 'gaussian',num_frames = 1,
                       random_initialization=False,init_scale=0.1,cam = None, reduce_gaussians = False,reduction_type = 'random',reduction_fraction = 0.5):
+    MAX_NEW_PER_FRAME = 8000  # hard cap to stop densification bursts from OOM'ing
     # Silhouette Rendering
     if use_deform == True:
         local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(params,time_idx,True,deformation_type =deformation_type)
@@ -941,6 +942,9 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
         mask = get_mask(non_presence_mask,color=curr_data['im'],reduction_type = reduction_type,reduction_fraction = reduction_fraction)
 
         non_presence_mask = non_presence_mask & mask
+    total_pixels = non_presence_mask.numel()
+    # fraction of image pixels flagged as lacking coverage this frame
+    missing_ratio = float(non_presence_mask.sum().item()) / float(total_pixels) if total_pixels > 0 else 0.0
         
     # Get the new frame Gaussians based on the Silhouette
     if torch.sum(non_presence_mask) > 0:
@@ -971,9 +975,43 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
         new_pt_cld, mean3_sq_dist = get_pointcloud(curr_data['im'], curr_data['depth'], curr_data['intrinsics'], 
                                     curr_w2c, mask=non_presence_mask, compute_mean_sq_dist=True,
                                     mean_sq_dist_method=mean_sq_dist_method)
-        print("Adding {} new gaussians".format(new_pt_cld.shape[0]))
-        new_params = initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis = nr_basis,use_distributed_biases=use_distributed_biases,total_timescale = total_timescale,use_deform = use_deform,deform_type=deformation_type,
-                                            num_frames = num_frames,random_initialization=random_initialization,init_scale=init_scale)
+        candidate_new = new_pt_cld.shape[0]
+        if candidate_new > MAX_NEW_PER_FRAME:
+            keep_idx = torch.randperm(candidate_new, device=new_pt_cld.device)[:MAX_NEW_PER_FRAME]
+            new_pt_cld = new_pt_cld[keep_idx]
+            mean3_sq_dist = mean3_sq_dist[keep_idx]
+            print(f"[densify] capping per-frame additions from {candidate_new} to {MAX_NEW_PER_FRAME}")
+        original_new = new_pt_cld.shape[0]
+        print("Adding {} new gaussians".format(original_new))
+
+        curr_N = params['means3D'].shape[0]
+        base_cap = 4000
+        budget = max(0, 50000 - curr_N)
+        max_new = max(0, min(base_cap, budget))
+        if max_new == 0:
+            print("[densify] budget exhausted; skipping new gaussians")
+            return params, variables, missing_ratio
+        n_new = new_pt_cld.shape[0]
+        if n_new > max_new:
+            sort_idx = torch.argsort(mean3_sq_dist)[:max_new]
+            new_pt_cld = new_pt_cld[sort_idx]
+            mean3_sq_dist = mean3_sq_dist[sort_idx]
+            n_new = max_new
+            print(f'[densify] clipped from {original_new} to {max_new}')
+
+        effective_nr_basis = nr_basis
+        effective_use_distributed = use_distributed_biases
+        if n_new > 1500 and nr_basis > 4:
+            effective_nr_basis = 4
+            effective_use_distributed = True
+
+        new_params = initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,
+                                           nr_basis=effective_nr_basis,
+                                           use_distributed_biases=effective_use_distributed,
+                                           total_timescale=total_timescale,use_deform = use_deform,
+                                           deform_type=deformation_type,
+                                           num_frames = num_frames,random_initialization=random_initialization,
+                                           init_scale=init_scale)
         
 
         # bloat_params = True
@@ -983,13 +1021,23 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
         if use_grn:
             new_params = grn_initialization(grn_model,new_params,new_pt_cld,mean3_sq_dist,curr_data['im'],curr_data['depth'],non_presence_mask,cam = cam)
 
+        if 'logit_opacities' in new_params:
+            with torch.no_grad():
+                if n_new > 2000:
+                    new_params['logit_opacities'].data.clamp_(min=-4.0, max=-2.0)
+                else:
+                    new_params['logit_opacities'].data.clamp_(min=-3.5, max=-1.5)
+
         # # Adding new params happens to all timesteps due to construction of tensors, but they only need to be added to current and future timesteps,
         # # Therefore means,scales and rotations are set to 0 for previous timesteps
         # mask = torch.ones((1,1,new_params['means3D'].shape[-1]),device="cuda")
         # mask[0,0,time_idx-1:] = 0
         params_iter = {}
         for k, v in new_params.items():
-            params_iter[k] = torch.nn.Parameter(torch.cat((params[k], v), dim=0).requires_grad_(True))
+            prev_vals = params[k].detach()
+            new_vals = v.detach()
+            combined = torch.cat((prev_vals, new_vals), dim=0)
+            params_iter[k] = torch.nn.Parameter(combined)
         params_iter['cam_unnorm_rots'] = params['cam_unnorm_rots']
         params_iter['cam_trans'] = params['cam_trans']
         num_pts = params_iter['means3D'].shape[0]
@@ -998,19 +1046,31 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
         variables['max_2D_radius'] = torch.zeros(num_pts, device="cuda").float()
         new_timestep = time_idx*torch.ones(new_pt_cld.shape[0],device="cuda").float()
         variables['timestep'] = torch.cat((variables['timestep'], new_timestep),dim=0)
+        if 'last_seen' in variables:
+            new_last_seen = time_idx * torch.ones(new_pt_cld.shape[0], device="cuda").float()
+            variables['last_seen'] = torch.cat((variables['last_seen'], new_last_seen), dim=0)
+        if 'visibility_hits' in variables:
+            new_hits = torch.zeros(new_pt_cld.shape[0], device="cuda").float()
+            variables['visibility_hits'] = torch.cat((variables['visibility_hits'], new_hits), dim=0)
     else:
         params_iter = params
-    return params_iter, variables
+        missing_ratio = 0.0
+    return params_iter, variables, missing_ratio
 
 def align_shift_and_scale(gt_disp, pred_disp, mask):
 
     ssum = torch.sum(mask, (1, 2))
     valid = ssum > 0
 
+    device = gt_disp.device
+    dtype = gt_disp.dtype
+
     if valid.sum() == 0:
         # Return input as-is or raise a warning
         print("⚠️ Warning: Empty valid mask in align_shift_and_scale")
-        return gt_disp, pred_disp, torch.tensor([0.0]), torch.tensor([1.0]), torch.tensor([0.0]), torch.tensor([1.0])
+        zero = torch.zeros(1, device=device, dtype=dtype)
+        one = torch.ones(1, device=device, dtype=dtype)
+        return gt_disp, pred_disp, zero, one, zero.clone(), one.clone()
     
     # Select valid pixels
     gt_selected = gt_disp[mask].view(valid.sum(), -1)
