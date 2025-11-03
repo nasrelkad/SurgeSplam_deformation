@@ -97,9 +97,27 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
 
 
 def accumulate_mean2d_gradient(variables):
-    variables['means2D_gradient_accum'][variables['seen']] += torch.norm(
-        variables['means2D'].grad[variables['seen'], :2], dim=-1)
-    variables['denom'][variables['seen']] += 1
+    seen = variables.get('seen')
+    if seen is None:
+        return variables
+    accum = variables['means2D_gradient_accum']
+    denom = variables['denom']
+    means2D = variables['means2D']
+    grad = means2D.grad if means2D is not None and means2D.grad is not None else None
+    if grad is None:
+        return variables
+
+    target_len = means2D.shape[0]
+    accum = _match_length_1d(accum, target_len, 0.0)
+    denom = _match_length_1d(denom, target_len, 0.0)
+    if seen.shape[0] != target_len:
+        seen = seen[:target_len]
+    variables['means2D_gradient_accum'] = accum
+    variables['denom'] = denom
+    variables['seen'] = seen
+
+    accum[seen] += torch.norm(grad[seen, :2], dim=-1)
+    denom[seen] += 1
     return variables
 
 
@@ -141,9 +159,11 @@ def remove_points(to_remove, params, variables, optimizer):
     # Boolean mask (True = keep)
     to_keep = ~to_remove
 
-    # Per-point parameter keys (don’t touch camera pose tensors)
+    # Per-point parameter keys (don't touch camera pose tensors or global MLP)
+    # NOTE: t_mu and t_logvar ARE per-Gaussian (shape [G]), include them!
+    # Only skip: camera poses and the endo4dgs MLP weights
     keys = [k for k in params.keys()
-            if isinstance(k, str) and k not in ['cam_unnorm_rots', 'cam_trans']]
+            if isinstance(k, str) and k not in ['cam_unnorm_rots', 'cam_trans', 'endo4dgs_net']]
 
     for k in keys:
         v = params[k]
@@ -164,8 +184,28 @@ def remove_points(to_remove, params, variables, optimizer):
 
         # With optimizer state
         old_param = group['params'][0]
-        # Align lengths to avoid indexing errors
-        min_len = min(old_param.shape[0], to_keep.shape[0])
+        
+        # Safety check: skip if parameter is not per-Gaussian (wrong shape)
+        try:
+            if len(old_param.shape) == 0:
+                # Scalar parameter - skip
+                continue
+            if len(old_param.shape) == 1 and old_param.shape[0] != to_keep.shape[0]:
+                # 1D but wrong size - skip
+                continue
+            if len(old_param.shape) > 2:
+                # Multi-dimensional parameter like MLP weights - skip
+                continue
+            if old_param.shape[0] == 0:
+                # Empty tensor - skip
+                continue
+                
+            # Align lengths to avoid indexing errors
+            min_len = min(old_param.shape[0], to_keep.shape[0])
+        except (IndexError, AttributeError):
+            # Parameter has incompatible shape - skip
+            continue
+            
         idx_mask = to_keep[:min_len]
         old_param = old_param[:min_len]
 
@@ -255,14 +295,27 @@ def prune_gaussians(params, variables, optimizer, iter, prune_dict,use_grn):
 
 def densify(params, variables, optimizer, iter, densify_dict):
     if iter <= densify_dict['stop_after']:
+        num_pts = params['means3D'].shape[0]
+        for key, fill in [
+            ('means2D_gradient_accum', 0.0),
+            ('denom', 0.0),
+            ('max_2D_radius', 0.0),
+        ]:
+            if key in variables and isinstance(variables[key], torch.Tensor):
+                variables[key] = _match_length_1d(variables[key], num_pts, fill)
         variables = accumulate_mean2d_gradient(variables)
         grad_thresh = densify_dict['grad_thresh']
         if (iter >= densify_dict['start_after']) and (iter % densify_dict['densify_every'] == 0):
             grads = variables['means2D_gradient_accum'] / variables['denom']
             grads[grads.isnan()] = 0.0
+            grads = _match_length_1d(grads, num_pts, 0.0)
             to_clone = torch.logical_and(grads >= grad_thresh, (
                         torch.max(torch.exp(params['log_scales']), dim=1).values <= 0.01 * variables['scene_radius']))
-            new_params = {k: v[to_clone] for k, v in params.items() if k not in ['cam_unnorm_rots', 'cam_trans']}
+            new_params = {
+                k: v[to_clone]
+                for k, v in params.items()
+                if k not in ['cam_unnorm_rots', 'cam_trans', 'endo4dgs_net'] and isinstance(v, torch.Tensor)
+            }
             num_new = new_params['means3D'].shape[0] if 'means3D' in new_params else 0
             params = cat_params_to_optimizer(new_params, params, optimizer)
             if num_new > 0:
@@ -285,13 +338,26 @@ def densify(params, variables, optimizer, iter, densify_dict):
                                          torch.max(torch.exp(params['log_scales']), dim=1).values > 0.01 * variables[
                                              'scene_radius'])
             n = densify_dict['num_to_split_into']  # number to split into
-            new_params = {k: v[to_split].repeat(n, 1) for k, v in params.items() if k not in ['cam_unnorm_rots', 'cam_trans']}
-            stds = torch.exp(params['log_scales'])[to_split].repeat(n, 3)
-            means = torch.zeros((stds.size(0), 3), device="cuda")
+            base_tensors = {
+                k: v[to_split]
+                for k, v in params.items()
+                if k not in ['cam_unnorm_rots', 'cam_trans', 'endo4dgs_net'] and isinstance(v, torch.Tensor)
+            }
+            new_params = {}
+            for k, tensor in base_tensors.items():
+                new_params[k] = tensor.repeat_interleave(n, dim=0)
+
+            selected_log_scales = params['log_scales'][to_split]
+            repeated_log_scales = selected_log_scales.repeat_interleave(n, dim=0)
+            stds = torch.exp(repeated_log_scales)
+            means = torch.zeros((stds.size(0), 3), device=stds.device, dtype=stds.dtype)
             samples = torch.normal(mean=means, std=stds)
-            rots = build_rotation(params['unnorm_rotations'][to_split]).repeat(n, 1, 1)
+
+            base_rots = build_rotation(params['unnorm_rotations'][to_split])
+            rots = base_rots.repeat_interleave(n, dim=0)
+
             new_params['means3D'] += torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1)
-            new_params['log_scales'] = torch.log(torch.exp(new_params['log_scales']) / (0.8 * n))
+            new_params['log_scales'] = torch.log(torch.exp(repeated_log_scales) / (0.8 * n))
             num_split = new_params['means3D'].shape[0] if 'means3D' in new_params else 0
             params = cat_params_to_optimizer(new_params, params, optimizer)
             if num_split > 0:
@@ -377,3 +443,11 @@ def get_expon_lr_func(
         return delay_rate * log_lerp
 
     return helper
+def _match_length_1d(tensor: torch.Tensor, target_len: int, fill_value: float = 0.0) -> torch.Tensor:
+    if tensor.shape[0] == target_len:
+        return tensor
+    if tensor.shape[0] > target_len:
+        return tensor[:target_len]
+    pad_shape = (target_len - tensor.shape[0],) + tensor.shape[1:]
+    pad = torch.full(pad_shape, fill_value, device=tensor.device, dtype=tensor.dtype)
+    return torch.cat((tensor, pad), dim=0)

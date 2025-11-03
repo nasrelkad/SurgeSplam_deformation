@@ -18,7 +18,7 @@ from diff_gaussian_rasterization import GaussianRasterizationSettings as Camera
 
 from utils.common_utils import seed_everything
 from utils.recon_helpers import setup_camera
-from utils.slam_helpers import get_depth_and_silhouette, deform_gaussians as deform_gaussians_eval
+from utils.slam_helpers import get_depth_and_silhouette, deform_gaussians as deform_gaussians_eval, rehydrate_endo4dgs
 from utils.slam_external import build_rotation
 
 
@@ -106,7 +106,7 @@ def _qmul(q1, q2):
                         w1*y2 - x1*z2 + y1*w2 + z1*x2,
                         w1*z2 + x1*y2 - y1*x2 + z1*w2], dim=-1)
                         
-def deform_gaussians(params, time, deform_grad, N=5,deformation_type = 'gaussian'):
+def _legacy_deform_gaussians(params, time, deform_grad, N=5,deformation_type = 'gaussian'):
     """
     Calculate deformations using the N closest basis functions based on |time - bias|.
 
@@ -244,6 +244,19 @@ def deform_gaussians(params, time, deform_grad, N=5,deformation_type = 'gaussian
 
     return xyz, rots, scales,opacities, colors
 
+
+def deform_gaussians(params, time, deform_grad, N=5, deformation_type='gaussian'):
+    """
+    Compatibility wrapper around the shared deformation registry.
+    """
+    return deform_gaussians_eval(
+        params,
+        time,
+        deform_grad,
+        N=N,
+        deformation_type=deformation_type,
+    )
+
 def load_camera(cfg, scene_path):
     all_params = dict(np.load(scene_path, allow_pickle=True))
     params = all_params
@@ -263,6 +276,8 @@ def load_scene_data(scene_path, first_frame_w2c, intrinsics, time_idx,deformatio
     # Load Scene Data
     print(f"Loading data from {scene_path}")
     all_params = dict(np.load(scene_path, allow_pickle=True))
+    net_state = all_params.pop('endo4dgs_net_state', None)
+    net_meta = all_params.pop('endo4dgs_net_meta', None)
     intrinsics = torch.tensor(intrinsics).cuda().float()
     first_frame_w2c = torch.tensor(first_frame_w2c).cuda().float()
     try:
@@ -291,6 +306,14 @@ def load_scene_data(scene_path, first_frame_w2c, intrinsics, time_idx,deformatio
                 params[key] = torch.tensor(all_params[key]).cuda()
             except:
                 params[key] = [torch.tensor(all_params[key][i]).cuda() for i in range(all_params[key].shape[0])]
+
+    if deformation_type == 'endo4dgs':
+        params = rehydrate_endo4dgs(
+            params,
+            state=net_state,
+            meta=net_meta,
+            device='cuda'
+        )
 
     all_w2cs = []
     num_t = params['cam_unnorm_rots'].shape[-1]

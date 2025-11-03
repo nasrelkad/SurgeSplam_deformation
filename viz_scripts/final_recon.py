@@ -18,6 +18,7 @@ from utils.slam_helpers import (
     transformed_params2depthplussilhouette,
     xyzt_time_gate,
     apply_xyzt_gate,
+    rehydrate_endo4dgs,
 )
 
 """
@@ -37,7 +38,11 @@ Usage:
 def load_params(scene_path, device="cuda"):
     data = np.load(scene_path, allow_pickle=True)
     params = {}
+    net_state = data['endo4dgs_net_state'] if 'endo4dgs_net_state' in data.files else None
+    net_meta = data['endo4dgs_net_meta'] if 'endo4dgs_net_meta' in data.files else None
     for k in data.files:
+        if k in ('endo4dgs_net_state', 'endo4dgs_net_meta'):
+            continue
         arr = data[k]
         if isinstance(arr, np.ndarray):
             t = torch.from_numpy(arr).to(device)
@@ -47,6 +52,13 @@ def load_params(scene_path, device="cuda"):
             params[k] = t
         else:
             params[k] = arr
+    if net_state is not None:
+        params = rehydrate_endo4dgs(
+            params,
+            state=net_state,
+            meta=net_meta,
+            device=device
+        )
     return params
 
 

@@ -8,9 +8,9 @@ _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _BASE_DIR)
 
 import numpy as np
-from utils.slam_helpers import transform_to_frame,transformed_params2depthplussilhouette,transformed_params2rendervar,transformed_GRNparams2rendervar,transformed_GRNparams2depthplussilhouette
+from utils.slam_helpers import transform_to_frame,transformed_params2depthplussilhouette,transformed_params2rendervar,transformed_GRNparams2rendervar,transformed_GRNparams2depthplussilhouette, deform_gaussians as deform_gaussians_eval, rehydrate_endo4dgs
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
-from scripts.main_SurgeSplat import deform_gaussians, setup_camera
+from scripts.main_SurgeSplat import setup_camera
 import torch
 from PIL import Image
 from importlib.machinery import SourceFileLoader
@@ -19,7 +19,7 @@ import time
 
 
 
-def deform_gaussians(params, time, deform_grad, N=5,deformation_type = 'gaussian'):
+def _legacy_deform_gaussians(params, time, deform_grad, N=5,deformation_type = 'gaussian'):
     """
     Calculate deformations using the N closest basis functions based on |time - bias|.
 
@@ -123,6 +123,18 @@ def deform_gaussians(params, time, deform_grad, N=5,deformation_type = 'gaussian
     return xyz, rots, scales,opacities, colors
 
 
+def deform_gaussians(params, time, deform_grad, N=5, deformation_type='gaussian'):
+    """
+    Compatibility wrapper around the shared deformation registry.
+    """
+    return deform_gaussians_eval(
+        params,
+        time,
+        deform_grad,
+        N=N,
+        deformation_type=deformation_type,
+    )
+
 
 def generate_plots(args,scene_path):
     intrinsics = torch.tensor([[199.6883,   0.0000, 166.3290],
@@ -140,14 +152,25 @@ def generate_plots(args,scene_path):
     print('Loading parameters from {}'.format(scene_path))
     start = time.time()
     params_np = np.load(scene_path,allow_pickle=True)
+    net_state = params_np['endo4dgs_net_state'] if 'endo4dgs_net_state' in params_np.files else None
+    net_meta = params_np['endo4dgs_net_meta'] if 'endo4dgs_net_meta' in params_np.files else None
     print('Parameters loaded, loading took {} s'.format((start-time.time())*1000))
     params={}
     for key in params_np.keys():
+        if key in ('endo4dgs_net_state', 'endo4dgs_net_meta'):
+            continue
         print("Loading {}".format(key))
         try:
             params[key] = torch.tensor(params_np[key]).cuda()
         except:
             params[key] = [torch.tensor(params_np[key][i]).cuda() for i in range(params_np[key].shape[0])]
+    if net_state is not None:
+        params = rehydrate_endo4dgs(
+            params,
+            state=net_state,
+            meta=net_meta,
+            device='cuda'
+        )
     for i in range(params['cam_trans'].shape[-1]):
         params['cam_trans'][...,i][...,-1] += 0
 

@@ -4,6 +4,8 @@ import shutil
 import sys
 import time
 from importlib.machinery import SourceFileLoader
+import json
+from datetime import datetime
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -35,9 +37,10 @@ from utils.recon_helpers import setup_camera, energy_mask
 from utils.slam_helpers import (
     transformed_params2rendervar, transformed_params2depthplussilhouette,
     transform_to_frame, l1_loss_v1, matrix_to_quaternion,
-    transformed_GRNparams2depthplussilhouette,transformed_GRNparams2rendervar,
-    add_new_gaussians,grn_initialization,deform_gaussians,initialize_deformations,initialize_new_params,grn_initialization,
-    get_mask,align_shift_and_scale, initialize_cv_deformations, initialize_xyzt, xyzt_time_gate, apply_xyzt_gate
+    transformed_GRNparams2depthplussilhouette, transformed_GRNparams2rendervar,
+    add_new_gaussians, grn_initialization, deform_gaussians, initialize_new_params,
+    get_deformation_model, get_mask, align_shift_and_scale, rehydrate_endo4dgs,
+    initialize_xyzt, xyzt_time_gate, apply_xyzt_gate
 )
 from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, densify, remove_points
 from utils.vis_utils import plot_video
@@ -165,6 +168,105 @@ def _update_scene_state(variables, motion_state, added_this_frame, missing_ratio
             state["recent_big_adds"] = 0
 
     return state
+
+
+RENDER_DEBUG_LOG: Optional[str] = None
+_RENDER_DEBUG_DIR_CREATED = False
+RENDER_DEBUG_MIN_DELTA = 5000
+RENDER_DEBUG_FORCE_THRESHOLD = 150000
+RENDER_DEBUG_FORCE_DIFF = 2000
+RENDER_DEBUG_FORCE_GAP = 1
+
+
+def _count_gaussians_from_rendervar(rendervar: Dict) -> Optional[int]:
+    for key in ('means3D', 'means', 'xyz', 'positions', 'means2D'):
+        if key in rendervar:
+            val = rendervar[key]
+            if torch.is_tensor(val):
+                return int(val.shape[0])
+    return None
+
+
+def _write_render_debug(entry: Dict) -> None:
+    global RENDER_DEBUG_LOG, _RENDER_DEBUG_DIR_CREATED
+    if not RENDER_DEBUG_LOG:
+        return
+    try:
+        if not _RENDER_DEBUG_DIR_CREATED:
+            os.makedirs(os.path.dirname(RENDER_DEBUG_LOG), exist_ok=True)
+            _RENDER_DEBUG_DIR_CREATED = True
+        with open(RENDER_DEBUG_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as exc:
+        print(f"[render-debug] logging failed: {exc}")
+
+
+def _maybe_log_render_state(
+    tag: str,
+    rendervar: Dict,
+    params: Dict,
+    variables: Dict,
+    iter_time_idx: int,
+    phase: str,
+    gate_thresh: float,
+    frame_id: Optional[int] = None,
+) -> None:
+    num_gauss = _count_gaussians_from_rendervar(rendervar)
+    if num_gauss is None:
+        return
+    prev_best = int(variables.get('render_debug_max_gauss', 0))
+    new_record = num_gauss > prev_best
+    delta = num_gauss - prev_best
+    log_on_large = num_gauss >= RENDER_DEBUG_FORCE_THRESHOLD
+    should_log = False
+    if new_record:
+        if prev_best == 0 or delta >= RENDER_DEBUG_MIN_DELTA or log_on_large:
+            should_log = True
+    if num_gauss >= RENDER_DEBUG_FORCE_THRESHOLD:
+        last_iter = int(variables.get('render_debug_last_iter', -9999))
+        last_count = int(variables.get('render_debug_last_count', 0))
+        if abs(num_gauss - last_count) >= RENDER_DEBUG_FORCE_DIFF or (iter_time_idx - last_iter) >= RENDER_DEBUG_FORCE_GAP:
+            should_log = True
+    frame_key = f"render_debug_last_frame_{phase}"
+    last_logged_frame = variables.get(frame_key, -1)
+    if frame_id is not None and frame_id != last_logged_frame:
+        should_log = True
+    variables['render_debug_max_gauss'] = max(prev_best, num_gauss)
+    if not should_log:
+        return
+    variables['render_debug_last_iter'] = int(iter_time_idx)
+    variables['render_debug_last_count'] = int(num_gauss)
+    total_gauss = None
+    means = params.get('means3D')
+    if torch.is_tensor(means):
+        total_gauss = int(means.shape[0])
+    added = variables.get('added_this_frame')
+    if isinstance(added, torch.Tensor):
+        added = float(added.item())
+    elif isinstance(added, (int, float)):
+        added = float(added)
+    else:
+        added = None if added is None else added
+    entry = {
+        "ts": datetime.now().isoformat(timespec="milliseconds"),
+        "event": tag,
+        "phase": phase,
+        "iter_time_idx": int(iter_time_idx),
+        "num_gaussians": int(num_gauss),
+        "total_gaussians": total_gauss,
+        "gate_thresh": float(gate_thresh),
+        "has_time_gate": bool('t_mu' in params),
+        "scene_mode": variables.get('scene_state', {}).get('mode'),
+        "added_this_frame": added,
+        "new_record": new_record,
+        "delta_since_last": int(delta),
+        "frame_id": int(frame_id) if frame_id is not None else None,
+    }
+    _write_render_debug(entry)
+    if new_record or num_gauss >= 600000:
+        print(f"[render-debug] {phase} render preparing {num_gauss} gaussians at iter {iter_time_idx}")
+    if frame_id is not None:
+        variables[frame_key] = int(frame_id)
 
 
 def _prob_to_logit(prob: float, eps: float = 1e-4) -> float:
@@ -432,6 +534,13 @@ def get_dataset(config_dict, basedir, sequence, **kwargs):
 def _set_requires_grad_for_phase(params_dict, lr_dict):
     for name, tensor in params_dict.items():
         if not isinstance(name, str):  # safety
+            continue
+        if isinstance(tensor, torch.nn.Module):
+            lr = lr_dict.get(name, lr_dict.get('deform_weights', 0.0))
+            req = lr is not None and lr > 0.0
+            for param in tensor.parameters():
+                if param.requires_grad != req:
+                    param.requires_grad_(req)
             continue
         if not isinstance(tensor, torch.Tensor):
             continue
@@ -727,16 +836,22 @@ def initialize_simple_deformations(params, num_frames):
 
     return params
 
-def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification=True,use_deforms = True,deform_type = 'gaussian',nr_basis = 10,use_distributed_biases = False,total_timescale = None,cam = None,random_initialization = False,init_scale = 0.1):
+def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification=True, use_deforms=True,
+                      deform_type='gaussian', nr_basis=10, use_distributed_biases=False, total_timescale=None,
+                      cam=None, random_initialization=False, init_scale=0.1):
+    deform_model = get_deformation_model(deform_type) if use_deforms else None
     num_pts = init_pt_cld.shape[0]
     means3D = init_pt_cld[:, :3] # [num_gaussians, 3]
     unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1)) # [num_gaussians, 3]
     logit_opacities = torch.zeros((num_pts, 1), dtype=torch.float, device="cuda")
+    device = logit_opacities.device
+    unnorm_rots_tensor = torch.as_tensor(unnorm_rots, dtype=torch.float32, device=device)
+    means3D_tensor = torch.as_tensor(means3D, dtype=torch.float32, device=device)
     if not random_initialization:
         params = {
             'means3D': means3D,
             'rgb_colors': init_pt_cld[:, 3:6],
-            'unnorm_rotations': torch.tensor(unnorm_rots,dtype=torch.float).cuda(),
+            'unnorm_rotations': unnorm_rots_tensor.clone(),
             'logit_opacities': logit_opacities,
             'log_scales': torch.tile(torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 1 if use_simplification else 3)),
         }
@@ -744,27 +859,34 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification
         params = {
             'means3D': means3D,
             'rgb_colors': init_pt_cld[:, 3:6],
-            'unnorm_rotations': torch.zeros_like(torch.tensor(unnorm_rots),dtype=torch.float).cuda(),
+            'unnorm_rotations': torch.zeros_like(unnorm_rots_tensor),
             'logit_opacities': logit_opacities,
-            'log_scales': torch.ones_like(torch.tensor(means3D),dtype=torch.float).cuda()*init_scale,
+            'log_scales': torch.full_like(means3D_tensor, float(init_scale)),
         }
 
-    
-
-
-                                                                                           
     if not use_simplification:
         params['feature_rest'] = torch.zeros(num_pts, 45) # set SH degree 3 fixed
-    if use_deforms:
-        if deform_type in ('gaussian', 'deformgs'):
-            params = initialize_deformations(
-                params,
-                nr_basis,
-                use_distributed_biases=use_distributed_biases,
-                total_timescale=total_timescale
-            )
-        elif deform_type == 'cv':
-            params = initialize_cv_deformations(params)
+    deform_cfg = {
+        'nr_basis': nr_basis,
+        'use_distributed_biases': use_distributed_biases,
+        'total_timescale': total_timescale,
+        'num_frames': num_frames,
+    }
+    if use_deforms and deform_model is not None:
+        params = deform_model.init_scene(
+            params,
+            deform_cfg=deform_cfg,
+            total_timescale=total_timescale,
+            num_frames=num_frames,
+        )
+
+    if use_deforms and deform_model is not None and deform_model.name == 'endo4dgs':
+        device = params['means3D'].device if isinstance(params['means3D'], torch.Tensor) else 'cuda'
+        params = rehydrate_endo4dgs(
+            params,
+            config=deform_cfg,
+            device=device,
+        )
 
  
     # Initialize a single gaussian trajectory to model the camera poses relative to the first frame
@@ -775,12 +897,16 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification
 
 
         
+    device = params['means3D'].device if isinstance(params['means3D'], torch.Tensor) else torch.device('cuda')
     for k, v in params.items():
+        if isinstance(v, torch.nn.Module):
+            params[k] = v.to(device)
+            continue
         # Check if value is already a torch tensor
         if not isinstance(v, torch.Tensor):
-            params[k] = torch.nn.Parameter(torch.tensor(v).cuda().float().contiguous().requires_grad_(True))
+            params[k] = torch.nn.Parameter(torch.as_tensor(v, device=device).float().contiguous().requires_grad_(True))
         else:
-            params[k] = torch.nn.Parameter(v.cuda().float().contiguous().requires_grad_(True))
+            params[k] = torch.nn.Parameter(v.to(device=device, dtype=torch.float32).contiguous().requires_grad_(True))
 
     variables = {'max_2D_radius': torch.zeros(params['means3D'].shape[0]).cuda().float(),
                  'means2D_gradient_accum': torch.zeros(params['means3D'].shape[0]).cuda().float(),
@@ -803,15 +929,18 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, use_simplification
         "recent_big_adds": 0,
     }
     variables["scene_state"] = scene_state
-    # If we use simple deformations, we want a list of all parameters for easier optimization
-    if use_deforms:
-        if deform_type =='simple':
-            param_list = [params for _ in range(num_frames)]
-        else:
-            param_list = params
+
+    if use_deforms and deform_model is not None:
+        param_container = deform_model.build_container(
+            params,
+            deform_cfg=deform_cfg,
+            num_frames=num_frames,
+            total_timescale=total_timescale,
+        )
     else:
-        param_list = params
-    return param_list, variables
+        param_container = params
+
+    return param_container, variables
 
 
 def initialize_optimizer(params, lrs_dict):
@@ -827,10 +956,21 @@ def initialize_optimizer(params, lrs_dict):
             #print(f"[initialize_optimizer] Skipping non-string param key: {k!r}")
             continue
 
+        if isinstance(v, torch.nn.Module):
+            lr = lrs_dict.get(k, lrs_dict.get('deform_weights', 0.0))
+            if lr is None or lr == 0.0:
+                for p in v.parameters():
+                    p.requires_grad_(False)
+                continue
+            param_groups.append({'params': list(v.parameters()), 'name': k, 'lr': float(lr)})
+            continue
+
         lr = lrs_dict.get(k, None)
-        if lr is None:
+        if lr is None or lr == 0.0:
             # No LR provided: skip (or set lr = 0.0 to freeze instead)
             print(f"[initialize_optimizer] No LR for '{k}', skipping this param.")
+            if isinstance(v, torch.Tensor):
+                v.requires_grad_(False)
             continue
 
         param_groups.append({'params': [v], 'name': k, 'lr': float(lr)})
@@ -1084,8 +1224,34 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
     # Initialize Render Variables
     # print()
     time_gate = None
-    if 't_mu' in params:    
+    if 't_mu' in params:
         time_gate = xyzt_time_gate(params, float(iter_time_idx))     # time index of this frame
+
+    # loose frustum cull to avoid huge renders
+    z_vals = transformed_pts[:, 2]
+    z_min, z_max = 5e-4, 6.0
+    valid_z = (z_vals > z_min) & (z_vals < z_max)
+    xy_norm = torch.linalg.norm(transformed_pts[:, :2] / z_vals.unsqueeze(1).clamp_min(1e-4), dim=1)
+    fov_radius = 7.0
+    valid_fov = xy_norm < fov_radius
+    frustum_keep = valid_z & valid_fov
+    if frustum_keep.sum().item() == 0:
+        frustum_keep = torch.ones_like(frustum_keep, dtype=torch.bool)
+
+    transformed_pts = transformed_pts[frustum_keep]
+    local_means     = local_means[frustum_keep]
+    local_rots      = local_rots[frustum_keep]
+    local_scales    = local_scales[frustum_keep]
+    local_opacities = local_opacities[frustum_keep]
+    local_colors    = local_colors[frustum_keep]
+    if time_gate is not None:
+        time_gate = time_gate[frustum_keep]
+
+    render_device = transformed_pts.device
+    if torch.is_tensor(curr_data.get('im')) and curr_data['im'].device != render_device:
+        curr_data['im'] = curr_data['im'].to(render_device)
+    if torch.is_tensor(curr_data.get('depth')) and curr_data['depth'].device != render_device:
+        curr_data['depth'] = curr_data['depth'].to(render_device)
 
     # ---- predicted-depth-aware cull (training) ----
     scene_state = variables.get("scene_state", {"mode": "slam"})
@@ -1198,17 +1364,35 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
 
     if use_grn:
         rendervar = transformed_GRNparams2rendervar(params, transformed_pts,local_rots,local_scales,local_opacities,local_colors)
-        depth_sil_rendervar = transformed_GRNparams2depthplussilhouette(params, curr_data['w2c'],
-                                                                    transformed_pts,local_rots,local_scales,local_opacities)
+        depth_sil_rendervar = transformed_GRNparams2depthplussilhouette(
+            params,
+            curr_data['w2c'],
+            transformed_pts,
+            local_rots,
+            local_scales,
+            local_opacities,
+            camera_space=True,
+        )
     else:
         rendervar = transformed_params2rendervar(params, transformed_pts,local_rots,local_scales,local_opacities,local_colors)
-        depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
-                                                                    transformed_pts,local_rots,local_scales,local_opacities)
+        depth_sil_rendervar = transformed_params2depthplussilhouette(
+            params,
+            curr_data['w2c'],
+            transformed_pts,
+            local_rots,
+            local_scales,
+            local_opacities,
+            camera_space=True,
+        )
     
     # Apply temporal gating if available
     if time_gate is not None:
         rendervar = apply_xyzt_gate(rendervar, time_gate, gate_thresh=gate_thresh)
         depth_sil_rendervar = apply_xyzt_gate(depth_sil_rendervar, time_gate, gate_thresh=gate_thresh)
+        if "opacities" in rendervar:
+            rendervar["opacities"] = torch.clamp(rendervar["opacities"], min=0.03, max=0.99)
+        if "opacities" in depth_sil_rendervar:
+            depth_sil_rendervar["opacities"] = torch.clamp(depth_sil_rendervar["opacities"], min=0.03, max=0.99)
     
     # Inter-frame consistency loss
     prev_means = variables.get('prev_local_means', None)
@@ -1224,6 +1408,26 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
             losses['inter_frame'] = ((curr_means - prev_means_trim) ** 2 * gate_weights.view(-1, 1)).sum(-1).mean()
 
     # RGB Rendering
+    phase_tag = 'tracking' if tracking else ('mapping' if mapping else 'other')
+    _maybe_log_render_state(
+        tag="pre_rgb_render",
+        rendervar=rendervar,
+        params=params,
+        variables=variables,
+        iter_time_idx=iter_time_idx,
+        phase=phase_tag,
+        gate_thresh=gate_thresh,
+        frame_id=curr_data.get('id') if isinstance(curr_data, dict) else None,
+    )
+    scales_check = rendervar.get('scales')
+    if scales_check is not None and scales_check.shape[-1] not in (3, 9):
+        _write_render_debug({
+            "event": "scale_shape_mismatch",
+            "shape": list(scales_check.shape),
+            "phase": phase_tag,
+            "iter": int(iter_time_idx),
+        })
+        raise RuntimeError(f"render scales shape mismatch: {scales_check.shape}")
     try:
         rendervar['means2D'].retain_grad()
     except:
@@ -1232,6 +1436,8 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
  
 
     im, radius, _ = Renderer(raster_settings=curr_data['cam'])(**rendervar)
+    radius = torch.nan_to_num(radius, nan=0.0, posinf=4096.0, neginf=0.0)
+    radius = torch.clamp(radius, min=0.0, max=4096.0)
 
     inter_w = float(loss_weights.get('inter_frame_rgb', 0.0))
     if inter_w > 0.0 and iter_time_idx > 0:
@@ -1255,6 +1461,8 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
             if 't_mu' in params:
                 prev_gate_full = xyzt_time_gate(params, float(iter_time_idx - 1))
                 prev_rendervar = apply_xyzt_gate(prev_rendervar, prev_gate_full, gate_thresh=gate_thresh)
+                if "opacities" in prev_rendervar:
+                    prev_rendervar["opacities"] = torch.clamp(prev_rendervar["opacities"], min=0.03, max=0.99)
 
             prev_im, _, _ = Renderer(raster_settings=curr_data['cam'])(**prev_rendervar)
 
@@ -1277,6 +1485,8 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
     # Mask with valid depth values (accounts for outlier depth values)
     nan_mask = (~torch.isnan(depth)) & (~torch.isnan(uncertainty))
     bg_mask = energy_mask(curr_data['im'])
+    if bg_mask.device != depth.device:
+        bg_mask = bg_mask.to(depth.device)
     if ignore_outlier_depth_loss:
         depth_error = torch.abs(curr_data['depth'] - depth) * (curr_data['depth'] > 0)
         mask = (depth_error < 20*depth_error.mean())
@@ -1289,11 +1499,19 @@ def get_loss(params, params_initial, curr_data, variables, iter_time_idx, loss_w
     if tracking and use_sil_for_loss:
         mask = mask & presence_sil_mask
     if not use_gt_depth:
-        rendered_depth_aligned,predicted_depth_aligned,_,_,_,_ = align_shift_and_scale(depth,curr_data['depth'],mask)
-        # rendered_depth_aligned = (depth-depth.min())/(depth.max()-depth.min())+0.1
-        # predicted_depth_aligned = (curr_data['depth']-curr_data['depth'].min())/(curr_data['depth'].max()-curr_data['depth'].min())+0.1
-        # rendered_depth_aligned = depth
-        # predicted_depth_aligned = curr_data['depth']
+        if mask.any():
+            if mask.any():
+                rendered_depth_aligned, predicted_depth_aligned, _, _, _, _ = align_shift_and_scale(
+                    depth,
+                    curr_data['depth'],
+                    mask,
+                )
+            else:
+                rendered_depth_aligned = depth
+                predicted_depth_aligned = curr_data['depth']
+        else:
+            rendered_depth_aligned = depth
+            predicted_depth_aligned = curr_data['depth']
     
     if False:
         fig,ax = plt.subplots(2,4)
@@ -1610,6 +1828,14 @@ def initialize_camera_pose(params, curr_time_idx, forward_prop, motion_state: Op
     return params
 
 def optimize_initialization(params,params_init,curr_data,num_iters_initialization,variables,iter_time_idx,config, gate_override: Optional[float] = None):
+    if config['deforms']['use_deformations'] and config['deforms']['deform_type'] == 'endo4dgs':
+        if not isinstance(params.get('endo4dgs_net', None), torch.nn.Module):
+            params = rehydrate_endo4dgs(
+                params,
+                config=config['deforms'],
+                device=config.get('primary_device', 'cuda')
+            )
+
     optimizer = initialize_optimizer(params,config['GRN']['random_initialization_lrs'])
     iter = 0
     save_idx = 0
@@ -1625,6 +1851,10 @@ def optimize_initialization(params,params_init,curr_data,num_iters_initializatio
                     tracking_iteration=iter,use_gt_depth = config['depth']['use_gt_depth'],save_idx=None,gaussian_deformations=config['deforms']['use_deformations'],
                     use_grn = config['GRN']['use_grn'],deformation_type = config['deforms']['deform_type'], gate_thresh = active_gate_thresh)
         loss.backward()
+        
+        # Add gradient clipping to prevent NaN
+        torch.nn.utils.clip_grad_norm_(optimizer.param_groups[0]['params'], max_norm=1.0)
+        
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
         save_idx +=1
@@ -1665,6 +1895,18 @@ def rgbd_slam(config: dict):
     output_dir = os.path.join(config["workdir"], config["run_name"])
     eval_dir = os.path.join(output_dir, "eval")
     os.makedirs(eval_dir, exist_ok=True)
+    logs_dir = os.path.join(output_dir, "logs")
+    os.makedirs(logs_dir, exist_ok=True)
+
+    global RENDER_DEBUG_LOG, _RENDER_DEBUG_DIR_CREATED
+    RENDER_DEBUG_LOG = os.path.join(logs_dir, "render_debug.log")
+    _RENDER_DEBUG_DIR_CREATED = True
+    with open(RENDER_DEBUG_LOG, "w", encoding="utf-8") as f:
+        f.write(json.dumps({
+            "ts": datetime.now().isoformat(timespec="milliseconds"),
+            "event": "start",
+            "workdir": output_dir
+        }) + "\n")
 
     # Get Device
     device = torch.device(config["primary_device"])
@@ -1734,7 +1976,6 @@ def rgbd_slam(config: dict):
 
     if config['GRN']['use_grn']:
         print('Using GRN for initialization')
-        
 
         grn_model = GaussianRegressionNetwork().cuda()
         grn_model.load_state_dict(torch.load(config['GRN']['model_path']))
@@ -1742,6 +1983,15 @@ def rgbd_slam(config: dict):
         grn_model.requires_grad = False
     else:
         grn_model = None
+
+    maintenance_cfg = config.get('gaussian_maintenance', {})
+    log_scale_min = float(maintenance_cfg.get('log_scale_min', -3.0))
+    log_scale_max = float(maintenance_cfg.get('log_scale_max', 3.0))
+
+    def clamp_log_scales(tensor):
+        if torch.is_tensor(tensor):
+            return torch.clamp(tensor, min=log_scale_min, max=log_scale_max)
+        return tensor
 
 
 
@@ -1812,6 +2062,12 @@ def rgbd_slam(config: dict):
                                                                         use_deforms=config['deforms']['use_deformations'],
                                                                         deform_type=config['deforms']['deform_type'],
                                                                         use_grn = config['GRN']['use_grn'])    
+        if config['deforms']['use_deformations'] and config['deforms']['deform_type'] == 'endo4dgs':
+            params = rehydrate_endo4dgs(
+                params,
+                config=config['deforms'],
+                device=config.get('primary_device', 'cuda')
+            )
 
 
     else:
@@ -1881,6 +2137,12 @@ def rgbd_slam(config: dict):
                                                                             reduce_gaussians = config['gaussian_reduction']['reduce_gaussians'],
                                                                             reduction_type = config['gaussian_reduction']['reduction_type'],
                                                                             reduction_fraction=config['gaussian_reduction']['reduction_fraction'] )        
+        if config['deforms']['use_deformations'] and config['deforms']['deform_type'] == 'endo4dgs':
+            params = rehydrate_endo4dgs(
+                params,
+                config=config['deforms'],
+                device=config.get('primary_device', 'cuda')
+            )
         
     params = initialize_xyzt(
             params,
@@ -1943,8 +2205,18 @@ def rgbd_slam(config: dict):
         checkpoint_time_idx = config['checkpoint_time_idx']
         print(f"Loading Checkpoint for Frame {checkpoint_time_idx}")
         ckpt_path = os.path.join(config['workdir'], config['run_name'], f"params{checkpoint_time_idx}.npz")
-        params = dict(np.load(ckpt_path, allow_pickle=True))
-        params = {k: torch.tensor(params[k]).cuda().float().requires_grad_(True) for k in params.keys()}
+        raw_params = dict(np.load(ckpt_path, allow_pickle=True))
+        net_state = raw_params.pop('endo4dgs_net_state', None)
+        net_meta = raw_params.pop('endo4dgs_net_meta', None)
+        params = {k: torch.tensor(raw_params[k]).cuda().float().requires_grad_(True) for k in raw_params.keys()}
+        if config['deforms']['use_deformations'] and config['deforms']['deform_type'] == 'endo4dgs':
+            params = rehydrate_endo4dgs(
+                params,
+                config=config['deforms'],
+                state=net_state,
+                meta=net_meta,
+                device=config.get('primary_device', 'cuda')
+            )
         variables['max_2D_radius'] = torch.zeros(params['means3D'].shape[0]).cuda().float()
         variables['means2D_gradient_accum'] = torch.zeros(params['means3D'].shape[0]).cuda().float()
         variables['denom'] = torch.zeros(params['means3D'].shape[0]).cuda().float()
@@ -1972,7 +2244,13 @@ def rgbd_slam(config: dict):
                 #color = color.permute(2, 0, 1) / 255
                 color = to01(color)
                 depth = depth.permute(2, 0, 1)
-                curr_keyframe = {'id': time_idx, 'est_w2c': curr_w2c, 'color': color, 'depth': depth}
+                curr_keyframe = {
+                    'id': time_idx,
+                    'est_w2c': curr_w2c,
+                    'gt_w2c': gt_w2c.detach().cpu(),
+                    'color': color,
+                    'depth': depth,
+                }
                 # Add to keyframe list
                 keyframe_list.append(curr_keyframe)
     else:
@@ -1980,6 +2258,8 @@ def rgbd_slam(config: dict):
     
     # timer.lap("all the config")
     added_new_gaussians = []
+    deformations_enabled = config['deforms']['use_deformations']
+    deform_model = get_deformation_model(config['deforms']['deform_type']) if deformations_enabled else None
 
 
 
@@ -2076,7 +2356,7 @@ def rgbd_slam(config: dict):
         # plt.savefig(f'./scripts/plots/input_depth/{time_idx}.png')
         # plt.close()
         curr_data = {'cam': cam, 'im': color, 'depth': depth, 'id': iter_time_idx, 'intrinsics': intrinsics, 
-                     'w2c': first_frame_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
+                     'w2c': gt_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
 
         
         # Initialize Data for Tracking
@@ -2086,7 +2366,7 @@ def rgbd_slam(config: dict):
             tracking_color = to01(tracking_color)
             tracking_depth = tracking_depth.permute(2, 0, 1)
             tracking_curr_data = {'cam': tracking_cam, 'im': tracking_color, 'depth': tracking_depth, 'id': iter_time_idx,
-                                  'intrinsics': tracking_intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
+                                  'intrinsics': tracking_intrinsics, 'w2c': gt_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
         else:
             tracking_curr_data = curr_data
 
@@ -2128,14 +2408,7 @@ def rgbd_slam(config: dict):
             # Keep Track of Best Candidate Rotation & Translation
             candidate_cam_unnorm_rot = params_iter['cam_unnorm_rots'][..., time_idx].detach().clone()
             candidate_cam_tran = params_iter['cam_trans'][..., time_idx].detach().clone()
-            if config['deforms']['use_deformations'] and config['deforms']['deform_type'] == 'gaussian':
-                candidate_deform_biases = params_iter['deform_biases']
-                candidate_deform_weights = params_iter['deform_weights']
-                candidate_deform_stds = params_iter['deform_stds']
-            elif config['deforms']['use_deformations'] and config['deforms']['deform_type'] == 'simple':
-                candidate_means3D = params_iter['means3D'].detach().clone()
-                candidate_unnorm_rots = params_iter['unnorm_rotations'].detach().clone()
-                candidate_log_scales = params_iter['log_scales'].detach().clone()
+            candidate_deform_state = deform_model.snapshot(params_iter) if deform_model is not None else None
             current_min_loss = float(1e20)
             # Tracking Optimization
             iter = 0
@@ -2165,6 +2438,10 @@ def rgbd_slam(config: dict):
                 # stds_grad = params['deform_stds'].grad.mean()
                 # cam_pos_grad = params['cam_trans'].grad.mean()
                 # cam_rot_grad = params['cam_unnorm_rots'].grad.mean()
+                
+                # Add gradient clipping to prevent NaN
+                torch.nn.utils.clip_grad_norm_(optimizer.param_groups[0]['params'], max_norm=1.0)
+                
                 optimizer.step()
 
                 optimizer.zero_grad(set_to_none=True)
@@ -2177,14 +2454,8 @@ def rgbd_slam(config: dict):
                         current_min_loss = loss
                         candidate_cam_unnorm_rot = params_iter['cam_unnorm_rots'][..., time_idx].detach().clone()
                         candidate_cam_tran = params_iter['cam_trans'][..., time_idx].detach().clone()
-                        if config['deforms']['use_deformations'] and config['deforms']['deform_type'] == 'gaussian':
-                            candidate_deform_biases = params_iter['deform_biases']
-                            candidate_deform_weights = params_iter['deform_weights']
-                            candidate_deform_stds = params_iter['deform_stds']
-                        elif config['deforms']['use_deformations'] and config['deforms']['deform_type'] == 'simple':
-                            candidate_means3D = params_iter['means3D'].detach().clone()
-                            candidate_unnorm_rots = params_iter['unnorm_rotations'].detach().clone()
-                            candidate_log_scales = params_iter['log_scales'].detach().clone()
+                        if deform_model is not None:
+                            candidate_deform_state = deform_model.snapshot(params_iter)
                     # Report Progress
                     if config['report_iter_progress']:
                         report_progress(params_iter, tracking_curr_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True)
@@ -2211,14 +2482,8 @@ def rgbd_slam(config: dict):
             with torch.no_grad():
                 params_iter['cam_unnorm_rots'][..., time_idx] = candidate_cam_unnorm_rot
                 params_iter['cam_trans'][..., time_idx] = candidate_cam_tran
-                if config['deforms']['use_deformations'] and config['deforms']['deform_type'] == 'gaussian':
-                    params_iter['deform_biases'] = candidate_deform_biases
-                    params_iter['deform_weights'] = candidate_deform_weights
-                    params_iter['deform_stds'] = candidate_deform_stds
-                elif config['deforms']['use_deformations'] and config['deforms']['deform_type'] == 'simple':
-                    params_iter['means3D'] = candidate_means3D
-                    params_iter['unnorm_rotations'] = candidate_unnorm_rots
-                    params_iter['log_scales'] = candidate_log_scales
+                if deform_model is not None:
+                    deform_model.restore(params_iter, candidate_deform_state)
 
         elif time_idx > 0 and config['tracking']['use_gt_poses']:
             with torch.no_grad():
@@ -2261,18 +2526,45 @@ def rgbd_slam(config: dict):
                 local_scales = params_iter['log_scales']
                 local_opacities = params_iter['logit_opacities']
                 local_colors = params_iter['rgb_colors']
+
+            local_scales = clamp_log_scales(local_scales)
             
             # local_means = params['means3D']
             # local_rots = params['unnorm_rotations']
             # local_scales = params['log_scales']
             transformed_pts = transform_to_frame(local_means,params_iter, time_idx, gaussians_grad=False, camera_grad=False)
             # img_rendervar = transformed_params2rendervar(params,transformed_pts,local_rots,local_scales)
+            MAX_RENDER_GAUSSIANS = int(500_000)
+            if transformed_pts.shape[0] > MAX_RENDER_GAUSSIANS:
+                keep_idx = torch.randperm(transformed_pts.shape[0], device=transformed_pts.device)[:MAX_RENDER_GAUSSIANS]
+                transformed_pts = transformed_pts[keep_idx]
+                local_means = local_means[keep_idx]
+                local_rots = local_rots[keep_idx]
+                local_scales = local_scales[keep_idx]
+                local_opacities = local_opacities[keep_idx]
+                local_colors = local_colors[keep_idx]
+                print(f"[render cull] downsampled gaussians from {params_iter['means3D'].shape[0]} to {transformed_pts.shape[0]} for rendering")
+            local_scales = clamp_log_scales(local_scales)
             if config['GRN']['use_grn']:
-                rendervar = transformed_GRNparams2depthplussilhouette(params_iter, curr_data['w2c'],
-                                                                     transformed_pts,local_rots,local_scales,local_opacities)
+                rendervar = transformed_GRNparams2depthplussilhouette(
+                    params_iter,
+                    curr_data['w2c'],
+                    transformed_pts,
+                    local_rots,
+                    local_scales,
+                    local_opacities,
+                    camera_space=True,
+                )
             else:
-                rendervar = transformed_params2depthplussilhouette(params_iter, curr_data['w2c'],
-                                                                    transformed_pts,local_rots,local_scales,local_opacities)
+                rendervar = transformed_params2depthplussilhouette(
+                    params_iter,
+                    curr_data['w2c'],
+                    transformed_pts,
+                    local_rots,
+                    local_scales,
+                    local_opacities,
+                    camera_space=True,
+                )
             rendered_depth,_,_ = Renderer(raster_settings=curr_data['cam'])(**rendervar)
             # im,_,_ = Renderer(raster_settings = curr_data['cam'])(**img_rendervar)
             mask = rendered_depth[1,:,:] > config['tracking']['sil_thres']
@@ -2297,8 +2589,15 @@ def rgbd_slam(config: dict):
             # ax[1,2].imshow(mask.squeeze().cpu().detach())
             # ax[1,2].set_title('Mask')
             # plt.show()
-            _,_,t_render, s_render, t_invar, s_invar = align_shift_and_scale(rendered_depth[0,:,:].unsqueeze(0),invariant_depth,mask.unsqueeze(0))
-            curr_data['depth'] = ((invariant_depth-t_invar)/s_invar)*s_render + t_render
+            if mask.any():
+                _, _, t_render, s_render, t_invar, s_invar = align_shift_and_scale(
+                    rendered_depth[0, :, :].unsqueeze(0),
+                    invariant_depth,
+                    mask.unsqueeze(0),
+                )
+                curr_data['depth'] = ((invariant_depth - t_invar) / s_invar) * s_render + t_render
+            else:
+                curr_data['depth'] = invariant_depth
             curr_data['depth'] = curr_data['depth'].detach()
             # plt.imshow(curr_data['depth'].squeeze().cpu().detach())
             # plt.colorbar()
@@ -2317,7 +2616,7 @@ def rgbd_slam(config: dict):
                         densify_color = to01(densify_color)
                         densify_depth = densify_depth.permute(2, 0, 1)
                         densify_curr_data = {'cam': densify_cam, 'im': densify_color, 'depth': densify_depth, 'id': time_idx, 
-                                    'intrinsics': densify_intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
+                                    'intrinsics': densify_intrinsics, 'w2c': gt_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
                     else:
                         densify_curr_data = curr_data
 
@@ -2363,27 +2662,31 @@ def rgbd_slam(config: dict):
                     densification_end_time = time.time()
                     densification_frame_time_sum += densification_end_time - densification_start_time
                     densification_frame_time_count += 1
-                # if not config['distance_keyframe_selection']:
-                #     with torch.no_grad():
-                #         # Get the current estimated rotation & translation
-                #         curr_cam_rot = F.normalize(params['cam_unnorm_rots'][..., time_idx].detach())
-                #         curr_cam_tran = params['cam_trans'][..., time_idx].detach()
-                #         curr_w2c = torch.eye(4).cuda().float()
-                #         curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
-                #         curr_w2c[:3, 3] = curr_cam_tran
-                #         # Select Keyframes for Mapping
-                #         num_keyframes = config['mapping_window_size']-2
-                #         selected_keyframes = keyframe_selection_overlap(depth, curr_w2c, intrinsics, keyframe_list[:-1], num_keyframes)
-                #         selected_time_idx = [keyframe_list[frame_idx]['id'] for frame_idx in selected_keyframes]
-                #         if len(keyframe_list) > 0:
-                #             # Add last keyframe to the selected keyframes
-                #             selected_time_idx.append(keyframe_list[-1]['id'])
-                #             selected_keyframes.append(len(keyframe_list)-1)
-                #         # Add current frame to the selected keyframes
-                #         selected_time_idx.append(time_idx)
-                #         selected_keyframes.append(-1)
-                #         # Print the selected keyframes
-                #         print(f"\nSelected Keyframes at Frame {time_idx}: {selected_time_idx}")
+                selected_keyframes: list[int] = []
+                if not config['distance_keyframe_selection']:
+                    with torch.no_grad():
+                        curr_cam_rot = F.normalize(params_iter['cam_unnorm_rots'][..., time_idx].detach())
+                        curr_cam_tran = params_iter['cam_trans'][..., time_idx].detach()
+                        curr_w2c = torch.eye(4, device=curr_cam_rot.device, dtype=curr_cam_rot.dtype)
+                        curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
+                        curr_w2c[:3, 3] = curr_cam_tran
+                        num_keyframes = max(0, config['mapping_window_size'] - 2)
+                        pool = keyframe_list[:-1] if len(keyframe_list) > 1 else []
+                        if num_keyframes > 0 and len(pool) > 0:
+                            selected_keyframes = keyframe_selection_overlap(
+                                depth,
+                                curr_w2c,
+                                intrinsics,
+                                pool,
+                                num_keyframes
+                            )
+                        selected_time_idx = [keyframe_list[idx]['id'] for idx in selected_keyframes] if selected_keyframes else []
+                        if len(keyframe_list) > 0:
+                            selected_time_idx.append(keyframe_list[-1]['id'])
+                            selected_keyframes.append(len(keyframe_list) - 1)
+                        selected_time_idx.append(time_idx)
+                        selected_keyframes.append(-1)
+                        print(f"\nSelected Keyframes at Frame {time_idx}: {selected_time_idx}")
 
                 # # Reset Optimizer & Learning Rates for Full Map Optimization
                 _set_requires_grad_for_phase(params_iter, config['mapping']['lrs'])
@@ -2433,64 +2736,131 @@ def rgbd_slam(config: dict):
 
                 # # timer.lap("Densification Done at frame "+str(time_idx), 3)
 
-                # # Mapping
+                # Mapping
                 mapping_start_time = time.time()
-                # if num_iters_mapping > 0:
-                #     progress_bar = tqdm(range(num_iters_mapping), desc=f"Mapping Time Step: {time_idx}")
+                mapping_progress = tqdm(range(num_iters_mapping), desc=f"Mapping Time Step: {time_idx}") if num_iters_mapping > 0 else None
+                actual_keyframe_ids: list[int] = []
+                for map_iter in range(num_iters_mapping):
+                    iter_start_time = time.time()
+                    if not config['distance_keyframe_selection']:
+                        if len(selected_keyframes) == 0:
+                            selected_idx = -1
+                        else:
+                            rand_idx = np.random.randint(0, len(selected_keyframes))
+                            selected_idx = selected_keyframes[rand_idx]
+                        actual_keyframe_ids.append(selected_idx)
+                        if selected_idx == -1 or len(keyframe_list) == 0:
+                            iter_time_idx = time_idx
+                            iter_curr_data = curr_data
+                        else:
+                            keyframe = keyframe_list[selected_idx]
+                            iter_time_idx = keyframe['id']
+                            iter_color = keyframe['color']
+                            iter_depth = keyframe['depth']
+                            iter_gt_w2c = gt_w2c_all_frames[:iter_time_idx + 1]
+                            iter_curr_data = {
+                                'cam': cam,
+                                'im': iter_color,
+                                'depth': iter_depth,
+                                'id': iter_time_idx,
+                                'intrinsics': intrinsics,
+                                'w2c': iter_gt_w2c[-1],
+                                'iter_gt_w2c_list': iter_gt_w2c,
+                            }
+                    else:
+                        if len(actual_keyframe_ids) == 0:
+                            if len(keyframe_list) > 0:
+                                curr_position = params_iter['cam_trans'][..., time_idx].detach().cpu()
+                                actual_keyframe_ids = keyframe_selection_distance(
+                                    time_idx,
+                                    curr_position,
+                                    keyframe_list,
+                                    config['distance_current_frame_prob'],
+                                    num_iters_mapping
+                                )
+                            else:
+                                actual_keyframe_ids = [0] * num_iters_mapping
+                            print(f"\nUsed Frames for mapping at Frame {time_idx}: "
+                                  f"{[keyframe_list[i]['id'] if i != len(keyframe_list) else 'curr' for i in actual_keyframe_ids]}")
+
+                        selected_keyframe_id = actual_keyframe_ids[map_iter]
+                        if selected_keyframe_id == len(keyframe_list) or len(keyframe_list) == 0:
+                            iter_time_idx = time_idx
+                            iter_curr_data = curr_data
+                        else:
+                            keyframe = keyframe_list[selected_keyframe_id]
+                            iter_time_idx = keyframe['id']
+                            iter_color = keyframe['color']
+                            iter_depth = keyframe['depth']
+                            iter_gt_w2c = gt_w2c_all_frames[:iter_time_idx + 1]
+                            iter_curr_data = {
+                                'cam': cam,
+                                'im': iter_color,
+                                'depth': iter_depth,
+                                'id': iter_time_idx,
+                                'intrinsics': intrinsics,
+                                'w2c': iter_gt_w2c[-1],
+                                'iter_gt_w2c_list': iter_gt_w2c,
+                            }
+
+                    loss, variables, losses = get_loss(
+                        params_iter,
+                        params_init,
+                        iter_curr_data,
+                        variables,
+                        iter_time_idx,
+                        config['mapping']['loss_weights'],
+                        config['mapping']['use_sil_for_loss'],
+                        config['mapping']['sil_thres'],
+                        config['mapping']['use_l1'],
+                        config['mapping']['ignore_outlier_depth_loss'],
+                        mapping=True,
+                        use_grn=config['GRN']['use_grn'],
+                        deformation_type=config['deforms']['deform_type'],
+                        gaussian_deformations=config['deforms']['use_deformations'],
+                        use_gt_depth=config['depth']['use_gt_depth'],
+                        gate_thresh=gate_thresh_mapping,
+                    )
+
+                    loss.backward()
+                    with torch.no_grad():
+                        if config['mapping']['use_gaussian_splatting_densification']:
+                            params_iter, variables = densify(
+                                params_iter,
+                                variables,
+                                optimizer,
+                                map_iter,
+                                config['mapping']['densify_dict']
+                            )
+
+                    # Add gradient clipping to prevent NaN
+                    torch.nn.utils.clip_grad_norm_(optimizer.param_groups[0]['params'], max_norm=1.0)
                     
-                # actural_keyframe_ids = []
-                # for iter in range(num_iters_mapping):
-                #     iter_start_time = time.time()
-                #     if not config['distance_keyframe_selection']:
-                #         # Randomly select a frame until current time step amongst keyframes
-                #         rand_idx = np.random.randint(0, len(selected_keyframes))
-                #         selected_rand_keyframe_idx = selected_keyframes[rand_idx]
-                #         actural_keyframe_ids.append(selected_rand_keyframe_idx)
-                #         if selected_rand_keyframe_idx == -1:
-                #             # Use Current Frame Data
-                #             iter_time_idx = time_idx
-                #             iter_color = color
-                #             iter_depth = depth
-                #         else:
-                #             # Use Keyframe Data
-                #             iter_time_idx = keyframe_list[selected_rand_keyframe_idx]['id']
-                #             iter_color = keyframe_list[selected_rand_keyframe_idx]['color']
-                #             iter_depth = keyframe_list[selected_rand_keyframe_idx]['depth']
-                #     else:
-                #         if len(actural_keyframe_ids) == 0:
-                #             if len(keyframe_list) > 0:
-                #                 curr_position = params['cam_trans'][..., time_idx].detach().cpu()
-                #                 actural_keyframe_ids = keyframe_selection_distance(time_idx, curr_position, keyframe_list, config['distance_current_frame_prob'], num_iters_mapping)
-                #             else:
-                #                 actural_keyframe_ids = [0] * num_iters_mapping
-                #             print(f"\nUsed Frames for mapping at Frame {time_idx}: {[keyframe_list[i]['id'] if i != len(keyframe_list) else 'curr' for i in actural_keyframe_ids]}")
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
 
-                #         selected_keyframe_ids = actural_keyframe_ids[iter]
+                    if mapping_progress is not None:
+                        if config['report_iter_progress']:
+                            with torch.no_grad():
+                                report_progress(
+                                    params_iter,
+                                    iter_curr_data,
+                                    map_iter + 1,
+                                    mapping_progress,
+                                    iter_time_idx,
+                                    sil_thres=config['mapping']['sil_thres'],
+                                    mapping=True,
+                                    online_time_idx=time_idx
+                                )
+                        else:
+                            mapping_progress.update(1)
 
-                #         if selected_keyframe_ids == len(keyframe_list):
-                #             # Use Current Frame Data
-                #             iter_time_idx = time_idx
-                #             iter_color = color
-                #             iter_depth = depth
-                #         else:
-                #             # Use Keyframe Data
-                #             iter_time_idx = keyframe_list[selected_keyframe_ids]['id']
-                #             iter_color = keyframe_list[selected_keyframe_ids]['color']
-                #             iter_depth = keyframe_list[selected_keyframe_ids]['depth']
-                        
-                        
-                #     iter_gt_w2c = gt_w2c_all_frames[:iter_time_idx+1]
-                #     iter_data = {'cam': cam, 'im': iter_color, 'depth': iter_depth, 'id': iter_time_idx, 
-                #                 'intrinsics': intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': iter_gt_w2c}
-                #     # Loss for current frame
-                #     loss, variables, losses = get_loss(params, iter_data, variables, iter_time_idx, config['mapping']['loss_weights'],
-                #                                     config['mapping']['use_sil_for_loss'], config['mapping']['sil_thres'],
-                #                                     config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'],use_gt_depth = config['depth']['use_gt_depth'], mapping=True,save_idx = None,gaussian_deformations=config['deforms']['use_deformations'],
-                #                                     use_grn = config['GRN']['use_grn'],deformation_type = config['deforms']['deform_type'])
-                #     # Backprop
-                #     loss.backward()
-                #     with torch.no_grad():
-                #         # Prune Gaussians
+                    iter_end_time = time.time()
+                    mapping_iter_time_sum += iter_end_time - iter_start_time
+                    mapping_iter_time_count += 1
+
+                if mapping_progress is not None:
+                    mapping_progress.close()
                 if config['mapping']['prune_gaussians'] and variables.get('scene_state', {"mode": "slam"}).get("mode", "slam") == "slam":
                     pruning_cfg = config['mapping']['pruning_dict']
                     if motion_cfg.get('enable', False) and motion_state.get('is_contraction') and motion_cfg.get('pause_prune_override', False):
@@ -2554,20 +2924,23 @@ def rgbd_slam(config: dict):
 
 
         # Add frame to keyframe list
-        if ((time_idx == 0) or ((time_idx+1) % config['keyframe_every'] == 0) or \
-                    (time_idx == num_frames-2)) and (not torch.isinf(curr_gt_w2c[-1]).any()) and (not torch.isnan(curr_gt_w2c[-1]).any()):
+        if (time_idx == 0) or ((time_idx + 1) % config['keyframe_every'] == 0) or (time_idx == num_frames - 2):
             with torch.no_grad():
-                # Get the current estimated rotation & translation
-                curr_cam_rot = F.normalize(params_iter['cam_unnorm_rots'][..., time_idx].detach())
-                curr_cam_tran = params_iter['cam_trans'][..., time_idx].detach()
-                curr_w2c = torch.eye(4).cuda().float()
-                curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
-                curr_w2c[:3, 3] = curr_cam_tran
-                # Initialize Keyframe Info
-                curr_keyframe = {'id': time_idx, 'est_w2c': curr_w2c, 'color': color, 'depth': depth}
-                # Add to keyframe list
-                keyframe_list.append(curr_keyframe)
-                keyframe_time_indices.append(time_idx)
+                est_rot = F.normalize(params_iter['cam_unnorm_rots'][..., time_idx].detach())
+                est_tran = params_iter['cam_trans'][..., time_idx].detach()
+                est_w2c = torch.eye(4, device=est_rot.device, dtype=est_rot.dtype)
+                est_w2c[:3, :3] = build_rotation(est_rot)
+                est_w2c[:3, 3] = est_tran
+            curr_keyframe = {
+                'id': time_idx,
+                'est_w2c': est_w2c.detach().cpu(),
+                'gt_w2c': gt_w2c.detach().cpu(),
+                'color': color.detach().cpu(),
+                'depth': depth.detach().cpu(),
+            }
+            keyframe_list.append(curr_keyframe)
+            keyframe_time_indices.append(time_idx)
+            print(f"[keyframes] added frame {time_idx}; total keyframes = {len(keyframe_list)}")
 
         if time_idx < num_frames-1:
             with torch.no_grad():
@@ -2601,7 +2974,9 @@ def rgbd_slam(config: dict):
             local_scales = params_iter['log_scales']
             local_opacities = params_iter['logit_opacities']
             local_colors = params_iter['rgb_colors']
-        
+
+        local_scales = clamp_log_scales(local_scales)
+
         nr_gauss.append(local_means.shape[0])
         # local_means = params['means3D']
         # local_rots = params['unnorm_rotations']
@@ -2651,29 +3026,8 @@ def rgbd_slam(config: dict):
         f.write(f"Frame Time: {tracking_frame_time_avg + mapping_frame_time_avg+densification_frame_time_avg} s\n")
     
 
-    if config['deforms']['deform_type'] == 'simple':
-        params_save = {}
-        # for time_idx in range(len(params)):
-        #     if time_idx == 0:
-        #         params_save['means3D'] = params[time_idx]['means3D'][:,:,None]
-        #         params_save['unnorm_rotations'] = params[time_idx]['unnorm_rotations'][:,:,None]
-        #         params_save['log_scales'] = params[time_idx]['log_scales'][:,:,None]
-        #         params_save['logit_opacities'] = params[time_idx]['logit_opacities'][:,:,None]
-        #         params_save['rgb_colors'] = params[time_idx]['rgb_colors'][:,:,None]
-        #     else:
-        #         params_save['means3D'] = torch.cat((params_save['means3D'], params[time_idx]['means3D'][:,:,None]), dim=2)
-        #         params_save['unnorm_rotations'] = torch.cat((params_save['unnorm_rotations'], params[time_idx]['unnorm_rotations'][:,:,None]), dim=2)
-        #         params_save['log_scales'] = torch.cat((params_save['log_scales'], params[time_idx]['log_scales'][:,:,None]), dim=2)
-        #         params_save['logit_opacities'] = torch.cat((params_save['logit_opacities'], params[time_idx]['logit_opacities'][:,:,None]), dim=2)
-        #         params_save['rgb_colors'] = torch.cat((params_save['rgb_colors'], params[time_idx]['rgb_colors'][:,:,None]), dim=2)
-        params_save['means3D'] = [params[idx]['means3D'] for idx in range(len(params))]
-        params_save['unnorm_rotations'] = [params[idx]['unnorm_rotations'] for idx in range(len(params))]
-        params_save['log_scales'] = [params[idx]['log_scales'] for idx in range(len(params))]
-        params_save['logit_opacities'] = [params[idx]['logit_opacities'] for idx in range(len(params))]
-        params_save['rgb_colors'] = [params[idx]['rgb_colors'] for idx in range(len(params))]
-        params_save['cam_unnorm_rots'] = params[time_idx]['cam_unnorm_rots']
-        params_save['cam_trans'] = params[time_idx]['cam_trans']
-        params = params_save
+    if deformations_enabled and deform_model is not None:
+        params = deform_model.finalize(params, num_frames=num_frames)
 
     # Add Camera Parameters to Save them
     params['timestep'] = variables['timestep']
@@ -2694,6 +3048,18 @@ def rgbd_slam(config: dict):
 
         # Evaluate Final Parameters
     dataset = [dataset, eval_dataset, 'C3VD'] if dataset_config["train_or_test"] == 'train' else dataset
+    
+    # Debug: print the actual use_xyzt_gate value
+    use_xyzt_gate_val = config['deforms'].get('use_xyzt_gate', False)
+    print(f"\n{'='*60}")
+    print(f"EVALUATION DEBUG INFO:")
+    print(f"use_xyzt_gate from config: {use_xyzt_gate_val}")
+    print(f"Number of Gaussians in params: {params['means3D'].shape[0]}")
+    print(f"'t_mu' in params: {'t_mu' in params}")
+    if 't_mu' in params:
+        print(f"t_mu min/max/mean: {params['t_mu'].min():.3f} / {params['t_mu'].max():.3f} / {params['t_mu'].mean():.3f}")
+    print(f"{'='*60}\n")
+    
     with torch.no_grad():
         eval_save(
             dataset,
@@ -2706,6 +3072,10 @@ def rgbd_slam(config: dict):
             deformation_type=config['deforms']['deform_type'],
             gate_thresh=config['deforms'].get('xyzt_gate_thresh', 0.0),
             use_gt_depth=config['depth']['use_gt_depth'],
+            log_scale_bounds=(log_scale_min, log_scale_max),
+            frustum_cull=False,  # DISABLED - deformation puts Gaussians outside frustum
+            depth_gate=False,
+            use_xyzt_gate=use_xyzt_gate_val,
         )
 
 if __name__ == "__main__":

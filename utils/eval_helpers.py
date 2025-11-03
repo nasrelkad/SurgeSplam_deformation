@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 from datasets.gradslam_datasets.geometryutils import relative_transformation
 from utils.recon_helpers import setup_camera, energy_mask
 from utils.slam_external import build_rotation,calc_psnr
-from utils.slam_helpers import transform_to_frame, transform_to_frame_eval, transformed_params2rendervar, transformed_params2depthplussilhouette,transformed_GRNparams2rendervar,transformed_GRNparams2depthplussilhouette,align_shift_and_scale, xyzt_time_gate, apply_xyzt_gate
+from utils.slam_helpers import transform_to_frame, transform_to_frame_eval, transformed_params2rendervar, transformed_params2depthplussilhouette,transformed_GRNparams2rendervar,transformed_GRNparams2depthplussilhouette,align_shift_and_scale, xyzt_time_gate, apply_xyzt_gate, rehydrate_endo4dgs
 from utils.slam_helpers import deform_gaussians as deform_gaussians_eval
 
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
@@ -18,7 +18,12 @@ from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 from pytorch_msssim import ms_ssim
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from utils.time_helper import Timer
-loss_fn_alex = LearnedPerceptualImagePatchSimilarity(net_type='alex', normalize=True).cuda()
+_lpips_device = os.environ.get('LPIPS_DEVICE', 'cuda')
+loss_fn_alex = LearnedPerceptualImagePatchSimilarity(net_type='alex', normalize=True)
+if _lpips_device == 'cuda' and torch.cuda.is_available():
+    loss_fn_alex = loss_fn_alex.cuda()
+else:
+    loss_fn_alex = loss_fn_alex.cpu()
 
 def to01(t):
     t = t.permute(2, 0, 1).float()
@@ -344,109 +349,15 @@ def report_progress(params, data, i, progress_bar, iter_time_idx, sil_thres, eve
 
 def deform_gaussians(params, time, deform_grad, N=5,deformation_type = 'gaussian'):
     """
-    Calculate deformations using the N closest basis functions based on |time - bias|.
-
-    Args:
-        params (dict): Dictionary containing deformation parameters.
-        time (torch.Tensor): Current time step.
-        deform_grad (bool): Whether to calculate gradients for deformations.
-        N (int): Number of closest basis functions to consider.
-
-    Returns:
-        xyz (torch.Tensor): Updated 3D positions.
-        rots (torch.Tensor): Updated rotations.
-        scales (torch.Tensor): Updated scales.
+    Compatibility wrapper around the shared deformation registry.
     """
-    if deformation_type =='gaussian':
-        if True:
-            if deform_grad:
-                weights = params['deform_weights']
-                stds = params['deform_stds']
-                biases = params['deform_biases']
-            else:
-                weights = params['deform_weights'].detach()
-                stds = params['deform_stds'].detach()
-                biases = params['deform_biases'].detach()
-
-            # Calculate the absolute difference between time and biases
-            time_diff = torch.abs(time - biases)
-
-            # Get the indices of the N smallest time differences
-            _, top_indices = torch.topk(-time_diff, N, dim=1)  # Negative for smallest values
-
-            # Create a mask to select only the top N basis functions
-            mask = torch.zeros_like(time_diff, dtype=torch.float)
-            mask.scatter_(1, top_indices, 1.0)
-
-            # Apply the mask to weights and biases
-            masked_weights = weights * mask
-            masked_biases = biases * mask
-
-            # Calculate deformations
-            deform = torch.sum(
-                masked_weights * torch.exp(-1 / (2 * stds**2) * (time - masked_biases)**2), dim=1
-            )  # Nx10 gaussians deformations
-
-            deform_xyz = deform[:, :3]
-            deform_rots = deform[:, 3:7]
-            deform_scales = deform[:, 7:10]
-        else:
-            if deform_grad:
-                weights = params['deform_weights']
-                stds = params['deform_stds']
-                biases = params['deform_biases']
-            else:
-                weights = params['deform_weights'].detach()
-                stds = params['deform_stds'].detach()
-                biases = params['deform_biases'].detach()
-
-            # Calculate the absolute difference between time and biases
-            time_diff = torch.abs(time - biases)
-
-            # Get the indices of the N smallest time differences
-            _, top_indices = torch.topk(-time_diff, N, dim=1)  # Negative for smallest values
-
-            # Create a mask to select only the top N basis functions
-            mask = torch.zeros_like(time_diff, dtype=torch.float)
-            mask.scatter_(1, top_indices, 1.0).detach()
-
-            # Register a gradient hook to zero out gradients for irrelevant basis functions
-            if deform_grad:
-                def zero_out_irrelevant_gradients(grad):
-                    return grad * mask
-
-                weights.register_hook(zero_out_irrelevant_gradients)
-                biases.register_hook(zero_out_irrelevant_gradients)
-                stds.register_hook(zero_out_irrelevant_gradients)
-
-            # Calculate deformations
-            deform = torch.sum(
-                weights * torch.exp(-1 / (2 * stds**2) * (time - biases)**2), dim=1
-            )  # Nx10 gaussians deformations
-
-            deform_xyz = deform[:, :3]
-            deform_rots = deform[:, 3:7]
-            deform_scales = deform[:, 7:10]
-
-        xyz = params['means3D'] + deform_xyz
-        rots = params['unnorm_rotations'] + deform_rots
-        scales = params['log_scales'] + deform_scales
-        opacities = params['logit_opacities']
-        colors = params['rgb_colors']
-
-
-    elif deformation_type == 'simple' or deformation_type == 'cv' or deformation_type == 'gaussian'  :
-        try:
-            xyz       = params['means3D'][:, :, time]
-            rots      = params['unnorm_rotations'][:, :, time]
-            scales    = params['log_scales'][:, :, time]
-            opacities = params['logit_opacities'][:, :, time]
-            colors    = params['rgb_colors'][:, :, time]
-        except:
-            print(time)
-            print('failure above')
-
-    return xyz, rots, scales,opacities, colors
+    return deform_gaussians_eval(
+        params,
+        time,
+        deform_grad,
+        N=N,
+        deformation_type=deformation_type,
+    )
 
 
 def compute_errors(gt, pred):
@@ -473,7 +384,8 @@ def compute_errors(gt, pred):
 
 def eval_save(dataset, final_params, eval_dir, sil_thres, 
          mapping_iters, add_new_gaussians, save_renders=True, use_grn = True,
-         deformation_type: str = 'gaussian', gate_thresh: float = 0.0, use_gt_depth: bool = True):
+         deformation_type: str = 'gaussian', gate_thresh: float = 0.0, use_gt_depth: bool = True,
+         log_scale_bounds=None, frustum_cull=True, depth_gate=True, use_xyzt_gate=False):
     # timer = Timer()
     # timer.start()
     split = False
@@ -485,7 +397,19 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
     else:
         num_frames = len(dataset)
     print("Evaluating Final Parameters ...")
+    if deformation_type == 'endo4dgs':
+        device = 'cuda'
+        means = final_params.get('means3D')
+        if isinstance(means, torch.Tensor):
+            device = means.device
+        final_params = rehydrate_endo4dgs(
+            final_params,
+            device=device
+        )
     gate_thresh = float(gate_thresh)
+    if log_scale_bounds is None:
+        log_scale_bounds = (-3.0, 3.0)
+    log_scale_min, log_scale_max = map(float, log_scale_bounds)
     psnr_list = []
     rmse_list = []
     l1_list = []
@@ -572,6 +496,7 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
         
         # Get current frame Gaussians
         local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians_eval(final_params,total_time_idx,False,deformation_type = deformation_type)
+        local_scales = torch.clamp(local_scales, min=log_scale_min, max=log_scale_max)
         if dataset_type == 'train':
             cam_rot = F.normalize(final_params['cam_unnorm_rots'][..., time_idx].detach())
             cam_tran = final_params['cam_trans'][..., time_idx].detach()
@@ -582,113 +507,110 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
             w2c[:3, 3] = torch.Tensor(horn_gt_position[total_time_idx])
             transformed_pts = transform_to_frame_eval(final_params,local_means, rel_w2c=w2c.cuda()) # use gt pose to render
 
-        # ---- loose frustum cull (temporary, until depth-aware is on) ----
-        # transformed_pts: [G, 3] in *camera* frame
         render_keep_mask = None
-        z = transformed_pts[:, 2]
 
-        # much looser range for your colon scale
-        z_min = 0.005
-        z_max = 2.0     # was 0.35, that's why everything vanished
-        valid_z = (z > z_min) & (z < z_max)
+        print(f"  [DEBUG frame {total_time_idx}] Before frustum cull: {transformed_pts.shape[0]} Gaussians")
 
-        xy = transformed_pts[:, :2] / z.unsqueeze(1).clamp_min(1e-4)  # [G,2]
-        r = torch.linalg.norm(xy, dim=1)  # radial distance
-        # also make FOV looser – your scope is wide & distortive
-        fov_radius = 1.8
-        valid_fov = r < fov_radius
-        mask_fov = valid_z & valid_fov
-        if mask_fov.sum() == 0:
-            mask_fov = torch.zeros_like(mask_fov)
-            mask_fov[torch.argmin(z)] = True  # keep nearest just in case
+        if frustum_cull:
+            # ---- loose frustum cull (temporary, until depth-aware is on) ----
+            # transformed_pts: [G, 3] in *camera* frame
+            z = transformed_pts[:, 2]
 
-        transformed_pts = transformed_pts[mask_fov]
-        local_means     = local_means[mask_fov]
-        local_rots      = local_rots[mask_fov]
-        local_scales    = local_scales[mask_fov]
-        local_opacities = local_opacities[mask_fov]
-        local_colors    = local_colors[mask_fov]
-        cull_mask = mask_fov.clone()
+            # widened range to avoid accidental drop of dynamic gaussians
+            z_min = 5e-4
+            z_max = 8.0
+            valid_z = (z > z_min) & (z < z_max)
 
-        # ---- optional predicted-depth-aware cull ----
-        # depth right now is your predicted depth, not GT
-        # shape: [1, H, W]
-        pred_depth = depth  # already C,H,W
-        if not torch.is_tensor(pred_depth):
-            pred_depth = torch.as_tensor(pred_depth, device=transformed_pts.device, dtype=transformed_pts.dtype)
+            xy = transformed_pts[:, :2] / z.unsqueeze(1).clamp_min(1e-4)  # [G,2]
+            r = torch.linalg.norm(xy, dim=1)  # radial distance
+            fov_radius = 7.5
+            valid_fov = r < fov_radius
+            mask_fov = valid_z & valid_fov
+            if mask_fov.sum() == 0:
+                mask_fov = torch.zeros_like(mask_fov)
+                mask_fov[torch.argmin(z)] = True  # keep nearest just in case
+
+            transformed_pts = transformed_pts[mask_fov]
+            local_means     = local_means[mask_fov]
+            local_rots      = local_rots[mask_fov]
+            local_scales    = local_scales[mask_fov]
+            local_opacities = local_opacities[mask_fov]
+            local_colors    = local_colors[mask_fov]
+            cull_mask = mask_fov.clone()
+            print(f"  [DEBUG frame {total_time_idx}] After frustum cull: {transformed_pts.shape[0]} Gaussians")
         else:
-            pred_depth = pred_depth.to(device=transformed_pts.device, dtype=transformed_pts.dtype)
+            cull_mask = torch.ones(transformed_pts.shape[0], dtype=torch.bool, device=transformed_pts.device)
 
-        if pred_depth.dim() == 2:
-            pred_depth = pred_depth.unsqueeze(0)
-        elif pred_depth.dim() == 3 and pred_depth.shape[0] > 1:
-            pred_depth = pred_depth[:1]
+        if depth_gate:
+            # ---- optional predicted-depth-aware cull ----
+            pred_depth = depth  # already C,H,W
+            if not torch.is_tensor(pred_depth):
+                pred_depth = torch.as_tensor(pred_depth, device=transformed_pts.device, dtype=transformed_pts.dtype)
+            else:
+                pred_depth = pred_depth.to(device=transformed_pts.device, dtype=transformed_pts.dtype)
 
-        H, W = pred_depth.shape[1], pred_depth.shape[2]
+            if pred_depth.dim() == 2:
+                pred_depth = pred_depth.unsqueeze(0)
+            elif pred_depth.dim() == 3 and pred_depth.shape[0] > 1:
+                pred_depth = pred_depth[:1]
 
-        # intrinsics is 3x3
-        if torch.is_tensor(intrinsics):
-            intrinsics_tensor = intrinsics.to(device=transformed_pts.device, dtype=transformed_pts.dtype)
-        else:
-            intrinsics_tensor = torch.as_tensor(intrinsics, device=transformed_pts.device, dtype=transformed_pts.dtype)
-        fx = intrinsics_tensor[0, 0]
-        fy = intrinsics_tensor[1, 1]
-        cx = intrinsics_tensor[0, 2]
-        cy = intrinsics_tensor[1, 2]
+            H, W = pred_depth.shape[1], pred_depth.shape[2]
 
-        pts_cam = transformed_pts  # [G,3]
-        z = pts_cam[:, 2].clamp_min(1e-4)
-        u = (pts_cam[:, 0] * fx / z) + cx
-        v = (pts_cam[:, 1] * fy / z) + cy
+            if torch.is_tensor(intrinsics):
+                intrinsics_tensor = intrinsics.to(device=transformed_pts.device, dtype=transformed_pts.dtype)
+            else:
+                intrinsics_tensor = torch.as_tensor(intrinsics, device=transformed_pts.device, dtype=transformed_pts.dtype)
+            fx = intrinsics_tensor[0, 0]
+            fy = intrinsics_tensor[1, 1]
+            cx = intrinsics_tensor[0, 2]
+            cy = intrinsics_tensor[1, 2]
 
-        # pixel-valid mask
-        in_w = (u >= 0) & (u <= (W - 1))
-        in_h = (v >= 0) & (v <= (H - 1))
-        pix_valid = in_w & in_h
+            pts_cam = transformed_pts  # [G,3]
+            z = pts_cam[:, 2].clamp_min(1e-4)
+            u = (pts_cam[:, 0] * fx / z) + cx
+            v = (pts_cam[:, 1] * fy / z) + cy
 
-        if pix_valid.any():
-            u_pix = torch.clamp(u[pix_valid], 0, W - 1).long()
-            v_pix = torch.clamp(v[pix_valid], 0, H - 1).long()
+            in_w = (u >= 0) & (u <= (W - 1))
+            in_h = (v >= 0) & (v <= (H - 1))
+            pix_valid = in_w & in_h
 
-            # predicted depth at those pixels
-            pred_z = pred_depth[0, v_pix, u_pix]  # [N_valid]
+            if pix_valid.any():
+                u_pix = torch.clamp(u[pix_valid], 0, W - 1).long()
+                v_pix = torch.clamp(v[pix_valid], 0, H - 1).long()
 
-            # if your predicted depth is in mm or 0..1, scale here
-            # e.g. if it's 0..1 but your z is in meters: pred_z = pred_z * 1.0
+                pred_z = pred_depth[0, v_pix, u_pix]  # [N_valid]
 
-            # tolerance: allow gaussians a bit behind the depth
-            tol = 0.03  # 3 cm
-            valid_depth_mask = pred_z > 1e-4
-            depth_keep = torch.ones_like(pred_z, dtype=torch.bool)
-            depth_keep[valid_depth_mask] = z[pix_valid][valid_depth_mask] <= (pred_z[valid_depth_mask] + tol)
+                tol = 0.03  # 3 cm
+                valid_depth_mask = pred_z > 1e-4
+                depth_keep = torch.ones_like(pred_z, dtype=torch.bool)
+                depth_keep[valid_depth_mask] = z[pix_valid][valid_depth_mask] <= (pred_z[valid_depth_mask] + tol)
 
-            # start from all-kept
-            final_keep = torch.ones_like(pix_valid, dtype=torch.bool)
-            # for valid pixels, enforce depth test
-            final_keep[pix_valid] = depth_keep
+                final_keep = torch.ones_like(pix_valid, dtype=torch.bool)
+                final_keep[pix_valid] = depth_keep
 
-            # if nearly all would be dropped, relax to avoid thrashing
-            num_valid = int(pix_valid.sum().item())
-            if num_valid > 0:
-                min_keep = max(1, int(0.1 * num_valid))
-                if final_keep.sum().item() < min_keep:
-                    tmp = final_keep.clone()
-                    tmp[pix_valid] = True
-                    final_keep = tmp
+                num_valid = int(pix_valid.sum().item())
+                if num_valid > 0:
+                    min_keep = max(1, int(0.1 * num_valid))
+                    if final_keep.sum().item() < min_keep:
+                        tmp = final_keep.clone()
+                        tmp[pix_valid] = True
+                        final_keep = tmp
 
-            # if that throws everything away, relax
-            if final_keep.sum().item() == 0:
-                final_keep = pix_valid  # fall back
+                if final_keep.sum().item() == 0:
+                    final_keep = pix_valid  # fall back
 
-            transformed_pts = transformed_pts[final_keep]
-            local_means     = local_means[final_keep]
-            local_rots      = local_rots[final_keep]
-            local_scales    = local_scales[final_keep]
-            local_opacities = local_opacities[final_keep]
-            local_colors    = local_colors[final_keep]
-            cull_mask[mask_fov] = final_keep
+                transformed_pts = transformed_pts[final_keep]
+                local_means     = local_means[final_keep]
+                local_rots      = local_rots[final_keep]
+                local_scales    = local_scales[final_keep]
+                local_opacities = local_opacities[final_keep]
+                local_colors    = local_colors[final_keep]
+                if frustum_cull:
+                    cull_mask[mask_fov] = final_keep
+                else:
+                    cull_mask = final_keep
 
-        render_keep_mask = cull_mask
+        render_keep_mask = cull_mask if frustum_cull or depth_gate else None
         
         # Define current frame data
         curr_data = {'cam': cam, 'im': color, 'depth': depth, 'id': time_idx, 'intrinsics': intrinsics, 'w2c': first_frame_w2c}
@@ -697,159 +619,152 @@ def eval_save(dataset, final_params, eval_dir, sil_thres,
         # visall = False # NOTE: for debug
         # if not visall and dataset_type == 'train':
         #     continue
-        if time_idx in dataset.eval_idx:
-            # # Initialize Render Variables
-            # rendervar = transformed_params2rendervar(final_params, transformed_pts,local_rots,local_scales)
-            # depth_sil_rendervar = transformed_params2depthplussilhouette(final_params, curr_data['w2c'],
-            #                                                              transformed_pts,local_rots,local_scales)
-            if use_grn:
-                rendervar = transformed_GRNparams2rendervar(final_params, transformed_pts,local_rots,local_scales,local_opacities,local_colors)
+        if time_idx not in dataset.eval_idx:
+            continue
 
-                depth_sil_rendervar = transformed_GRNparams2depthplussilhouette(final_params, curr_data['w2c'],
-                                                                            transformed_pts,local_rots,local_scales,local_opacities)
-            else:
-                print(local_scales.shape)
-                rendervar = transformed_params2rendervar(final_params, transformed_pts,local_rots,local_scales,local_opacities,local_colors)
+        if use_grn:
+            rendervar = transformed_GRNparams2rendervar(final_params, transformed_pts,local_rots,local_scales,local_opacities,local_colors)
 
-                depth_sil_rendervar = transformed_params2depthplussilhouette(final_params, curr_data['w2c'],
-                                                                            transformed_pts,local_rots,local_scales,local_opacities)
+            depth_sil_rendervar = transformed_GRNparams2depthplussilhouette(final_params, curr_data['w2c'],
+                                                                        transformed_pts,local_rots,local_scales,local_opacities)
+        else:
+            print(local_scales.shape)
+            rendervar = transformed_params2rendervar(final_params, transformed_pts,local_rots,local_scales,local_opacities,local_colors)
 
-            time_gate = None
-            if 't_mu' in final_params:
-                # 1) get per-gaussian time weights
-                time_gate = xyzt_time_gate(final_params, float(total_time_idx))
+            depth_sil_rendervar = transformed_params2depthplussilhouette(final_params, curr_data['w2c'],
+                                                                        transformed_pts,local_rots,local_scales,local_opacities)
 
-                # 2) if we frustum-culled above, we have to cull the gate too
-                if render_keep_mask is not None:
-                    time_gate = time_gate[render_keep_mask]
-
-                # 3) --- key fix ---
-                # some runs have t_mu near 0 while evaluating at later frames
-                # clamp so gaussians never vanish entirely after gating
-                time_gate = torch.clamp(time_gate, min=0.3)
-
-                # 4) apply to both rgb and depth/silhouette render vars
-                rendervar = apply_xyzt_gate(rendervar, time_gate, gate_thresh=0.0)
-                depth_sil_rendervar = apply_xyzt_gate(depth_sil_rendervar, time_gate, gate_thresh=0.0)
-                if "opacities" in rendervar:
-                    rendervar["opacities"] = torch.clamp(rendervar["opacities"], min=0.05)
-                if "opacities" in depth_sil_rendervar:
-                    depth_sil_rendervar["opacities"] = torch.clamp(depth_sil_rendervar["opacities"], min=0.05)
-
-            # Render Depth & Silhouette
-            depth_sil, _, _ = Renderer(raster_settings=curr_data['cam'])(**depth_sil_rendervar)
+        time_gate = None
+        if use_xyzt_gate and 't_mu' in final_params:
+            # Debug logging
+            print(f"  [DEBUG frame {total_time_idx}] Applying temporal gating: use_xyzt_gate={use_xyzt_gate}")
             
-            rastered_depth = depth_sil[0, :, :].unsqueeze(0)
+            # 1) get per-gaussian time weights
+            time_gate = xyzt_time_gate(final_params, float(total_time_idx))
+
+            # 2) if we frustum-culled above, we have to cull the gate too
+            if render_keep_mask is not None:
+                time_gate = time_gate[render_keep_mask]
+
+            # 3) --- key fix ---
+            # some runs have t_mu near 0 while evaluating at later frames
+            # clamp so gaussians never vanish entirely after gating
+            time_gate = torch.clamp(time_gate, min=0.3)
+
+            # 4) apply to both rgb and depth/silhouette render vars
+            rendervar = apply_xyzt_gate(rendervar, time_gate, gate_thresh=gate_thresh)
+            depth_sil_rendervar = apply_xyzt_gate(depth_sil_rendervar, time_gate, gate_thresh=gate_thresh)
+            if "opacities" in rendervar:
+                rendervar["opacities"] = torch.clamp(rendervar["opacities"], min=0.05)
+            if "opacities" in depth_sil_rendervar:
+                depth_sil_rendervar["opacities"] = torch.clamp(depth_sil_rendervar["opacities"], min=0.05)
+        else:
+            # Debug logging
+            print(f"  [DEBUG frame {total_time_idx}] SKIPPING temporal gating: use_xyzt_gate={use_xyzt_gate}, Gaussians={transformed_pts.shape[0]}")
+
+        # Render Depth & Silhouette
+        depth_sil, _, _ = Renderer(raster_settings=curr_data['cam'])(**depth_sil_rendervar)
+
+        rastered_depth = depth_sil[0, :, :].unsqueeze(0)
+        
+        if curr_data['depth'].shape[0] == 3:
+            curr_data['depth'] = curr_data['depth'][0:1,:,:]
+        # Mask invalid depth in GT
+        valid_depth_mask = (curr_data['depth'] > 0) & (curr_data['depth'] < 1e10)
+        rastered_depth_viz = rastered_depth.detach()
+        silhouette = depth_sil[1, :, :]
+        presence_sil_mask = (silhouette > sil_thres)
+        
             
-            # if rastered_depth.max() > 1.0:
-            #     rastered_depth = rastered_depth / 100.0
-            if curr_data['depth'].shape[0] == 3:
-                curr_data['depth'] = curr_data['depth'][0:1,:,:]
-            # Mask invalid depth in GT
-            valid_depth_mask = (curr_data['depth'] > 0) & (curr_data['depth'] < 1e10)
-            rastered_depth_viz = rastered_depth.detach()
-            rastered_depth = rastered_depth * valid_depth_mask
-            silhouette = depth_sil[1, :, :]
-            presence_sil_mask = (silhouette > sil_thres)
-            
-            
-            # Render RGB and Calculate PSNR
-            # timer.lap('rest part', stage=0)
-            # for _ in range(100):
-            #     im, _, _= Renderer(raster_settings=curr_data['cam'])(**rendervar)
-            # timer.lap('render part', stage=1)
-            im, _, _= Renderer(raster_settings=curr_data['cam'])(**rendervar)
-            # if mapping_iters==0 and not add_new_gaussians:
-            #     weighted_im = im * presence_sil_mask * valid_depth_mask
-            #     weighted_gt_im = curr_data['im'] * presence_sil_mask * valid_depth_mask
-            # else:
+        # Render RGB and Calculate PSNR
+        im, _, _ = Renderer(raster_settings=curr_data['cam'])(**rendervar)
+        
+        # Debug logging
+        print(f"  [DEBUG frame {total_time_idx}] Final Gaussians: {transformed_pts.shape[0]}")
+        
+        nr_gaussians_list.append(transformed_pts.shape[0])
+
+        gt_depth_aligned = curr_data['depth']
+        if torch.is_tensor(valid_depth_mask):
+            has_valid_gt_depth = bool(valid_depth_mask.any().item())
+        else:
+            has_valid_gt_depth = bool(np.any(valid_depth_mask))
+        evaluate_depth = use_gt_depth and has_valid_gt_depth
+
+        if evaluate_depth:
+            rastered_depth_eval = rastered_depth * valid_depth_mask
             weighted_im = im * valid_depth_mask
             weighted_gt_im = curr_data['im'] * valid_depth_mask
-            psnr = calc_psnr(weighted_im, weighted_gt_im).mean()
-            ssim = ms_ssim(weighted_im.unsqueeze(0).cpu(), weighted_gt_im.unsqueeze(0).cpu(), 
-                            data_range=1.0, size_average=True)
-            lpips_score = loss_fn_alex(torch.clamp(weighted_im.unsqueeze(0), 0.0, 1.0),
-                                        torch.clamp(weighted_gt_im.unsqueeze(0), 0.0, 1.0)).item()
+            _, _, t_gt, s_gt, t_pred, s_pred = align_shift_and_scale(curr_data['depth'], rastered_depth_viz, valid_depth_mask)
+            rastered_depth_aligned = (rastered_depth_viz - t_pred) * (s_gt / s_pred) + t_gt
+            print("s_gt: {:.2f}, t_gt: {:.2f}, s_pred: {:.2f}, t_pred: {:.2f}".format(s_gt.item(), t_gt.item(), s_pred.item(), t_pred.item()))
 
-            psnr_list.append(psnr.cpu().numpy())
-            ssim_list.append(ssim.cpu().numpy())
-            lpips_list.append(lpips_score)
-            nr_gaussians_list.append(transformed_pts.shape[0])
-            # Compute Depth RMSE
+            error = compute_errors(
+                gt_depth_aligned[valid_depth_mask].cpu().detach().numpy(),
+                rastered_depth_aligned[valid_depth_mask].cpu().detach().numpy()
+            )
+            depth_errors_list.append(error)
+            print("Abs Rel: {:.4f}, Sq Rel: {:.4f}, RMSE: {:.4f}, RMSE Log: {:.4f}, A1: {:.4f}, A2: {:.4f}, A3: {:.4f}, PSNR: {:.4f}".format(*error))
 
-            # gt_depth_aligned,rastered_depth_aligned,t_gt,s_gt,t_pred,s_pred = align_shift_and_scale( curr_data['depth'].cpu().detach(),rastered_depth_viz.cpu().detach())
-            # gt_depth_aligned[gt_depth_aligned<1e-3] = 1e-3
-            # rastered_depth_aligned[rastered_depth_aligned<1e-3] = 1e-3
-            # gt_depth_aligned[gt_depth_aligned>150] = 150
-            # rastered_depth_aligned[rastered_depth_aligned>150] = 150
-            gt_depth_aligned = curr_data['depth']
-            if torch.is_tensor(valid_depth_mask):
-                has_valid_gt_depth = bool(valid_depth_mask.any().item())
+            diff_depth_rmse = torch.sqrt((rastered_depth_aligned - gt_depth_aligned) ** 2)
+            diff_depth_rmse = diff_depth_rmse * valid_depth_mask
+            rmse = diff_depth_rmse.sum() / valid_depth_mask.sum()
+
+            diff_depth_l1 = torch.abs(rastered_depth_aligned - gt_depth_aligned)
+            diff_depth_l1 = diff_depth_l1 * valid_depth_mask
+            depth_l1 = diff_depth_l1.sum() / valid_depth_mask.sum()
+            rmse_value = float(rmse.detach().cpu().item())
+            depth_l1_value = float(depth_l1.detach().cpu().item())
+        else:
+            rastered_depth_eval = rastered_depth_viz
+            weighted_im = im
+            weighted_gt_im = curr_data['im']
+            rastered_depth_aligned = rastered_depth_viz
+            diff_depth_rmse = torch.zeros_like(rastered_depth_viz)
+            diff_depth_l1 = torch.full_like(rastered_depth_viz, float('nan'))
+            rmse = torch.tensor(float('nan'), device=rastered_depth_viz.device)
+            depth_l1 = torch.tensor(float('nan'), device=rastered_depth_viz.device)
+            rmse_value = float('nan')
+            depth_l1_value = float('nan')
+            depth_errors_list.append(tuple(np.full(len(depth_error_metrics), np.nan)))
+            if not use_gt_depth:
+                print("No GT depth in config; skipping depth metrics for eval frame {}".format(total_time_idx))
             else:
-                has_valid_gt_depth = bool(np.any(valid_depth_mask))
-            evaluate_depth = use_gt_depth and has_valid_gt_depth
+                print("No valid GT depth pixels; skipping depth metrics for eval frame {}".format(total_time_idx))
 
-            if evaluate_depth:
-                _, _, t_gt, s_gt, t_pred, s_pred = align_shift_and_scale(curr_data['depth'], rastered_depth_viz, valid_depth_mask)
-                rastered_depth_aligned = (rastered_depth_viz - t_pred) * (s_gt / s_pred) + t_gt
-                print("s_gt: {:.2f}, t_gt: {:.2f}, s_pred: {:.2f}, t_pred: {:.2f}".format(s_gt.item(), t_gt.item(), s_pred.item(), t_pred.item()))
+        psnr = calc_psnr(weighted_im, weighted_gt_im).mean()
+        ssim = ms_ssim(weighted_im.unsqueeze(0).cpu(), weighted_gt_im.unsqueeze(0).cpu(),
+                       data_range=1.0, size_average=True)
+        lpips_score = loss_fn_alex(torch.clamp(weighted_im.unsqueeze(0), 0.0, 1.0),
+                                   torch.clamp(weighted_gt_im.unsqueeze(0), 0.0, 1.0)).item()
 
-                error = compute_errors(
-                    gt_depth_aligned[valid_depth_mask].cpu().detach().numpy(),
-                    rastered_depth_aligned[valid_depth_mask].cpu().detach().numpy()
-                )
-                depth_errors_list.append(error)
-                print("Abs Rel: {:.4f}, Sq Rel: {:.4f}, RMSE: {:.4f}, RMSE Log: {:.4f}, A1: {:.4f}, A2: {:.4f}, A3: {:.4f}, PSNR: {:.4f}".format(*error))
+        psnr_list.append(psnr.cpu().numpy())
+        ssim_list.append(ssim.cpu().numpy())
+        lpips_list.append(lpips_score)
 
-                diff_depth_rmse = torch.sqrt((rastered_depth_aligned - gt_depth_aligned) ** 2)
-                diff_depth_rmse = diff_depth_rmse * valid_depth_mask
-                rmse = diff_depth_rmse.sum() / valid_depth_mask.sum()
+        rmse_list.append(rmse_value)
+        l1_list.append(depth_l1_value)
 
-                diff_depth_l1 = torch.abs(rastered_depth_aligned - gt_depth_aligned)
-                diff_depth_l1 = diff_depth_l1 * valid_depth_mask
-                depth_l1 = diff_depth_l1.sum() / valid_depth_mask.sum()
-                rmse_value = float(rmse.detach().cpu().item())
-                depth_l1_value = float(depth_l1.detach().cpu().item())
-            else:
-                rastered_depth_aligned = rastered_depth_viz
-                diff_depth_rmse = torch.zeros_like(rastered_depth_viz)
-                diff_depth_l1 = torch.full_like(rastered_depth_viz, float('nan'))
-                rmse = torch.tensor(float('nan'), device=rastered_depth_viz.device)
-                depth_l1 = torch.tensor(float('nan'), device=rastered_depth_viz.device)
-                rmse_value = float('nan')
-                depth_l1_value = float('nan')
-                depth_errors_list.append(tuple(np.full(len(depth_error_metrics), np.nan)))
-                if not use_gt_depth:
-                    print("No GT depth in config; skipping depth metrics for eval frame {}".format(total_time_idx))
-                else:
-                    print("No valid GT depth pixels; skipping depth metrics for eval frame {}".format(total_time_idx))
-
-            rmse_list.append(rmse_value)
-            l1_list.append(depth_l1_value)
-
-            if save_renders:
-                # Save Rendered RGB and Depth
-                viz_render_im = torch.clamp(im, 0, 1)
-                viz_render_im = viz_render_im.detach().cpu().permute(1, 2, 0).numpy()
-                vmin = 0
-                vmax = 6
-                viz_render_depth = rastered_depth_viz[0].detach().cpu().numpy()
-                normalized_depth = np.clip((viz_render_depth - vmin) / (vmax - vmin), 0, 1)
-                # depth_colormap = cv2.applyColorMap((normalized_depth * 255).astype(np.uint8), cv2.COLORMAP_JET)
-                save_im = np.clip(viz_render_im*255, 0, 255).astype(np.uint8)
-                cv2.imwrite(os.path.join(render_rgb_dir, "color_{:04d}.png".format(total_time_idx)), cv2.cvtColor(save_im, cv2.COLOR_RGB2BGR))
-                # Image.fromarray(np.uint8(viz_render_depth*10/2.55), 'L').save(os.path.join(render_depth_dir, "depth_{:04d}.tiff".format(total_time_idx)))
-                save_depth = np.clip(viz_render_depth*655.35, 0, 65535)
-                Image.fromarray(np.uint16(save_depth)).save(os.path.join(render_depth_dir, "depth_{:04d}.tiff".format(total_time_idx)))
-                # cv2.imwrite(os.path.join(render_depth_dir, "depth_{:04d}.tiff".format(total_time_idx)), viz_render_depth*100)
+        if save_renders:
+            # Save Rendered RGB and Depth
+            viz_render_im = torch.clamp(im, 0, 1)
+            viz_render_im = viz_render_im.detach().cpu().permute(1, 2, 0).numpy()
+            vmin = 0
+            vmax = 6
+            viz_render_depth = rastered_depth_viz[0].detach().cpu().numpy()
+            normalized_depth = np.clip((viz_render_depth - vmin) / (vmax - vmin), 0, 1)
+            save_im = np.clip(viz_render_im*255, 0, 255).astype(np.uint8)
+            cv2.imwrite(os.path.join(render_rgb_dir, "color_{:04d}.png".format(total_time_idx)), cv2.cvtColor(save_im, cv2.COLOR_RGB2BGR))
+            save_depth = np.clip(viz_render_depth*655.35, 0, 65535)
+            Image.fromarray(np.uint16(save_depth)).save(os.path.join(render_depth_dir, "depth_{:04d}.tiff".format(total_time_idx)))
             
-            # Plot the Ground Truth and Rasterized RGB & Depth, along with Silhouette
-            fig_title = "Time Step: {}".format(total_time_idx)
-            plot_name = "%04d" % total_time_idx
-            presence_sil_mask = presence_sil_mask.detach().cpu().numpy()
-            plot_rgbd_silhouette(color, depth, im, rastered_depth_viz, presence_sil_mask, diff_depth_l1,
-                                    psnr, depth_l1, fig_title, plot_dir, 
-                                    plot_name=plot_name, save_plot=True)
+        # Plot the Ground Truth and Rasterized RGB & Depth, along with Silhouette
+        fig_title = "Time Step: {}".format(total_time_idx)
+        plot_name = "%04d" % total_time_idx
+        presence_sil_mask_np = presence_sil_mask.detach().cpu().numpy()
+        plot_rgbd_silhouette(color, depth, im, rastered_depth_viz, presence_sil_mask_np, diff_depth_l1,
+                                psnr, depth_l1, fig_title, plot_dir, 
+                                plot_name=plot_name, save_plot=True)
 
     # Get the final camera trajectory
     num_frames = final_params['cam_unnorm_rots'].shape[-1]

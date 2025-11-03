@@ -60,6 +60,10 @@ def keyframe_selection_overlap(gt_depth, w2c, intrinsics, keyframe_list, k, pixe
     for keyframeid, keyframe in enumerate(keyframe_list):
         # Get the estimated world2cam of the keyframe
         est_w2c = keyframe['est_w2c']
+        if torch.is_tensor(est_w2c) and not torch.isfinite(est_w2c).all():
+            gt_fallback = keyframe.get('gt_w2c')
+            if torch.is_tensor(gt_fallback):
+                est_w2c = gt_fallback
         # Transform the 3D pointcloud to the keyframe's camera space
         pts4 = torch.cat([pts, torch.ones_like(pts[:, :1])], dim=1)
         transformed_pts = (est_w2c @ pts4.T).T[:, :3]
@@ -108,7 +112,13 @@ def keyframe_selection_distance(time_idx, curr_position, keyframe_list, distance
     time_laps = []
     curr_shift = np.linalg.norm(curr_position)
     for keyframe in keyframe_list:
-        est_w2c = keyframe['est_w2c'].detach().cpu()
+        est_w2c = keyframe['est_w2c']
+        if torch.is_tensor(est_w2c):
+            if not torch.isfinite(est_w2c).all():
+                gt_fallback = keyframe.get('gt_w2c')
+                if torch.is_tensor(gt_fallback):
+                    est_w2c = gt_fallback
+            est_w2c = est_w2c.detach().cpu()
         camera_position = est_w2c[:3, 3]
         distance = np.linalg.norm(camera_position - curr_position)
         time_lap = time_idx - keyframe['id']
@@ -117,15 +127,34 @@ def keyframe_selection_distance(time_idx, curr_position, keyframe_list, distance
 
     dis2prob = lambda x, scaler: np.log2(1 + scaler/(x+scaler/5))
     dis_prob = [dis2prob(d, curr_shift)+dis2prob(t, time_idx) for d, t in zip(distances, time_laps)]
+    
+    # Handle NaN/inf values and ensure valid probabilities
+    dis_prob = np.array(dis_prob)
+    
+    if not np.all(np.isfinite(dis_prob)):
+        # Fallback: use uniform distribution over keyframes if probabilities are invalid
+        dis_prob = np.ones(len(keyframe_list))
+    
     sum_prob = sum(dis_prob) / (1-distance_current_frame_prob) # distance_current_frame_prob： p_c
+    if sum_prob == 0 or not np.isfinite(sum_prob):
+        sum_prob = len(keyframe_list)  # Fallback to uniform
+    
     norm_dis_prob = [p/sum_prob for p in dis_prob]
     norm_dis_prob.append(distance_current_frame_prob) # index 'len(keyframe_list)' indicate the current frame
+    
+    # Ensure probabilities sum to ~1.0 (handle floating point errors)
+    norm_dis_prob = np.array(norm_dis_prob)
+    norm_dis_prob = norm_dis_prob / norm_dis_prob.sum()
+    
     # Compute the cumulative distribution function (CDF).
     cdf = np.cumsum(norm_dis_prob)
     # Generate random samples.
     samples = np.random.rand(n_samples)
     # Select indices by comparing random numbers with CDF.
     sample_indices = np.searchsorted(cdf, samples)
+    
+    # Ensure indices are within valid range
+    sample_indices = np.clip(sample_indices, 0, len(keyframe_list))
     
     # no sampling ablation
     # sample_indices = []

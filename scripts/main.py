@@ -229,8 +229,12 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
 
     # Initialize Render Variables
     rendervar = transformed_params2rendervar(params, transformed_pts)
-    depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
-                                                                 transformed_pts)
+    depth_sil_rendervar = transformed_params2depthplussilhouette(
+        params,
+        curr_data['w2c'],
+        transformed_pts,
+        camera_space=True,
+    )
     
     # Visualize the Rendered Images
     # online_render(curr_data, iter_time_idx, rendervar, dev_use_controller=False)

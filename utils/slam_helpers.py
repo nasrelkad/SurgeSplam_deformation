@@ -6,6 +6,251 @@ from utils.recon_helpers import energy_mask
 import torchvision
 import numpy as np
 import cv2
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple
+from utils.deform_mlp import TimeDeformMLP
+
+
+def _identity_init(params: Dict[str, torch.Tensor], **_: Any) -> Dict[str, torch.Tensor]:
+    return params
+
+
+def _noop_finalize(container: Any, **_: Any) -> Any:
+    return container
+
+
+def _noop_snapshot(_: Any) -> Optional[Dict[str, torch.Tensor]]:
+    return None
+
+
+def _noop_restore(container: Any, snapshot: Optional[Dict[str, torch.Tensor]]) -> Any:
+    return container
+
+
+def _default_container_builder(params: Dict[str, torch.Tensor], **_: Any) -> Dict[str, torch.Tensor]:
+    return params
+
+
+@dataclass
+class DeformationModel:
+    name: str
+    apply: Callable[..., Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]
+    init_scene: Callable[..., Dict[str, torch.Tensor]] = field(default=_identity_init)
+    init_new: Callable[..., Dict[str, torch.Tensor]] = field(default=_identity_init)
+    snapshot: Callable[[Any], Optional[Dict[str, torch.Tensor]]] = field(default=_noop_snapshot)
+    restore: Callable[[Any, Optional[Dict[str, torch.Tensor]]], Any] = field(default=_noop_restore)
+    finalize: Callable[..., Any] = field(default=_noop_finalize)
+    build_container: Callable[..., Any] = field(default=_default_container_builder)
+
+
+_DEFORMATION_REGISTRY: Dict[str, DeformationModel] = {}
+
+
+def register_deformation_model(model: DeformationModel, *, aliases: Iterable[str] = ()) -> None:
+    """Registers a deformation model and optional aliases."""
+    _DEFORMATION_REGISTRY[model.name] = model
+    for alias in aliases:
+        _DEFORMATION_REGISTRY[alias] = model
+
+
+def get_deformation_model(name: str) -> DeformationModel:
+    if name not in _DEFORMATION_REGISTRY:
+        available = ", ".join(sorted(_DEFORMATION_REGISTRY.keys()))
+        raise KeyError(f"Unknown deformation model '{name}'. Available: {available}")
+    return _DEFORMATION_REGISTRY[name]
+
+
+def list_deformation_models() -> Tuple[str, ...]:
+    return tuple(sorted(_DEFORMATION_REGISTRY.keys()))
+
+
+def _snapshot_by_keys(params: Dict[str, torch.Tensor], keys: Iterable[str]) -> Dict[str, torch.Tensor]:
+    snapshot: Dict[str, torch.Tensor] = {}
+    for key in keys:
+        if key in params and isinstance(params[key], torch.Tensor):
+            snapshot[key] = params[key].detach().clone()
+    return snapshot
+
+
+def _restore_by_keys(params: Dict[str, torch.Tensor], snapshot: Optional[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+    if snapshot is None:
+        return params
+    for key, value in snapshot.items():
+        if key in params and isinstance(params[key], torch.Tensor):
+            params[key].data.copy_(value)
+    return params
+
+
+def _clone_state_dict(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    return {k: v.detach().clone() for k, v in state_dict.items()}
+
+
+def _scales_to_flat_matrix(
+    scales: torch.Tensor,
+    *,
+    exp_input: bool = True,
+    clamp_min: float = 1e-3,
+    clamp_max: float = 0.25,
+) -> torch.Tensor:
+    """
+    Convert per-gaussian scale parameters into the format expected by the renderer.
+    The renderer in this environment consumes diagonal covariances (3 values).
+    Fall back gracefully if a 3x3 representation sneaks in.
+    """
+    if exp_input:
+        scales = torch.exp(scales)
+
+    if scales.ndim == 1:
+        scales = scales.view(1, -1)
+    elif scales.ndim > 2:
+        scales = scales.view(scales.shape[0], -1)
+
+    last_dim = scales.shape[-1]
+    if last_dim == 1:
+        scales = scales.expand(-1, 3)
+    elif last_dim == 3:
+        pass
+    elif last_dim == 9:
+        # Renderer only accepts diagonal entries; pick them out.
+        scales = scales.view(-1, 3, 3).diagonal(dim1=1, dim2=2)
+    else:
+        raise ValueError(f"Unexpected scale shape {tuple(scales.shape)}")
+
+    return torch.clamp(scales, min=clamp_min, max=clamp_max)
+
+
+def _apply_endo4dgs_model(
+    params: Dict[str, torch.Tensor],
+    *,
+    time: float,
+    deform_grad: bool,
+    **_: Any,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if deform_grad:
+        base_xyz = params['means3D']
+        base_rots = params['unnorm_rotations']
+        base_scl = params['log_scales']
+        base_op = params['logit_opacities']
+        base_col = params['rgb_colors']
+    else:
+        base_xyz = params['means3D'].detach()
+        base_rots = params['unnorm_rotations'].detach()
+        base_scl = params['log_scales'].detach()
+        base_op = params['logit_opacities'].detach()
+        base_col = params['rgb_colors'].detach()
+
+    deform_net = params.get('endo4dgs_net', None)
+    if deform_net is None:
+        rots = F.normalize(base_rots, dim=-1)
+        return base_xyz, rots, base_scl, base_op, base_col
+
+    if isinstance(deform_net, torch.nn.Parameter):
+        # it got wrapped somewhere; rebuild it
+        params = rehydrate_endo4dgs(
+            params,
+            config={},  # or params.get('endo4dgs_net_meta', {})
+            device=base_xyz.device
+        )
+        deform_net = params['endo4dgs_net']
+
+    device = base_xyz.device
+    dtype = base_xyz.dtype
+    t_scalar = torch.as_tensor(time, device=device, dtype=dtype)
+    if deform_grad:
+        d_xyz, d_log_s, d_rot_aa, d_op = deform_net(base_xyz, t_scalar)
+    else:
+        with torch.no_grad():
+            d_xyz, d_log_s, d_rot_aa, d_op = deform_net(base_xyz, t_scalar)
+
+    # Safety checks to prevent NaN
+    xyz = base_xyz + d_xyz
+    xyz = torch.nan_to_num(xyz, nan=0.0, posinf=1e6, neginf=-1e6)
+    
+    scales = base_scl + d_log_s
+    scales = torch.clamp(scales, min=-5.0, max=5.0)  # Prevent extreme scales
+
+    delta_q = _aa_to_quat(d_rot_aa)
+    base_q = F.normalize(base_rots, dim=-1)
+    rots = F.normalize(_qmul(base_q, delta_q), dim=-1)
+    rots = torch.nan_to_num(rots, nan=0.0)
+    # Re-normalize to ensure valid quaternion
+    rots = F.normalize(rots, dim=-1)
+
+    opacities = base_op + d_op
+    opacities = torch.clamp(opacities, min=-8.0, max=8.0)  # Keep in reasonable logit range
+    
+    colors = base_col
+    return xyz, rots, scales, opacities, colors
+
+
+def _snapshot_endo4dgs(params: Dict[str, Any], **_: Any) -> Optional[Dict[str, Dict[str, torch.Tensor]]]:
+    net = params.get('endo4dgs_net', None)
+    if net is None:
+        return None
+    return {'endo4dgs_net': _clone_state_dict(net.state_dict())}
+
+
+def _restore_endo4dgs(
+    params: Dict[str, Any],
+    snapshot: Optional[Dict[str, Dict[str, torch.Tensor]]],
+    **_: Any,
+) -> Dict[str, Any]:
+    if snapshot is None:
+        return params
+    state = snapshot.get('endo4dgs_net')
+    net = params.get('endo4dgs_net', None)
+    if state is not None and net is not None:
+        net.load_state_dict(state)
+    return params
+
+
+def _finalize_endo4dgs(container: Dict[str, Any], **_: Any) -> Dict[str, Any]:
+    net = container.pop('endo4dgs_net', None)
+    if net is not None:
+        state = {k: v.detach().cpu().numpy() for k, v in net.state_dict().items()}
+        container['endo4dgs_net_state'] = np.array([state], dtype=object)
+        container['endo4dgs_net_meta'] = np.array(
+            [{
+                'in_dim': getattr(net, 'input_dim', getattr(net, 'in_features', None)),
+                'hidden': getattr(net, 'hidden_dim', getattr(net, 'out_features', None)),
+            }],
+            dtype=object,
+        )
+    return container
+
+
+def rehydrate_endo4dgs(
+    params: Dict[str, Any],
+    *,
+    config: Optional[Dict[str, Any]] = None,
+    state: Optional[Any] = None,
+    meta: Optional[Any] = None,
+    device: str = 'cuda',
+) -> Dict[str, Any]:
+    if config is None:
+        config = {}
+    hidden = int(config.get('mlp_hidden', 64))
+    in_dim = int(config.get('mlp_in_dim', 4))
+
+    if meta is None and 'endo4dgs_net_meta' in params:
+        meta = params.pop('endo4dgs_net_meta')
+    if isinstance(meta, np.ndarray) and meta.size > 0:
+        meta = meta.item()
+    if isinstance(meta, dict):
+        hidden = int(meta.get('hidden', hidden) or hidden)
+        in_dim = int(meta.get('in_dim', in_dim) or in_dim)
+
+    if state is None and 'endo4dgs_net_state' in params:
+        state = params.pop('endo4dgs_net_state')
+    if isinstance(state, np.ndarray) and state.size > 0:
+        state = state.item()
+
+    net = TimeDeformMLP(in_dim=in_dim, hidden=hidden)
+    if isinstance(state, dict):
+        state_tensors = {k: torch.from_numpy(v).float() for k, v in state.items()}
+        net.load_state_dict(state_tensors, strict=False)
+    params['endo4dgs_net'] = net.to(device)
+    return params
 
 
 def l1_loss_v1(x, y):
@@ -130,17 +375,21 @@ def transformed_params2rendervar(params, transformed_pts,local_rots,local_scales
         'means2D': torch.zeros_like(transformed_pts, requires_grad=True, device="cuda") + 0
     }
     
+    scales_flat = _scales_to_flat_matrix(local_scales, exp_input=True)
     if local_scales.shape[0] == 1:
         rendervar['colors_precomp'] = local_colors
-        rendervar['scales'] = torch.exp(torch.tile(local_scales, (1, 3)))
-        # print('using uniform scales')
     else:
-        try: 
-            rendervar['shs'] = torch.cat((local_colors.reshape(local_colors.shape[0], 3, -1).transpose(1, 2), params['feature_rest'].reshape(local_colors.shape[0], 3, -1).transpose(1, 2)), dim=1)
-            rendervar['scales'] = torch.exp(local_scales)
-        except: 
+        try:
+            rendervar['shs'] = torch.cat(
+                (
+                    local_colors.reshape(local_colors.shape[0], 3, -1).transpose(1, 2),
+                    params['feature_rest'].reshape(local_colors.shape[0], 3, -1).transpose(1, 2),
+                ),
+                dim=1,
+            )
+        except Exception:
             rendervar['colors_precomp'] = local_colors
-            rendervar['scales'] = torch.exp(local_scales)
+    rendervar['scales'] = scales_flat
     return rendervar
 
 
@@ -186,21 +435,25 @@ def transformed_params2rendervar(params, transformed_pts,local_rots,local_scales
 #     return rendervar
 
 
-def get_depth_and_silhouette(pts_3D, w2c):
+def get_depth_and_silhouette(pts_3D, w2c=None):
     """
     Function to compute depth and silhouette for each gaussian.
     These are evaluated at gaussian center.
     """
-    # Depth of each gaussian center in camera frame
-    pts4 = torch.cat((pts_3D, torch.ones_like(pts_3D[:, :1])), dim=-1)
-    pts_in_cam = (w2c @ pts4.transpose(0, 1)).transpose(0, 1)
+    if w2c is not None:
+        pts4 = torch.cat((pts_3D, torch.ones_like(pts_3D[:, :1])), dim=-1)
+        pts_in_cam = (w2c @ pts4.transpose(0, 1)).transpose(0, 1)
+    else:
+        pts_in_cam = pts_3D
     depth_z = pts_in_cam[:, 2].unsqueeze(-1) # [num_gaussians, 1]
     depth_z_sq = torch.square(depth_z) # [num_gaussians, 1]
 
     # Depth and Silhouette
-    depth_silhouette = torch.zeros((pts_3D.shape[0], 3)).cuda().float()
+    device = pts_3D.device
+    dtype = pts_3D.dtype
+    depth_silhouette = torch.zeros((pts_3D.shape[0], 3), device=device, dtype=dtype)
     depth_silhouette[:, 0] = depth_z.squeeze(-1)
-    depth_silhouette[:, 1] = 1.0
+    depth_silhouette[:, 1] = torch.as_tensor(1.0, device=device, dtype=dtype)
     depth_silhouette[:, 2] = depth_z_sq.squeeze(-1)
     
     return depth_silhouette
@@ -218,19 +471,16 @@ def get_depth_and_silhouette(pts_3D, w2c):
 #     return rendervar
 
 
-def transformed_params2depthplussilhouette(params, w2c, transformed_pts,local_rots,local_scales,local_opacities):
+def transformed_params2depthplussilhouette(params, w2c, transformed_pts,local_rots,local_scales,local_opacities, *, camera_space: bool = False):
     rendervar = {
         'means3D': transformed_pts,
-        'colors_precomp': get_depth_and_silhouette(transformed_pts, w2c),
+        'colors_precomp': get_depth_and_silhouette(transformed_pts, None if camera_space else w2c),
         'rotations': F.normalize(local_rots, dim=-1),
         'opacities': torch.sigmoid(local_opacities),
         # 'scales': torch.exp(torch.tile(params['log_scales'], (1, 3))),
         'means2D': torch.zeros_like(transformed_pts, requires_grad=True, device="cuda") + 0
     }
-    if local_scales.shape[0] == 1:
-        rendervar['scales'] = torch.exp(torch.tile(local_scales, (1, 3)))
-    else:
-        rendervar['scales'] = torch.exp(local_scales)
+    rendervar['scales'] = _scales_to_flat_matrix(local_scales, exp_input=True)
     return rendervar
 
 
@@ -297,6 +547,9 @@ def apply_xyzt_gate(render_vars: dict, gt: torch.Tensor, gate_thresh: float = 0.
     if gate_thresh > 0.0:
         mask = gt > gate_thresh
         if mask.sum() == 0:
+            if gt.numel() == 0:
+                # No Gaussians to gate - return empty render_vars
+                return render_vars
             m = torch.zeros_like(mask); m[int(torch.argmax(gt))] = True
             mask = m
         keys = list(render_vars.keys())
@@ -419,17 +672,15 @@ def transformed_GRNparams2rendervar(params, transformed_pts,local_rots,local_sca
         # 'scales': torch.exp(torch.tile(params['log_scales'], (1, 3))),
         'means2D': torch.zeros_like(transformed_pts, requires_grad=True, device="cuda") + 0
     }
+    scales_flat = _scales_to_flat_matrix(local_scales, exp_input=False)
     if local_scales.shape[0] == 1:
         rendervar['colors_precomp'] = local_colors
-        rendervar['scales'] = torch.tile(local_scales, (1, 3))
-        # print('using uniform scales')
     else:
-        try: 
+        try:
             rendervar['shs'] = torch.cat((local_colors.reshape(local_colors.shape[0], 3, -1).transpose(1, 2), params['feature_rest'].reshape(local_colors.shape[0], 3, -1).transpose(1, 2)), dim=1)
-            rendervar['scales'] = local_scales
-        except: 
+        except:
             rendervar['colors_precomp'] = local_colors
-            rendervar['scales'] = local_scales
+    rendervar['scales'] = scales_flat
     return rendervar
 
 # def transformed_GRNparams2depthplussilhouette(params, w2c, transformed_pts):
@@ -447,19 +698,16 @@ def transformed_GRNparams2rendervar(params, transformed_pts,local_rots,local_sca
 #         rendervar['scales'] = params['log_scales']
 #     return rendervar
 
-def transformed_GRNparams2depthplussilhouette(params, w2c, transformed_pts,local_rots,local_scales,local_opacities):
+def transformed_GRNparams2depthplussilhouette(params, w2c, transformed_pts,local_rots,local_scales,local_opacities, *, camera_space: bool = False):
     rendervar = {
         'means3D': transformed_pts,
-        'colors_precomp': get_depth_and_silhouette(transformed_pts, w2c),
+        'colors_precomp': get_depth_and_silhouette(transformed_pts, None if camera_space else w2c),
         'rotations': F.normalize(local_rots, dim =-1),
         'opacities': torch.sigmoid(local_opacities),
         # 'scales': torch.exp(torch.tile(params['log_scales'], (1, 3))),
         'means2D': torch.zeros_like(transformed_pts, requires_grad=True, device="cuda") + 0
     }
-    if local_scales.shape[0] == 1:
-        rendervar['scales'] = torch.tile(local_scales, (1, 3))
-    else:
-        rendervar['scales'] = local_scales
+    rendervar['scales'] = _scales_to_flat_matrix(local_scales, exp_input=False)
     return rendervar
 
 def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True, 
@@ -531,175 +779,136 @@ def _qmul(q1, q2):
                         w1*y2 - x1*z2 + y1*w2 + z1*x2,
                         w1*z2 + x1*y2 - y1*x2 + z1*w2], dim=-1)
 
-def deform_gaussians(params, time, deform_grad, N=5, deformation_type='gaussian', temperature=0.5):
+def _apply_gaussian_model(
+    params: Dict[str, torch.Tensor],
+    *,
+    time: float,
+    deform_grad: bool,
+    N: Optional[int] = 5,
+    temperature: float = 0.5,
+    detach_canonical: bool = False,
+    **_: Any,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if deform_grad or not detach_canonical:
+        base_xyz = params['means3D']
+        base_rots = params['unnorm_rotations']
+        base_scl = params['log_scales']
+        base_op = params['logit_opacities']
+        base_col = params['rgb_colors']
+    else:
+        base_xyz = params['means3D'].detach()
+        base_rots = params['unnorm_rotations'].detach()
+        base_scl = params['log_scales'].detach()
+        base_op = params['logit_opacities'].detach()
+        base_col = params['rgb_colors'].detach()
+
+    if deform_grad:
+        W = params['deform_weights']
+        S_raw = params['deform_stds']
+        C = params['deform_biases']
+    else:
+        W = params['deform_weights'].detach()
+        S_raw = params['deform_stds'].detach()
+        C = params['deform_biases'].detach()
+
+    t = torch.as_tensor(time, device=C.device, dtype=C.dtype)
+    while t.dim() < C.dim():
+        t = t.unsqueeze(0)
+
+    S = F.softplus(S_raw) + 1e-3
+    score = -((t - C) ** 2) / (2.0 * (S ** 2) + 1e-12)
+    attn = F.softmax(score / max(temperature, 1e-3), dim=1)
+
+    if N is not None and isinstance(N, int) and 0 < N < attn.shape[1]:
+        topv, topi = torch.topk(attn, k=N, dim=1)
+        m = torch.zeros_like(attn)
+        m.scatter_(1, topi, 1.0)
+        attn = attn * m
+        attn = attn / (attn.sum(dim=1, keepdim=True) + 1e-12)
+
+    deform = torch.sum(attn * W, dim=1)
+    d_xyz = deform[:, 0:3]
+    d_quat = deform[:, 3:7]
+    d_scl = deform[:, 7:10]
+
+    xyz = base_xyz + d_xyz
+
+    base_q = F.normalize(base_rots, dim=-1)
+    delta_q = F.normalize(d_quat, dim=-1)
+    rots = F.normalize(_qmul(base_q, delta_q), dim=-1)
+
+    scales = base_scl + d_scl
+    return xyz, rots, scales, base_op, base_col
+
+
+def _apply_simple_model(
+    params: Any,
+    *,
+    time: int,
+    deform_grad: bool,
+    **_: Any,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    del deform_grad  # simple model ignores gradients here
+    if isinstance(params, (list, tuple)):
+        params_t = params[int(time)]
+    else:
+        params_t = params
+    xyz = params_t['means3D']
+    rots = params_t['unnorm_rotations']
+    scales = params_t['log_scales']
+    opacities = params_t['logit_opacities']
+    colors = params_t['rgb_colors']
+    return xyz, rots, scales, opacities, colors
+
+
+def _apply_cv_model(
+    params: Dict[str, torch.Tensor],
+    *,
+    time: float,
+    deform_grad: bool,
+    **_: Any,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    del deform_grad
+    means = params['means3D']
+    t = torch.as_tensor(time, device=means.device, dtype=means.dtype).view(-1, 1)
+
+    v_xyz = params.get('cv_vel_xyz', torch.zeros_like(means))
+    v_lsg = params.get('cv_vel_log_scales', torch.zeros_like(params['log_scales']))
+    w_aa = params.get('cv_angvel_aa', torch.zeros_like(means))
+
+    xyz = params['means3D'] + v_xyz * t
+    base_q = F.normalize(params['unnorm_rotations'], dim=-1)
+    dq = _aa_to_quat(w_aa * t)
+    rots = F.normalize(_qmul(base_q, dq), dim=-1)
+    scales = params['log_scales'] + v_lsg * t
+
+    opacities = params['logit_opacities']
+    colors = params['rgb_colors']
+    return xyz, rots, scales, opacities, colors
+
+
+def deform_gaussians(
+    params,
+    time,
+    deform_grad,
+    N=5,
+    deformation_type='gaussian',
+    temperature=0.5,
+    **kwargs: Any,
+):
     """
-    Gaussian deformation:
-      - soft attention over basis functions (keeps gradients flowing)
-      - safe positive stds via softplus
-      - rotation update via quaternion multiplication (delta quat)
-      - scale updated additively in log domain
-    
+    Apply the requested deformation model through the registry.
     """
-    if deformation_type == 'gaussian':
-        # Pull tensors with/without grad
-        if deform_grad:
-            W = params['deform_weights']      # [G,B,10]
-            S_raw = params['deform_stds']     # [G,B,10]
-            C = params['deform_biases']       # [G,B,10]
-        else:
-            W = params['deform_weights'].detach()
-            S_raw = params['deform_stds'].detach()
-            C = params['deform_biases'].detach()
-
-        # Make sure 'time' is a tensor on the right device/dtype and broadcastable to C
-        t = torch.as_tensor(time, device=C.device, dtype=C.dtype)
-        while t.dim() < C.dim():
-            t = t.unsqueeze(0)  # expand to match [G,B,10] by broadcasting
-
-        # strictly positive bandwidths
-        S = F.softplus(S_raw) + 1e-3  # [G,B,10]
-
-        # attention-like weights across bases (dim=1)
-        # score = - (t - C)^2 / (2*S^2)
-        score = -((t - C) ** 2) / (2.0 * (S ** 2) + 1e-12)
-        attn = F.softmax(score / max(temperature, 1e-3), dim=1)  # sum_B(attn)=1
-
-        # Optional soft top-k: keep top-N mass but renormalize (still differentiable)
-        if N is not None and isinstance(N, int) and 0 < N < attn.shape[1]:
-            topv, topi = torch.topk(attn, k=N, dim=1)
-            m = torch.zeros_like(attn)
-            m.scatter_(1, topi, 1.0)
-            attn = attn * m
-            attn = attn / (attn.sum(dim=1, keepdim=True) + 1e-12)
-
-        # Weighted sum over bases -> per-gaussian deformation vector (10)
-        deform = torch.sum(attn * W, dim=1)  # [G,10]
-
-        # Split into xyz(3), rot_quat_delta(4), dlog_scales(3)
-        deform_xyz    = deform[:, 0:3]
-        deform_rot_q  = deform[:, 3:7]   # interpret as delta quaternion
-        deform_dlogS  = deform[:, 7:10]
-
-        # Apply updates
-        # positions
-        xyz = params['means3D'] + deform_xyz
-
-        # rotations: compose base quaternion with delta quaternion
-        base_q = F.normalize(params['unnorm_rotations'], dim=-1)      # [G,4]
-        dq = F.normalize(deform_rot_q, dim=-1)                         # [G,4]
-
-        # quaternion multiply: (base_q * dq)
-        w1, x1, y1, z1 = base_q.unbind(-1)
-        w2, x2, y2, z2 = dq.unbind(-1)
-        w = w1*w2 - x1*x2 - y1*y2 - z1*z2
-        x = w1*x2 + x1*w2 + y1*z2 - z1*y2
-        y = w1*y2 - x1*z2 + y1*w2 + z1*x2
-        z = w1*z2 + x1*y2 - y1*x2 + z1*w2
-        rots = torch.stack([w, x, y, z], dim=-1)
-        rots = F.normalize(rots, dim=-1)
-
-        # scales: additive in log-domain (stays positive after exp in renderer)
-        scales = params['log_scales'] + deform_dlogS
-
-        opacities = params['logit_opacities']
-        colors = params['rgb_colors']
-        return xyz, rots, scales, opacities, colors
-
-    elif deformation_type == 'simple':
-
-        xyz = params['means3D']
-        rots = params['unnorm_rotations']
-        scales = params['log_scales']
-        opacities = params['logit_opacities']
-        colors = params['rgb_colors']
-        return xyz, rots, scales, opacities, colors
-
-    elif deformation_type == 'cv':  # constant velocity (add 'ca' with t^2 terms if desired)
-        means = params['means3D']
-        t = torch.as_tensor(time, device=means.device, dtype=means.dtype).view(-1, 1)
-
-        # Fallback to static gaussians when CV parameters are not present.
-        if 'cv_vel_xyz' in params:
-            v_xyz = params['cv_vel_xyz']
-        else:
-            v_xyz = torch.zeros_like(means)
-
-        if 'cv_vel_log_scales' in params:
-            v_lsg = params['cv_vel_log_scales']
-        else:
-            v_lsg = torch.zeros_like(params['log_scales'])
-
-        if 'cv_angvel_aa' in params:
-            w_aa = params['cv_angvel_aa']
-        else:
-            w_aa = torch.zeros_like(means)
-
-        xyz = params['means3D'] + v_xyz * t
-        base_q = F.normalize(params['unnorm_rotations'], dim=-1)
-        dq = _aa_to_quat(w_aa * t)
-        rots = F.normalize(_qmul(base_q, dq), dim=-1)
-        scales = params['log_scales'] + v_lsg * t
-
-        opacities = params['logit_opacities']; colors = params['rgb_colors']
-        return xyz, rots, scales, opacities, colors
-
-    elif deformation_type == 'deformgs':
-        # 1) get canonical values (no detach if we want grads)
-        if deform_grad:
-            base_xyz  = params['means3D']
-            base_rots = params['unnorm_rotations']
-            base_scl  = params['log_scales']
-            base_op   = params['logit_opacities']
-            base_col  = params['rgb_colors']
-            W   = params['deform_weights']   # [G,B,10]
-            S_r = params['deform_stds']      # [G,B,10]
-            C   = params['deform_biases']    # [G,B,10]
-        else:
-            base_xyz  = params['means3D'].detach()
-            base_rots = params['unnorm_rotations'].detach()
-            base_scl  = params['log_scales'].detach()
-            base_op   = params['logit_opacities'].detach()
-            base_col  = params['rgb_colors'].detach()
-            W   = params['deform_weights'].detach()
-            S_r = params['deform_stds'].detach()
-            C   = params['deform_biases'].detach()
-
-        # 2) time → attention over bases (exactly like your gaussian branch)
-        t = torch.as_tensor(time, device=C.device, dtype=C.dtype)
-        while t.dim() < C.dim():
-            t = t.unsqueeze(0)
-
-        S = F.softplus(S_r) + 1e-3
-        score = -((t - C) ** 2) / (2.0 * (S ** 2) + 1e-12)
-        attn  = F.softmax(score / max(temperature, 1e-3), dim=1)
-
-        if N is not None and 0 < N < attn.shape[1]:
-            topv, topi = torch.topk(attn, k=N, dim=1)
-            m = torch.zeros_like(attn)
-            m.scatter_(1, topi, 1.0)
-            attn = attn * m
-            attn = attn / (attn.sum(dim=1, keepdim=True) + 1e-12)
-
-        # 3) this is the “scene flow” in DeformGS terms
-        flow_10 = torch.sum(attn * W, dim=1)      # [G,10]
-        d_xyz   = flow_10[:, :3]
-        d_quat  = flow_10[:, 3:7]
-        d_scl   = flow_10[:, 7:10]
-
-        # 4) apply to canonical
-        xyz = base_xyz + d_xyz
-
-        # rotation as delta-quat
-        base_q = F.normalize(base_rots, dim=-1)
-        delta_q = F.normalize(d_quat, dim=-1)
-        rots = _qmul(base_q, delta_q)
-
-        # log-scales additive
-        scales = base_scl + d_scl
-
-        opacities = base_op
-        colors    = base_col
-        return xyz, rots, scales, opacities, colors
+    model = get_deformation_model(deformation_type)
+    return model.apply(
+        params,
+        time=time,
+        deform_grad=deform_grad,
+        N=N,
+        temperature=temperature,
+        deformation_type=deformation_type,
+        **kwargs,
+    )
 
 
 def initialize_cv_deformations(params):
@@ -750,6 +959,173 @@ def initialize_deformations(params, nr_basis, use_distributed_biases, total_time
     return params
 
 
+def _init_basis_params(
+    params: Dict[str, torch.Tensor],
+    *,
+    deform_cfg: Optional[Dict[str, Any]] = None,
+    total_timescale: Optional[int] = None,
+    **_: Any,
+) -> Dict[str, torch.Tensor]:
+    deform_cfg = deform_cfg or {}
+    nr_basis = int(deform_cfg.get('nr_basis', 10))
+    use_distributed = bool(deform_cfg.get('use_distributed_biases', False))
+    if total_timescale is None:
+        total_timescale = deform_cfg.get('total_timescale', None)
+    return initialize_deformations(
+        params,
+        nr_basis=nr_basis,
+        use_distributed_biases=use_distributed,
+        total_timescale=total_timescale,
+    )
+
+
+def _init_cv_params(
+    params: Dict[str, torch.Tensor],
+    **_: Any,
+) -> Dict[str, torch.Tensor]:
+    return initialize_cv_deformations(params)
+
+
+def _snapshot_simple(container: Any) -> Optional[Any]:
+    if isinstance(container, (list, tuple)):
+        snapshots = []
+        for frame_params in container:
+            if isinstance(frame_params, dict):
+                snapshots.append(
+                    _snapshot_by_keys(
+                        frame_params,
+                        ('means3D', 'unnorm_rotations', 'log_scales'),
+                    )
+                )
+        return snapshots
+    if isinstance(container, dict):
+        return _snapshot_by_keys(
+            container,
+            ('means3D', 'unnorm_rotations', 'log_scales'),
+        )
+    return None
+
+
+def _restore_simple(container: Any, snapshot: Optional[Any]) -> Any:
+    if snapshot is None:
+        return container
+    if isinstance(container, (list, tuple)) and isinstance(snapshot, list):
+        for params_dict, snap in zip(container, snapshot):
+            if isinstance(params_dict, dict) and isinstance(snap, dict):
+                _restore_by_keys(params_dict, snap)
+        return container
+    if isinstance(container, dict) and isinstance(snapshot, dict):
+        _restore_by_keys(container, snapshot)
+    return container
+
+
+def _build_simple_container(
+    base_params: Dict[str, torch.Tensor],
+    *,
+    num_frames: int,
+    per_frame_keys: Tuple[str, ...] = (
+        'means3D',
+        'unnorm_rotations',
+        'log_scales',
+        'logit_opacities',
+        'rgb_colors',
+    ),
+    **_: Any,
+) -> Any:
+    frame_params_list = []
+    for _ in range(num_frames):
+        frame_params: Dict[str, torch.Tensor] = {}
+        for key, value in base_params.items():
+            if key in per_frame_keys and isinstance(value, torch.Tensor):
+                cloned = torch.nn.Parameter(value.detach().clone(), requires_grad=value.requires_grad)
+                frame_params[key] = cloned
+            else:
+                frame_params[key] = value
+        frame_params_list.append(frame_params)
+    return frame_params_list
+
+
+def _finalize_simple(container: Any, **_: Any) -> Any:
+    if not isinstance(container, (list, tuple)) or len(container) == 0:
+        return container
+    params_save: Dict[str, Any] = {}
+    keys_to_stack = ('means3D', 'unnorm_rotations', 'log_scales', 'logit_opacities', 'rgb_colors')
+    for key in keys_to_stack:
+        params_save[key] = [frame[key] for frame in container]
+    ref = container[-1]
+    params_save['cam_unnorm_rots'] = ref.get('cam_unnorm_rots', None)
+    params_save['cam_trans'] = ref.get('cam_trans', None)
+    return params_save
+
+
+register_deformation_model(
+    DeformationModel(
+        name='gaussian',
+        apply=_apply_gaussian_model,
+        init_scene=_init_basis_params,
+        init_new=_init_basis_params,
+        snapshot=lambda params, **_: _snapshot_by_keys(
+            params,
+            ('deform_weights', 'deform_stds', 'deform_biases'),
+        ),
+        restore=lambda params, snap, **_: _restore_by_keys(params, snap),
+    )
+)
+
+register_deformation_model(
+    DeformationModel(
+        name='deformgs',
+        apply=lambda params, **kwargs: _apply_gaussian_model(
+            params,
+            detach_canonical=True,
+            **kwargs,
+        ),
+        init_scene=_init_basis_params,
+        init_new=_init_basis_params,
+        snapshot=lambda params, **_: _snapshot_by_keys(
+            params,
+            ('deform_weights', 'deform_stds', 'deform_biases'),
+        ),
+        restore=lambda params, snap, **_: _restore_by_keys(params, snap),
+    )
+)
+
+register_deformation_model(
+    DeformationModel(
+        name='cv',
+        apply=_apply_cv_model,
+        init_scene=_init_cv_params,
+        init_new=_init_cv_params,
+        snapshot=lambda params, **_: _snapshot_by_keys(
+            params,
+            ('cv_vel_xyz', 'cv_vel_log_scales', 'cv_angvel_aa'),
+        ),
+        restore=lambda params, snap, **_: _restore_by_keys(params, snap),
+    )
+)
+
+register_deformation_model(
+    DeformationModel(
+        name='endo4dgs',
+        apply=_apply_endo4dgs_model,
+        snapshot=_snapshot_endo4dgs,
+        restore=_restore_endo4dgs,
+        finalize=_finalize_endo4dgs,
+    )
+)
+
+register_deformation_model(
+    DeformationModel(
+        name='simple',
+        apply=_apply_simple_model,
+        snapshot=_snapshot_simple,
+        restore=_restore_simple,
+        build_container=_build_simple_container,
+        finalize=_finalize_simple,
+    )
+)
+
+
 def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis = 10,use_distributed_biases = False, total_timescale = None,use_deform = True,deform_type = 'gaussian',num_frames = 1,
                             random_initialization = False,init_scale = 0.1):
     num_pts = new_pt_cld.shape[0]
@@ -777,15 +1153,20 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, use_simplification,nr_basis
             'log_scales': torch.ones_like(torch.tensor(means3D),dtype=torch.float).cuda()*init_scale,
         }
     # print(f'num pts {num_pts}')
-    if use_deform and deform_type in ('gaussian', 'deformgs'):
-        params = initialize_deformations(
+    if use_deform:
+        deform_cfg = {
+            'nr_basis': nr_basis,
+            'use_distributed_biases': use_distributed_biases,
+            'total_timescale': total_timescale,
+            'num_frames': num_frames,
+        }
+        model = get_deformation_model(deform_type)
+        params = model.init_new(
             params,
-            nr_basis=nr_basis,
-            use_distributed_biases=use_distributed_biases,
-            total_timescale=total_timescale
+            deform_cfg=deform_cfg,
+            total_timescale=total_timescale,
+            num_frames=num_frames,
         )
-    elif use_deform and deform_type == 'cv':
-        params = initialize_cv_deformations(params)
     if not use_simplification:
         params['feature_rest'] = torch.zeros(num_pts, 45) # set SH degree 3 fixed
     for k, v in params.items():
@@ -904,7 +1285,7 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
                       nr_basis = 10,use_distributed_biases = False,total_timescale = None,use_grn=False,grn_model=None,
                       use_deform = True,deformation_type = 'gaussian',num_frames = 1,
                       random_initialization=False,init_scale=0.1,cam = None, reduce_gaussians = False,reduction_type = 'random',reduction_fraction = 0.5):
-    MAX_NEW_PER_FRAME = 8000  # hard cap to stop densification bursts from OOM'ing
+    MAX_NEW_PER_FRAME = 2000  # hard cap to stop densification bursts from OOM'ing
     # Silhouette Rendering
     if use_deform == True:
         local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(params,time_idx,True,deformation_type =deformation_type)
@@ -917,11 +1298,25 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
     
     transformed_pts = transform_to_frame(local_means,params, time_idx, gaussians_grad=False, camera_grad=False)
     if not use_grn:
-        depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
-                                                                    transformed_pts,local_rots,local_scales,local_opacities)
+        depth_sil_rendervar = transformed_params2depthplussilhouette(
+            params,
+            curr_data['w2c'],
+            transformed_pts,
+            local_rots,
+            local_scales,
+            local_opacities,
+            camera_space=True,
+        )
     else:
-        depth_sil_rendervar = transformed_GRNparams2depthplussilhouette(params, curr_data['w2c'],
-                                                                    transformed_pts,local_rots,local_scales,local_opacities)
+        depth_sil_rendervar = transformed_GRNparams2depthplussilhouette(
+            params,
+            curr_data['w2c'],
+            transformed_pts,
+            local_rots,
+            local_scales,
+            local_opacities,
+            camera_space=True,
+        )
     depth_sil, _, _ = Renderer(raster_settings=curr_data['cam'])(**depth_sil_rendervar)
     silhouette = depth_sil[1, :, :]
     non_presence_sil_mask = (silhouette < sil_thres)
@@ -972,6 +1367,7 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
         non_presence_mask = non_presence_mask & valid_depth_mask.reshape(-1)
         valid_color_mask = energy_mask(curr_data['im']).squeeze()
         non_presence_mask = non_presence_mask & valid_color_mask.reshape(-1)        
+        point_indices = torch.nonzero(non_presence_mask, as_tuple=False).squeeze(-1)
         new_pt_cld, mean3_sq_dist = get_pointcloud(curr_data['im'], curr_data['depth'], curr_data['intrinsics'], 
                                     curr_w2c, mask=non_presence_mask, compute_mean_sq_dist=True,
                                     mean_sq_dist_method=mean_sq_dist_method)
@@ -980,6 +1376,7 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
             keep_idx = torch.randperm(candidate_new, device=new_pt_cld.device)[:MAX_NEW_PER_FRAME]
             new_pt_cld = new_pt_cld[keep_idx]
             mean3_sq_dist = mean3_sq_dist[keep_idx]
+            point_indices = point_indices[keep_idx]
             print(f"[densify] capping per-frame additions from {candidate_new} to {MAX_NEW_PER_FRAME}")
         original_new = new_pt_cld.shape[0]
         print("Adding {} new gaussians".format(original_new))
@@ -997,6 +1394,7 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
             new_pt_cld = new_pt_cld[sort_idx]
             mean3_sq_dist = mean3_sq_dist[sort_idx]
             n_new = max_new
+            point_indices = point_indices[sort_idx]
             print(f'[densify] clipped from {original_new} to {max_new}')
 
         effective_nr_basis = nr_basis
@@ -1019,7 +1417,10 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
         #         new_params['bloated_params'] = torch.zeros(new_pt_cld.shape[0],1,device='cuda')
         #         # params_list = params
         if use_grn:
-            new_params = grn_initialization(grn_model,new_params,new_pt_cld,mean3_sq_dist,curr_data['im'],curr_data['depth'],non_presence_mask,cam = cam)
+            selected_mask = torch.zeros_like(non_presence_mask, dtype=torch.bool)
+            if point_indices.numel() > 0:
+                selected_mask[point_indices] = True
+            new_params = grn_initialization(grn_model,new_params,new_pt_cld,mean3_sq_dist,curr_data['im'],curr_data['depth'],selected_mask,cam = cam)
 
         if 'logit_opacities' in new_params:
             with torch.no_grad():
@@ -1040,6 +1441,8 @@ def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx, mean_sq
             params_iter[k] = torch.nn.Parameter(combined)
         params_iter['cam_unnorm_rots'] = params['cam_unnorm_rots']
         params_iter['cam_trans'] = params['cam_trans']
+        if 'endo4dgs_net' in params:
+            params_iter['endo4dgs_net'] = params['endo4dgs_net']
         num_pts = params_iter['means3D'].shape[0]
         variables['means2D_gradient_accum'] = torch.zeros(num_pts, device="cuda").float()
         variables['denom'] = torch.zeros(num_pts, device="cuda").float()

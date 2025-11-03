@@ -24,6 +24,14 @@ def params2cpu(params):
     for k, v in params.items():
         if isinstance(v, torch.Tensor):
             res[k] = v.detach().cpu().contiguous().numpy()
+        elif isinstance(v, torch.nn.Module):
+            state = {name: param.detach().cpu().numpy() for name, param in v.state_dict().items()}
+            res[f"{k}_state"] = np.array([state], dtype=object)
+            meta = {
+                'in_dim': getattr(v, 'input_dim', getattr(v, 'in_features', None)),
+                'hidden': getattr(v, 'hidden_dim', getattr(v, 'out_features', None)),
+            }
+            res[f"{k}_meta"] = np.array([meta], dtype=object)
         elif isinstance(v, list):
             res[k] = [x.detach().cpu().contiguous().numpy() if isinstance(x, torch.Tensor) else x for x in v]
         else:

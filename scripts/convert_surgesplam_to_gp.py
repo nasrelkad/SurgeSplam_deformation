@@ -36,7 +36,7 @@ def convert_surgesplam_to_gp(surge_root: str, gp_root: str):
 
     # 3) Load parameters from params.npz
     params_path = os.path.join(surge_root, "params.npz")
-    data = np.load(params_path)
+    data = np.load(params_path, allow_pickle=True)
 
     # Sparse Gaussian centers
     means = data['means3D']   # shape (N,3)

@@ -120,13 +120,27 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
     # Initialize Render Variables
     if not GRN_input:
         rendervar = transformed_params2rendervar(params, transformed_pts,params['unnorm_rotations'],params['log_scales'],params['logit_opacities'],params['rgb_colors'])
-        depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
-                                                                    transformed_pts,params['unnorm_rotations'],params['log_scales'],params['logit_opacities'])
+        depth_sil_rendervar = transformed_params2depthplussilhouette(
+            params,
+            curr_data['w2c'],
+            transformed_pts,
+            params['unnorm_rotations'],
+            params['log_scales'],
+            params['logit_opacities'],
+            camera_space=True,
+        )
     else:
         # raise NotImplementedError('Not implemented yet')
         rendervar = transformed_GRNparams2rendervar(params,transformed_pts,params['unnorm_rotations'],params['log_scales'],params['logit_opacities'],params['rgb_colors'])
-        depth_sil_rendervar = transformed_GRNparams2depthplussilhouette(params, curr_data['w2c'],
-                                                            transformed_pts,params['unnorm_rotations'],params['log_scales'],params['logit_opacities'])
+        depth_sil_rendervar = transformed_GRNparams2depthplussilhouette(
+            params,
+            curr_data['w2c'],
+            transformed_pts,
+            params['unnorm_rotations'],
+            params['log_scales'],
+            params['logit_opacities'],
+            camera_space=True,
+        )
     
     # Visualize the Rendered Images
     # online_render(curr_data, iter_time_idx, rendervar, dev_use_controller=False)
