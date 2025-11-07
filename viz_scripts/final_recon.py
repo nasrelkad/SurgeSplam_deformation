@@ -18,7 +18,7 @@ from diff_gaussian_rasterization import GaussianRasterizationSettings as Camera
 
 from utils.common_utils import seed_everything
 from utils.recon_helpers import setup_camera
-from utils.slam_helpers import get_depth_and_silhouette
+from utils.slam_helpers import get_depth_and_silhouette, deform_gaussians as deform_gaussians_orig
 from utils.slam_external import build_rotation
 
 
@@ -207,32 +207,30 @@ def load_scene_data(scene_path, first_frame_w2c, intrinsics, time_idx,deformatio
     all_params = dict(np.load(scene_path, allow_pickle=True))
     intrinsics = torch.tensor(intrinsics).cuda().float()
     first_frame_w2c = torch.tensor(first_frame_w2c).cuda().float()
-    try:
-        all_params = {k: torch.tensor(all_params[k]).cuda().float() for k in all_params.keys()}
 
+    meta_keys = {
+        'org_width', 'org_height', 'w2c', 'intrinsics',
+        'gt_w2c_all_frames', 'keyframe_time_indices'
+    }
 
-        keys = [k for k in all_params.keys() if
-                k not in ['org_width', 'org_height', 'w2c', 'intrinsics', 
-                        'gt_w2c_all_frames', 'cam_unnorm_rots',
-                        'cam_trans', 'keyframe_time_indices']]
+    def _to_cuda_tensor(value):
+        tensor = torch.as_tensor(value, device='cuda')
+        return tensor.float() if tensor.is_floating_point() else tensor
 
-        params = all_params
-        for k in keys:
-            if not isinstance(all_params[k], torch.Tensor):
-                params[k] = torch.tensor(all_params[k]).cuda().float()
-            else:
-                params[k] = all_params[k].cuda().float()
-    except:
-        # keys = [k for k in all_params.keys() if
-        #         k not in ['org_width', 'org_height', 'w2c', 'intrinsics', 
-        #                 'gt_w2c_all_frames', 'cam_unnorm_rots',
-        #                 'cam_trans', 'keyframe_time_indices']]
-        params={}
-        for key in all_params.keys():
-            try:
-                params[key] = torch.tensor(all_params[key]).cuda()
-            except:
-                params[key] = [torch.tensor(all_params[key][i]).cuda() for i in range(all_params[key].shape[0])]
+    params = {}
+    for key, value in all_params.items():
+        if isinstance(value, np.ndarray) and value.dtype == np.object_:
+            # Preserve stored Python objects (e.g., graph_conf dicts)
+            params[key] = value.item() if value.shape == () else value.tolist()
+            continue
+        if key in meta_keys:
+            params[key] = value
+            continue
+        if isinstance(value, torch.Tensor):
+            tensor = value.cuda()
+            params[key] = tensor.float() if tensor.is_floating_point() else tensor
+        else:
+            params[key] = _to_cuda_tensor(value)
 
     all_w2cs = []
     num_t = params['cam_unnorm_rots'].shape[-1]
@@ -246,7 +244,7 @@ def load_scene_data(scene_path, first_frame_w2c, intrinsics, time_idx,deformatio
         
 
 
-    local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(params,time_idx,False,deformation_type=deformation_type)
+    local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians_orig(params,time_idx,False,deformation_type=deformation_type)
     transformed_pts = local_means
 
     rendervar = {
@@ -277,7 +275,7 @@ def load_scene_data(scene_path, first_frame_w2c, intrinsics, time_idx,deformatio
 
 def deform_and_render(params,time_idx,deformation_type,w2c):
     w2c = torch.tensor(w2c).cuda().float()
-    local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians(params,time_idx,False,deformation_type=deformation_type)
+    local_means,local_rots,local_scales,local_opacities,local_colors = deform_gaussians_orig(params,time_idx,False,deformation_type=deformation_type)
     transformed_pts = local_means
 
     rendervar = {
