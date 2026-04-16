@@ -93,7 +93,6 @@ The codebase is structured around endoscopic datasets and includes references to
 - **C3VD**
 - other endoscopic / surgical datasets via dataset loaders in `datasets/`
 
-The clearest out-of-the-box path appears to be **C3VD**.
 
 ---
 
