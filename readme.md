@@ -13,6 +13,7 @@ This repository is a research-oriented fork built around a **SurgeSplat / EndoGS
 ---
 
 ## Overview
+<img width="514" height="202" alt="image" src="https://github.com/user-attachments/assets/8b7eaa84-7524-4680-8bde-bca3fc074a67" />
 
 `SurgeSplam_deformation` extends a Gaussian-splatting reconstruction workflow toward **non-rigid / deformable scenes**, which is especially relevant for endoscopy and surgical video where tissue motion, camera motion, and partial observability happen at the same time.
 
